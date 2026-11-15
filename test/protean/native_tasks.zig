@@ -4213,11 +4213,13 @@ pub const FairApplication = struct {
 };
 const FairCapture = struct {
     var preparations: usize = 0;
+    var acquisitions: usize = 0;
     fn prepare(ctx: native.registry.ProjectionContext, payload: []const u8) ![]u8 {
         preparations += 1;
         return ctx.allocator.dupe(u8, payload);
     }
     fn acquire(ctx: native.Context, _: []const u8) !native.registry.Acquisition {
+        acquisitions += 1;
         return .{ .captured = try protean.contracts.encodeOwned(u32, ctx.allocator, 99) };
     }
     fn interpret(
@@ -4233,6 +4235,63 @@ const FairCapture = struct {
     }
 };
 
+test "public session owns worker lifetime and publishes acquired results" {
+    var fixture: FairSchedulingFixture = .{};
+    defer fixture.deinit();
+    try fixture.initAssets();
+    try fixture.initHandlers();
+    try fixture.initOwner();
+    var session = try native.Session(FairTypes).init(&fixture.service);
+    defer session.deinit() catch @panic("session left busy");
+    try std.testing.expectError(error.Busy, native.Session(FairTypes).init(&fixture.service));
+    try std.testing.expectError(error.Busy, fixture.service.close(fixture.a));
+    const accepted = try fixture.service.submit(fixture.frame, "session-read", 1);
+    var found = (try fixture.service.operationLookup(fixture.frame, "session-read")).?;
+    defer found.deinit();
+    try std.testing.expectEqual(accepted.receipt.task, found.value.task);
+    var input = (try fixture.service.applicationValue(
+        fixture.frame,
+        accepted.receipt.task,
+        .input,
+    )).?;
+    defer input.deinit();
+    try std.testing.expectEqual(.contract, input.encoding);
+    var decoded = try protean.contracts.decodeOwned(u32, fixture.frame, input.bytes);
+    defer decoded.deinit();
+    try std.testing.expectEqual(1, decoded.value);
+    try std.testing.expectError(
+        error.OperationConflict,
+        fixture.service.submit(fixture.frame, "session-read", 2),
+    );
+    fixture.service.dispatch_gate = .held;
+    for (0..8) |_| _ = try session.tick(fixture.frame);
+    try std.testing.expectEqual(0, FairCapture.acquisitions);
+    try std.testing.expect(!session.busy());
+    fixture.service.dispatch_gate = .unrestricted;
+    const deadline = std.Io.Clock.awake.now(fixture.io).toMilliseconds() + 5000;
+    while (std.Io.Clock.awake.now(fixture.io).toMilliseconds() < deadline) {
+        _ = try session.tick(fixture.frame);
+        var value = try fixture.service.task(fixture.frame, accepted.receipt.task);
+        defer value.deinit();
+        if (value.value.terminal()) {
+            try std.testing.expectEqual(.completed, value.value.outcome_kind);
+            try std.testing.expect(!session.busy());
+            try std.testing.expectEqual(1, FairCapture.acquisitions);
+            var output = (try fixture.service.applicationValue(
+                fixture.frame,
+                accepted.receipt.task,
+                .result,
+            )).?;
+            defer output.deinit();
+            try std.testing.expectEqual(.json, output.encoding);
+            try std.testing.expectEqualStrings("99", output.bytes);
+            try session.park(fixture.frame);
+            return;
+        }
+    }
+    return error.SessionDidNotComplete;
+}
+
 test "round robin progresses peers and cancellation while one worker is held" {
     var fixture: FairSchedulingFixture = .{};
     defer fixture.deinit();
@@ -4247,6 +4306,136 @@ test "round robin progresses peers and cancellation while one worker is held" {
     try fixture.finishWorker();
     try fixture.resumeRound();
     try fixture.recoverFenced();
+}
+
+test "public session task pages preserve scoped ownership and cursor progress" {
+    var fixture: FairSchedulingFixture = .{};
+    defer fixture.deinit();
+    try fixture.initAssets();
+    try fixture.initHandlers();
+    try fixture.initOwner();
+    const first = try fixture.service.submit(fixture.frame, "page-first", 1);
+    const second = try fixture.service.submit(fixture.frame, "page-second", 2);
+    const principal = fixture.service.profile.authority.principal;
+    fixture.service.profile.authority.principal = "different-page-principal";
+    _ = try fixture.service.submit(fixture.frame, "page-foreign", 3);
+    try std.testing.expect(
+        (try fixture.service.operationLookup(fixture.frame, "page-first")) == null,
+    );
+    fixture.service.profile.authority.principal = principal;
+    try std.testing.expectError(
+        error.InvalidParams,
+        fixture.service.taskPage(fixture.frame, null, 0),
+    );
+    var cursor: ?native.testing.state.TaskId = null;
+    var observed: [2]native.testing.state.TaskId = undefined;
+    var count: usize = 0;
+    for (0..4) |_| {
+        var page = try fixture.service.taskPage(fixture.a, cursor, 1);
+        defer page.deinit();
+        try std.testing.expect(page.tasks.len <= 1);
+        for (page.tasks) |id| {
+            try std.testing.expect(count < observed.len);
+            observed[count] = id;
+            count += 1;
+        }
+        if (page.next) |next| {
+            if (cursor) |previous| {
+                try std.testing.expect(std.mem.order(u8, &previous, &next) == .lt);
+            }
+            cursor = next;
+        } else break;
+    } else return error.TaskPageDidNotTerminate;
+    try std.testing.expectEqual(2, count);
+    try std.testing.expect(std.mem.order(u8, &observed[0], &observed[1]) == .lt);
+    for ([_]native.testing.state.TaskId{ first.receipt.task, second.receipt.task }) |expected| {
+        try std.testing.expect(std.meta.eql(expected, observed[0]) or
+            std.meta.eql(expected, observed[1]));
+    }
+    try std.testing.checkAllAllocationFailures(fixture.a, checkOwnedTaskPage, .{&fixture.service});
+}
+
+fn checkOwnedTaskPage(a: std.mem.Allocator, service: *native.tasks.Service(FairTypes)) !void {
+    var page = try service.taskPage(a, null, 3);
+    defer page.deinit();
+    try std.testing.expectEqual(2, page.tasks.len);
+}
+
+test "public session gates computed effects using durably admitted controls" {
+    var fixture: FairSchedulingFixture = .{};
+    defer fixture.deinit();
+    try fixture.initAssets();
+    try fixture.initHandlers();
+    try fixture.initOwner();
+    fixture.service.dispatch_gate = .{ .selected = .{
+        .context = &fixture.service,
+        .permits = admissionReceiptGate,
+    } };
+    const accepted = try fixture.service.submit(fixture.frame, "gated-read", 1);
+    try std.testing.expectEqual(.progressed, try fixture.service.pump(fixture.frame));
+    _ = try fixture.service.submit(fixture.frame, "gate-pause", 4);
+    for (0..8) |_| try std.testing.expect(try fixture.service.pump(fixture.frame) != .work);
+    try std.testing.expectEqual(0, try fixture.namespace.store.capabilityAttempts(
+        accepted.receipt.task,
+        "fair.leaf.v1",
+    ));
+    try fixture.service.close(fixture.frame);
+    fixture.service_live = false;
+    try fixture.namespace.close();
+    fixture.namespace_live = false;
+    fixture.namespace = try native.Namespace.open(fixture.a, fixture.io, fixture.path);
+    fixture.namespace_live = true;
+    fixture.service = try native.tasks.Service(FairTypes).init(
+        fixture.a,
+        fixture.io,
+        &fixture.namespace,
+        fixture.assets,
+        &fixture.application,
+        fixture.handlers,
+        fixture.profile,
+    );
+    fixture.service_live = true;
+    fixture.service.dispatch_gate = .{ .selected = .{
+        .context = &fixture.service,
+        .permits = admissionReceiptGate,
+    } };
+    var task = try fixture.service.task(fixture.frame, accepted.receipt.task);
+    defer task.deinit();
+    _ = try fixture.service.resumeTask(
+        fixture.frame,
+        "gated-read-resume",
+        accepted.receipt.task,
+        task.value.revision,
+    );
+    for (0..8) |_| try std.testing.expect(try fixture.service.pump(fixture.frame) != .work);
+    _ = try fixture.service.submit(fixture.frame, "gate-resume", 4);
+    for (0..8) |_| {
+        const progress = try fixture.service.pump(fixture.frame);
+        if (progress != .work) continue;
+        try std.testing.expectEqual(accepted.receipt.task, progress.work.task);
+        try fixture.service.acquire(
+            fixture.frame,
+            progress.work,
+            try protean.contracts.encodeOwned(u32, fixture.frame, 99),
+        );
+        return;
+    }
+    return error.EligibleWorkDidNotResume;
+}
+
+fn admissionReceiptGate(
+    context: *anyopaque,
+    a: std.mem.Allocator,
+    request: native.tasks.DispatchRequest,
+) !bool {
+    const service: *native.tasks.Service(FairTypes) = @ptrCast(@alignCast(context));
+    try std.testing.expectEqual(.acquisition, request.kind);
+    try std.testing.expectEqualStrings("fair.leaf.v1", request.capability);
+    var pause = (try service.operationLookup(a, "gate-pause")) orelse return true;
+    defer pause.deinit();
+    var resume_receipt = (try service.operationLookup(a, "gate-resume")) orelse return false;
+    defer resume_receipt.deinit();
+    return true;
 }
 
 const FairSchedulingFixture = struct {
@@ -4328,6 +4517,7 @@ const FairSchedulingFixture = struct {
 
     fn initAssets(self: *@This()) !void {
         FairCapture.preparations = 0;
+        FairCapture.acquisitions = 0;
         self.compiled = try protean.compile(
             self.a,
             protean.system(.{

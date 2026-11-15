@@ -9,10 +9,10 @@
     },
     .minimum_zig_version = "0.17.1",
     .paths = .{
-        "LICENSE",                               "README.md",                                   "build.zig",        "build_protean.zig",        "build_native.zig",         "build.zig.zon",
-        "src",                                   "runtime/native",                              "tools/native",     "tools/check_zig_paths.sh", "repo_zig_paths.txt",       "examples/adaptive",
-        "conformance/protean",                   "docs",                                        "test/protean",     "test/support",             "test/authoring_tests.zig", "test/consumers/adaptive/build.zig",
-        "test/consumers/adaptive/build.zig.zon", "test/consumers/adaptive/package_surface.zig", "tools/evaluation",
+        "LICENSE",                               "README.md",                                   "build.zig",                         "build_protean.zig",        "build_native.zig",         "build.zig.zon",
+        "src",                                   "runtime/native",                              "tools/native",                      "tools/check_zig_paths.sh", "repo_zig_paths.txt",       "examples/adaptive",
+        "conformance/protean",                   "docs",                                        "test/protean",                      "test/support",             "test/authoring_tests.zig", "test/consumers/adaptive/build.zig",
+        "test/consumers/adaptive/build.zig.zon", "test/consumers/adaptive/package_surface.zig", "test/consumers/adaptive/entry.zig", "tools/evaluation",
     },
     .fingerprint = 0x50216bba84371874,
 }

@@ -35,6 +35,7 @@ runtime/native/identity.zig
 runtime/native/inbox.zig
 runtime/native/json.zig
 runtime/native/namespace.zig
+runtime/native/namespace_audit.zig
 runtime/native/occurrence.zig
 runtime/native/placement.zig
 runtime/native/placement_configuration.zig
@@ -54,6 +55,7 @@ runtime/native/responses_sse.zig
 runtime/native/retention.zig
 runtime/native/root.zig
 runtime/native/schemas.zig
+runtime/native/session.zig
 runtime/native/siwc.zig
 runtime/native/siwc_process.zig
 runtime/native/siwc_protocol.zig
@@ -143,6 +145,7 @@ src/model_interpretation.zig
 src/model_invocation.zig
 src/model_invocation_tests.zig
 src/model_json.zig
+src/notification.zig
 src/participant.zig
 src/prompt.zig
 src/protean.zig
@@ -156,6 +159,7 @@ src/tools.zig
 src/workspace_contracts.zig
 test/authoring_tests.zig
 test/consumers/adaptive/build.zig
+test/consumers/adaptive/entry.zig
 test/consumers/adaptive/package_surface.zig
 test/protean/adaptive_controls.zig
 test/protean/adaptive_recovery.zig
@@ -179,6 +183,7 @@ test/protean/model_unknown_field.zig
 test/protean/model_unknown_parameter.zig
 test/protean/model_unsupported_codec.zig
 test/protean/native_adaptive_tests.zig
+test/protean/native_notification.zig
 test/protean/native_owner_tests.zig
 test/protean/native_recovery_crash.zig
 test/protean/native_responses.zig
@@ -186,6 +191,7 @@ test/protean/native_scheduler_benchmark.zig
 test/protean/native_tasks.zig
 test/protean/native_test_support.zig
 test/protean/native_tests.zig
+test/protean/notification.zig
 test/protean/participant.zig
 test/protean/projection_failure_tests.zig
 test/protean/projection_late_recovery.zig

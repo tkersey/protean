@@ -5,6 +5,9 @@ const std = @import("std");
 const sqlite = @import("sqlite.zig");
 const journal = @import("store.zig");
 const c = @import("native_c");
+pub const AuditReport = @import("namespace_audit.zig").Report;
+pub const ApplicationDecoder = @import("namespace_audit.zig").Decoder;
+pub const ApplicationAuditValue = @import("namespace_audit.zig").Value;
 
 fn regular(fd: c_int) !c.struct_protean_native_stat {
     var stat: c.struct_protean_native_stat = undefined;
@@ -180,6 +183,64 @@ pub const Namespace = struct {
     store: journal.Store,
     identity: [32]u8,
 
+    pub fn audit(
+        a: std.mem.Allocator,
+        io: std.Io,
+        path: []const u8,
+        handlers: @import("registry.zig").Registry,
+        decoder: ?ApplicationDecoder,
+    ) !AuditReport {
+        var owner = try openReadOnly(a, io, path);
+        defer owner.close() catch |err| {
+            std.log.err("namespace audit cleanup failed: {s}", .{@errorName(err)});
+        };
+        return @import("namespace_audit.zig").verify(&owner.store, handlers, decoder);
+    }
+
+    fn openReadOnly(a: std.mem.Allocator, io: std.Io, path: []const u8) !Namespace {
+        const dir = try openDirectory(a, path, false, true);
+        errdefer _ = c.close(dir);
+        _ = try inspectDirectory(a, io, dir, false);
+        const lock = try openFile(dir, "owner.lock", c.O_RDONLY);
+        errdefer _ = c.close(lock);
+        if (c.flock(lock, c.LOCK_EX | c.LOCK_NB) != 0) return error.Busy;
+        _ = try inspectDirectory(a, io, dir, true);
+        var stat: c.struct_protean_native_stat = undefined;
+        if (c.protean_native_fstat(dir, &stat) != 0) return error.StorageUnavailable;
+        const identity_file = try openFile(dir, "identity", c.O_RDONLY);
+        defer _ = c.close(identity_file);
+        var identity_bytes: [64]u8 = undefined;
+        try readExact(identity_file, &identity_bytes);
+        const identity = try validateIdentity(identity_bytes, stat);
+        const database_file = try openFile(dir, "state.sqlite", c.O_RDONLY);
+        defer _ = c.close(database_file);
+        const name = try std.fmt.allocPrint(a, "{s}/state.sqlite", .{path});
+        defer a.free(name);
+        const database = try sqlite.Database.openReadOnly(a, name);
+        errdefer {
+            database.close() catch |err| {
+                std.log.err("namespace audit database cleanup failed: {s}", .{@errorName(err)});
+            };
+            database.destroy() catch |err| {
+                std.log.err("namespace audit database destruction failed: {s}", .{@errorName(err)});
+            };
+        }
+        var store = try journal.Store.initReadOnly(a, database, identity);
+        errdefer store.deinit();
+        try store.beginReadOnly();
+        errdefer store.rollback();
+        var self: Namespace = .{
+            .allocator = a,
+            .directory = dir,
+            .lock = lock,
+            .database = database,
+            .store = store,
+            .identity = identity,
+        };
+        if (try self.sealNeedsRecovery()) return error.RecoveryRequired;
+        return self;
+    }
+
     pub fn open(a: std.mem.Allocator, io: std.Io, path: []const u8) !Namespace {
         const dir = try openDirectory(a, path, true, true);
         errdefer _ = c.close(dir);
@@ -269,46 +330,54 @@ pub const Namespace = struct {
             try writeExact(identity_file, &identity_bytes);
         } else {
             try readExact(identity_file, &identity_bytes);
-            if (!std.mem.eql(u8, identity_bytes[0..8], "AGNNS001") or
-                std.mem.readInt(u64, identity_bytes[40..48], .little) != stat.st_dev or
-                std.mem.readInt(u64, identity_bytes[48..56], .little) != stat.st_ino or
-                std.mem.readInt(
-                    u64,
-                    identity_bytes[56..64],
-                    .little,
-                ) != stat.st_uid) return error.ForeignNamespace;
+            _ = try validateIdentity(identity_bytes, stat);
         }
         return .{ .identity = identity_bytes[8..40].*, .fresh = fresh };
+    }
+
+    fn validateIdentity(bytes: [64]u8, stat: c.struct_protean_native_stat) ![32]u8 {
+        if (!std.mem.eql(u8, bytes[0..8], "AGNNS001") or
+            std.mem.readInt(u64, bytes[40..48], .little) != stat.st_dev or
+            std.mem.readInt(u64, bytes[48..56], .little) != stat.st_ino or
+            std.mem.readInt(u64, bytes[56..64], .little) != stat.st_uid)
+        {
+            return error.ForeignNamespace;
+        }
+        return bytes[8..40].*;
     }
 
     fn restoreSeal(self: *Namespace, fresh: bool) !void {
         if (fresh) {
             try self.seal();
-        } else {
-            const seal_fd = try openFile(self.directory, "seal", c.O_RDONLY);
-            defer _ = c.close(seal_fd);
-            var bytes: [80]u8 = undefined;
-            try readExact(seal_fd, &bytes);
-            if (!std.mem.eql(u8, bytes[0..8], "AGNHD001")) return error.CorruptState;
-            const generation = std.mem.readInt(u64, bytes[8..16], .little);
-            const current = self.store.head;
-            if (generation == current.generation) {
-                if (!std.mem.eql(u8, bytes[16..48], &current.parent) or !std.mem.eql(
-                    u8,
-                    bytes[48..80],
-                    &current.digest,
-                )) return error.CorruptState;
-            } else if (generation < std.math.maxInt(
-                u64,
-            ) and generation + 1 == current.generation and std.mem.eql(
+        } else if (try self.sealNeedsRecovery()) {
+            try self.seal();
+        }
+    }
+
+    fn sealNeedsRecovery(self: *Namespace) !bool {
+        const seal_fd = try openFile(self.directory, "seal", c.O_RDONLY);
+        defer _ = c.close(seal_fd);
+        var bytes: [80]u8 = undefined;
+        try readExact(seal_fd, &bytes);
+        if (!std.mem.eql(u8, bytes[0..8], "AGNHD001")) return error.CorruptState;
+        const generation = std.mem.readInt(u64, bytes[8..16], .little);
+        const current = self.store.head;
+        if (generation == current.generation) {
+            if (!std.mem.eql(u8, bytes[16..48], &current.parent) or !std.mem.eql(
                 u8,
                 bytes[48..80],
-                &current.parent,
-            )) {
-                // Process died after SQLite commit, before seal publication.
-                try self.seal();
-            } else return error.RollbackDetected;
-        }
+                &current.digest,
+            )) return error.CorruptState;
+        } else if (generation < std.math.maxInt(
+            u64,
+        ) and generation + 1 == current.generation and std.mem.eql(
+            u8,
+            bytes[48..80],
+            &current.parent,
+        )) {
+            return true;
+        } else return error.RollbackDetected;
+        return false;
     }
 
     fn seal(self: *Namespace) !void {
@@ -349,6 +418,207 @@ pub const Namespace = struct {
         self.* = undefined;
     }
 };
+
+fn auditSnapshot(a: std.mem.Allocator, path: []const u8) ![32]u8 {
+    const dir = try openDirectory(a, path, false, true);
+    defer _ = c.close(dir);
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    for ([_][:0]const u8{
+        "owner.lock",
+        "identity",
+        "state.sqlite",
+        "state.sqlite-journal",
+        "seal",
+        "seal.next",
+    }) |name| {
+        hash.update(name);
+        const fd = openFile(dir, name, c.O_RDONLY) catch |err| switch (err) {
+            error.FileNotFound => {
+                hash.update(&.{0});
+                continue;
+            },
+            else => return err,
+        };
+        defer _ = c.close(fd);
+        hash.update(&.{1});
+        const stat = try regular(fd);
+        const bytes = try a.alloc(u8, @intCast(stat.st_size));
+        defer a.free(bytes);
+        try readExact(fd, bytes);
+        hash.update(bytes);
+    }
+    var digest: [32]u8 = undefined;
+    hash.final(&digest);
+    return digest;
+}
+
+test "namespace read-only audit preserves bytes and refuses missing paths and live ownership" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var buffer: [4096]u8 = undefined;
+    const length = try temporary.dir.realPath(io, &buffer);
+    const path = try std.fmt.allocPrint(a, "{s}/audit", .{buffer[0..length]});
+    defer a.free(path);
+    var handlers = try @import("registry.zig").Registry.init(a, &.{});
+    defer handlers.deinit();
+    try std.testing.expectError(
+        error.UnsafeStatePath,
+        Namespace.audit(a, io, path, handlers, null),
+    );
+    const missing = c.openat(temporary.dir.handle, "audit", c.O_RDONLY | c.O_DIRECTORY);
+    if (missing >= 0) _ = c.close(missing);
+    try std.testing.expect(missing < 0 and std.c.errno(missing) == .NOENT);
+    var owner = try Namespace.open(a, io, path);
+    var live = true;
+    defer if (live) owner.close() catch |err| {
+        std.debug.panic("test namespace cleanup failed: {s}", .{@errorName(err)});
+    };
+    try std.testing.expectError(error.Busy, Namespace.audit(a, io, path, handlers, null));
+    try owner.close();
+    live = false;
+    const before = try auditSnapshot(a, path);
+    const report = try Namespace.audit(a, io, path, handlers, null);
+    try std.testing.expectEqual(0, report.tasks);
+    try std.testing.expectEqual(.not_assessed, report.application_readability);
+    try std.testing.expectEqual(.not_assessed, report.continuation_compatibility);
+    try std.testing.expectEqualSlices(u8, &before, &try auditSnapshot(a, path));
+}
+
+test "namespace read-only audit preserves seal gaps for normal recovery" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var buffer: [4096]u8 = undefined;
+    const length = try temporary.dir.realPath(io, &buffer);
+    const path = try std.fmt.allocPrint(a, "{s}/audit-gap", .{buffer[0..length]});
+    defer a.free(path);
+    var owner = try Namespace.open(a, io, path);
+    var live = true;
+    defer if (live) owner.close() catch |err| {
+        std.debug.panic("test namespace cleanup failed: {s}", .{@errorName(err)});
+    };
+    try owner.store.begin();
+    _ = try owner.store.commit("unsealed");
+    try owner.close();
+    live = false;
+    const before = try auditSnapshot(a, path);
+    var handlers = try @import("registry.zig").Registry.init(a, &.{});
+    defer handlers.deinit();
+    try std.testing.expectError(
+        error.RecoveryRequired,
+        Namespace.audit(a, io, path, handlers, null),
+    );
+    try std.testing.expectEqualSlices(u8, &before, &try auditSnapshot(a, path));
+    owner = try Namespace.open(a, io, path);
+    live = true;
+    try std.testing.expectEqual(1, owner.store.head.generation);
+    try owner.close();
+    live = false;
+    _ = try Namespace.audit(a, io, path, handlers, null);
+}
+
+test "namespace read-only audit leaves incompatible native state untouched" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var buffer: [4096]u8 = undefined;
+    const length = try temporary.dir.realPath(io, &buffer);
+    const path = try std.fmt.allocPrint(a, "{s}/audit-format", .{buffer[0..length]});
+    defer a.free(path);
+    var owner = try Namespace.open(a, io, path);
+    var live = true;
+    defer if (live) owner.close() catch |err| {
+        std.debug.panic("test namespace cleanup failed: {s}", .{@errorName(err)});
+    };
+    try owner.database.exec("PRAGMA ignore_check_constraints=ON; UPDATE meta SET format=0;");
+    try owner.close();
+    live = false;
+    const before = try auditSnapshot(a, path);
+    var handlers = try @import("registry.zig").Registry.init(a, &.{});
+    defer handlers.deinit();
+    try std.testing.expectError(
+        error.UnsupportedStateFormat,
+        Namespace.audit(a, io, path, handlers, null),
+    );
+    try std.testing.expectEqualSlices(u8, &before, &try auditSnapshot(a, path));
+}
+
+fn crashWithHotJournal(path: [:0]const u8) noreturn {
+    var database: ?*c.sqlite3 = null;
+    if (c.sqlite3_open_v2(path.ptr, &database, c.SQLITE_OPEN_READWRITE, null) != c.SQLITE_OK)
+        c._exit(11);
+    const handle = database orelse c._exit(12);
+    if (c.sqlite3_exec(
+        handle,
+        "PRAGMA synchronous=FULL; BEGIN IMMEDIATE; UPDATE meta SET generation=1;",
+        null,
+        null,
+        null,
+    ) != c.SQLITE_OK) c._exit(13);
+    if (c.sqlite3_db_cacheflush(handle) != c.SQLITE_OK) c._exit(14);
+    c._exit(0);
+}
+
+fn createHotJournal(a: std.mem.Allocator, io: std.Io, path: []const u8) !void {
+    const name = try std.fmt.allocPrintSentinel(a, "{s}/state.sqlite", .{path}, 0);
+    defer a.free(name);
+    const pid = c.fork();
+    if (pid < 0) return error.StorageUnavailable;
+    if (pid == 0) crashWithHotJournal(name);
+    var child: std.process.Child = .{
+        .id = pid,
+        .thread_handle = {},
+        .stdin = null,
+        .stdout = null,
+        .stderr = null,
+        .request_resource_usage_statistics = false,
+    };
+    defer if (child.id) |pending| {
+        _ = c.kill(pending, c.SIGKILL);
+        const termination: ?std.process.Child.Term = child.wait(io) catch null;
+        _ = termination;
+    };
+    const termination = try child.wait(io);
+    try std.testing.expect(termination == .exited);
+    try std.testing.expectEqual(0, termination.exited);
+}
+
+test "namespace read-only audit preserves a hot rollback journal for normal recovery" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var buffer: [4096]u8 = undefined;
+    const length = try temporary.dir.realPath(io, &buffer);
+    const path = try std.fmt.allocPrint(a, "{s}/audit-journal", .{buffer[0..length]});
+    defer a.free(path);
+    var owner = try Namespace.open(a, io, path);
+    var live = true;
+    defer if (live) owner.close() catch |err| {
+        std.debug.panic("test namespace cleanup failed: {s}", .{@errorName(err)});
+    };
+    try owner.close();
+    live = false;
+    try createHotJournal(a, io, path);
+    const before = try auditSnapshot(a, path);
+    var handlers = try @import("registry.zig").Registry.init(a, &.{});
+    defer handlers.deinit();
+    try std.testing.expectError(
+        error.RecoveryRequired,
+        Namespace.audit(a, io, path, handlers, null),
+    );
+    try std.testing.expectEqualSlices(u8, &before, &try auditSnapshot(a, path));
+    owner = try Namespace.open(a, io, path);
+    live = true;
+    try std.testing.expectEqual(0, owner.store.head.generation);
+    try owner.close();
+    live = false;
+    _ = try Namespace.audit(a, io, path, handlers, null);
+}
 
 test "namespace excludes a second owner and recovers the SQLite commit to seal gap" {
     const a = std.testing.allocator;

@@ -29,11 +29,22 @@ pub const Error = std.mem.Allocator.Error || error{
     SpeculativeCapture,
     ProtectedResourceEscape,
     UnprovenComputationOrigin,
+    InvalidNotificationEntry,
 };
 
 const Classification = struct { effect: Id, role: Role };
 const Site = struct { owner: Id, node: Id, target: Id };
 const Speculation = struct { body: Id, allowed: []const Id };
+pub const EntryDispatch = struct {
+    function: Id,
+    body: Id,
+    ordinary: Id,
+    effect: Id,
+    identity: []const u8,
+    delivery_case: Id,
+    result_case: Id,
+    case_count: usize,
+};
 pub const CompiledEffect = struct { symbol: []const u8, effect: Id };
 pub const CompiledImport = struct {
     function: Id,
@@ -47,8 +58,6 @@ pub const CompiledImport = struct {
 };
 
 /// Metadata is private to the trusted Protean constructions during authoring.
-/// Native Zig that forges this registry or mutates source is outside the public
-/// authoring-path claim. Records never enter BPI3 or PST3.
 pub const Registry = struct {
     arena: std.heap.ArenaAllocator,
     classifications: std.ArrayList(Classification) = .empty,
@@ -59,6 +68,7 @@ pub const Registry = struct {
     speculations: std.ArrayList(Speculation) = .empty,
     protected_resources: std.ArrayList(Id) = .empty,
     compiled_imports: std.ArrayList(CompiledImport) = .empty,
+    entry_dispatches: std.ArrayList(EntryDispatch) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) Registry {
         return .{ .arena = std.heap.ArenaAllocator.init(allocator) };
@@ -159,6 +169,7 @@ pub fn verify(
     const scratch = arena.allocator();
     try checkCatalogs(module, registry);
     const origins = try Origins.init(scratch, module);
+    try checkEntryDispatches(module, registry, origins);
     var ordinary = Walker.init(scratch, module, registry, origins, null);
     for (module.functions, 0..) |_, id| try ordinary.push(.function, id, id);
     for (module.handlers, 0..) |_, id| try ordinary.push(.handler, id, 0);
@@ -197,6 +208,133 @@ const Origins = struct {
         const index = constructors.raw(value) orelse return null;
         if (index >= self.bindings.len) return null;
         return self.bindings[@intCast(index)].function;
+    }
+};
+
+fn checkEntryDispatches(m: source.Module, r: *const Registry, origins: Origins) Error!void {
+    if (r.entry_dispatches.items.len > 1) return error.InvalidNotificationEntry;
+    for (r.entry_dispatches.items) |entry| {
+        if (entry.function != m.entry or m.functions[@intCast(m.entry)].body != entry.body)
+            return error.InvalidNotificationEntry;
+        try NotificationDispatch.check(m, r, entry);
+        for (m.terms) |term| {
+            if (term == .call and term.call.function == entry.function)
+                return error.InvalidNotificationEntry;
+        }
+        for (m.values) |value| {
+            if (origins.function(value) == entry.function) return error.InvalidNotificationEntry;
+        }
+        for (m.handlers) |handler| {
+            if (handler.return_function == entry.function) return error.InvalidNotificationEntry;
+            for (handler.clauses) |clause| {
+                if (clause.function == entry.function) return error.InvalidNotificationEntry;
+            }
+        }
+        for (r.compiled_imports.items) |item| {
+            for (item.functions) |binding| {
+                if (binding.function == entry.function) return error.InvalidNotificationEntry;
+            }
+        }
+    }
+}
+
+const NotificationDispatch = struct {
+    fn check(m: source.Module, r: *const Registry, entry: EntryDispatch) Error!void {
+        if (entry.function >= m.functions.len or entry.ordinary >= m.functions.len or
+            entry.body >= m.terms.len or entry.effect >= m.effects.len)
+            return error.InvalidNotificationEntry;
+        const function = m.functions[@intCast(entry.function)];
+        if (function.parameters.len != 1) return error.InvalidNotificationEntry;
+        const parameter = function.parameters[0];
+        if (parameter >= m.variables.len) return error.InvalidNotificationEntry;
+        const input = m.variables[@intCast(parameter)];
+        const fields = try sum(m, input);
+        const results = try sum(m, function.result);
+        if (fields.len != entry.case_count or entry.delivery_case >= fields.len or
+            entry.result_case >= results.len) return error.InvalidNotificationEntry;
+        const effect = m.effects[@intCast(entry.effect)];
+        if (!effect.external or r.roleOf(entry.effect) != .write or
+            !std.mem.eql(u8, effect.identity, entry.identity) or
+            effect.payload != fields[@intCast(entry.delivery_case)] or
+            effect.result != results[@intCast(entry.result_case)] or
+            effect.bodies.len != 0 or effect.use_site_effects.len != 0 or
+            effect.control_use != .linear) return error.InvalidNotificationEntry;
+        const ordinary = m.functions[@intCast(entry.ordinary)];
+        if (ordinary.parameters.len != 1 or ordinary.result != function.result)
+            return error.InvalidNotificationEntry;
+        try variable(m, ordinary.parameters[0], input);
+        const root = m.terms[@intCast(entry.body)];
+        if (root != .match_sum or root.match_sum.cases.len != fields.len)
+            return error.InvalidNotificationEntry;
+        try reference(m, root.match_sum.value, parameter);
+        for (root.match_sum.cases, fields, 0..) |branch, schema_id, index| {
+            try variable(m, branch.variable, schema_id);
+            if (branch.variable == parameter or branch.body >= m.terms.len)
+                return error.InvalidNotificationEntry;
+            if (index == entry.delivery_case) {
+                try delivery(m, r, entry, branch.body, branch.variable, function.result);
+            } else {
+                const call = m.terms[@intCast(branch.body)];
+                if (call != .call or call.call.function != entry.ordinary or
+                    call.call.arguments.len != 1) return error.InvalidNotificationEntry;
+                try reference(m, call.call.arguments[0], parameter);
+            }
+        }
+    }
+
+    fn sum(m: source.Module, id: Id) Error![]const Id {
+        if (id >= m.schemas.len) return error.InvalidNotificationEntry;
+        return switch (m.schemas[@intCast(id)]) {
+            .sum => |fields| fields,
+            else => error.InvalidNotificationEntry,
+        };
+    }
+
+    fn variable(m: source.Module, id: Id, schema_id: Id) Error!void {
+        if (id >= m.variables.len or schema_id >= m.schemas.len or
+            m.variables[@intCast(id)] != schema_id) return error.InvalidNotificationEntry;
+    }
+
+    fn reference(m: source.Module, id: Id, expected: Id) Error!void {
+        if (id >= m.values.len or expected >= m.variables.len)
+            return error.InvalidNotificationEntry;
+        const value = m.values[@intCast(id)];
+        try variable(m, expected, value.schema);
+        if (value.expression != .variable or value.expression.variable != expected)
+            return error.InvalidNotificationEntry;
+    }
+
+    fn delivery(
+        m: source.Module,
+        r: *const Registry,
+        entry: EntryDispatch,
+        body: Id,
+        request: Id,
+        result: Id,
+    ) Error!void {
+        const term = m.terms[@intCast(body)];
+        if (term != .bind) return error.InvalidNotificationEntry;
+        const bind = term.bind;
+        const effect = m.effects[@intCast(entry.effect)];
+        try variable(m, bind.variable, effect.result);
+        if (bind.variable == request or bind.value >= m.terms.len or bind.next >= m.terms.len)
+            return error.InvalidNotificationEntry;
+        const write = m.terms[@intCast(bind.value)];
+        if (write != .perform or write.perform.effect != entry.effect or
+            !hasSite(r.sites.items, entry.function, bind.value, entry.effect) or
+            write.perform.capability != null or write.perform.bodies.len != 0 or
+            write.perform.use_site_capabilities.len != 0) return error.InvalidNotificationEntry;
+        try reference(m, write.perform.payload, request);
+        const next = m.terms[@intCast(bind.next)];
+        if (next != .value or next.value >= m.values.len) return error.InvalidNotificationEntry;
+        const returned = m.values[@intCast(next.value)];
+        if (returned.schema != result or returned.expression != .primitive)
+            return error.InvalidNotificationEntry;
+        const variant = returned.expression.primitive;
+        if (variant.opcode != .variant or variant.immediate != entry.result_case or
+            variant.operands.len != 1 or variant.failures.len != 0)
+            return error.InvalidNotificationEntry;
+        try reference(m, variant.operands[0], bind.variable);
     }
 };
 
@@ -346,6 +484,8 @@ fn checkCatalogs(module: source.Module, registry: *const Registry) Error!void {
             (!effect.external or registry.roleOf(id) != .mobility)) return error.EffectRoleMismatch;
         if (@import("model_invocation.zig").isModelIdentity(effect.identity) and
             (!effect.external or registry.roleOf(id) != .model)) return error.EffectRoleMismatch;
+        if (std.mem.startsWith(u8, effect.identity, "agent.notification.") and
+            (!effect.external or registry.roleOf(id) != .write)) return error.EffectRoleMismatch;
         for (module.effects[0..id], 0..) |earlier, previous| {
             if (!std.mem.eql(u8, effect.identity, earlier.identity)) continue;
             // Model effects are generic semantic contracts: ERQ2's concrete schemas

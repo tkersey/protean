@@ -251,7 +251,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             return driver;
         }
         pub fn close(self: *Self, a: std.mem.Allocator) !void {
-            if (self.work != null) return error.Busy;
+            if (self.work != null or self.session_attached) return error.Busy;
             if (self.placement_job) |job| {
                 job.job.deinit();
                 self.placement_job = null;

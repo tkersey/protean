@@ -548,7 +548,17 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 return true;
             }
             if (self.placement_pending.items.len == 0 or self.work != null) return false;
-            const selected = self.placement_pending.orderedRemove(0);
+            const index = for (self.placement_pending.items, 0..) |pending, index| {
+                if (try self.dispatch_gate.permits(a, .{
+                    .task = pending.task,
+                    .identity = pending.id,
+                    .kind = switch (pending.kind) {
+                        .move => .placement_move,
+                        .control => .placement_control,
+                    },
+                })) break index;
+            } else return false;
+            const selected = self.placement_pending.orderedRemove(index);
             const job =
                 placementStartJob(self, a, selected.task, selected.id, selected.kind) catch |err| {
                     if (store(self).fenced or err == error.OutOfMemory or

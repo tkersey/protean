@@ -39,6 +39,7 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&surface_run.step);
     _ = protean_build.addNativeSystem(b, dependency, .{
         .name = "protean",
+        .entry = b.path("entry.zig"),
         .application = .{ .source = .{
             .definition = dependency.path("examples/adaptive/definition.zig"),
             .types = dependency.path("examples/adaptive/types.zig"),

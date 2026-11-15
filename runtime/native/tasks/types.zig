@@ -127,6 +127,73 @@ pub const Recovered =
         rejected,
     };
 pub const Step = union(enum) { idle, progressed, waiting, work: Work };
+pub const ApplicationValue = struct {
+    allocator: std.mem.Allocator,
+    task: state.TaskId,
+    revision: u64,
+    schema_id: []const u8,
+    reference: state.Reference,
+    encoding: enum { contract, json },
+    bytes: []u8,
+
+    pub fn deinit(self: *ApplicationValue) void {
+        self.allocator.free(self.schema_id);
+        self.allocator.free(self.bytes);
+        self.* = undefined;
+    }
+};
+pub const NotificationHistory = struct {
+    attempts: u64 = 0,
+    definitely_not_sent: u64 = 0,
+    complete_captures: u64 = 0,
+    unresolved: u64 = 0,
+    captured: ?struct {
+        attempt: state.Digest,
+        occurrence: state.Digest,
+        response: ?state.Reference,
+        reply: ?state.Reference,
+    } = null,
+
+    pub fn transmissionExcluded(self: NotificationHistory) bool {
+        return self.attempts == self.definitely_not_sent;
+    }
+};
+pub const TaskPage = struct {
+    allocator: std.mem.Allocator,
+    tasks: []state.TaskId,
+    next: ?state.TaskId,
+
+    pub fn deinit(self: *TaskPage) void {
+        self.allocator.free(self.tasks);
+        self.* = undefined;
+    }
+};
+pub const DispatchRequest = struct {
+    task: state.TaskId,
+    work: ?state.Digest = null,
+    residual: ?state.Digest = null,
+    identity: state.Digest,
+    kind: enum { acquisition, recovery_lookup, placement_move, placement_control },
+    capability: []const u8 = "",
+    resource_role: []const u8 = "",
+    inference: bool = false,
+};
+pub const DispatchGate = union(enum) {
+    unrestricted,
+    held,
+    selected: struct {
+        context: *anyopaque,
+        permits: *const fn (*anyopaque, std.mem.Allocator, DispatchRequest) anyerror!bool,
+    },
+
+    pub fn permits(self: DispatchGate, a: std.mem.Allocator, request: DispatchRequest) !bool {
+        return switch (self) {
+            .unrestricted => true,
+            .held => false,
+            .selected => |selected| selected.permits(selected.context, a, request),
+        };
+    }
+};
 pub const ActiveSubject =
     union(enum) { root, work: state.Digest, preparation: state.Digest, residual: state.Digest };
 pub const Active = struct {

@@ -28,10 +28,14 @@ pub const configuration = @import("configuration.zig");
 pub const workspace = @import("workspace_state.zig");
 pub const workspace_instrument = @import("workspace_instrument.zig");
 pub const tasks = @import("tasks.zig");
+pub const Session = @import("session.zig").Session;
 pub const placement = @import("placement.zig");
 pub const placement_configuration = @import("placement_configuration.zig");
 pub const client = @import("client.zig");
 pub const Namespace = @import("namespace.zig").Namespace;
+pub const NamespaceAuditReport = @import("namespace.zig").AuditReport;
+pub const NamespaceApplicationDecoder = @import("namespace.zig").ApplicationDecoder;
+pub const NamespaceApplicationValue = @import("namespace.zig").ApplicationAuditValue;
 
 test {
     _ = json;

@@ -117,6 +117,14 @@ pub const Store = struct {
         );
         try database.exec("PRAGMA page_size=4096;");
         if (create) try createDatabase(database, namespace);
+        return initReadOnly(a, database, namespace);
+    }
+
+    pub fn initReadOnly(
+        a: std.mem.Allocator,
+        database: *sqlite.Database,
+        namespace: Digest,
+    ) !Store {
         var query = try database.prepare(
             "SELECT format,namespace,generation,parent,head FROM meta WHERE singleton=1",
             &.{},
@@ -739,6 +747,14 @@ pub const Store = struct {
         errdefer self.rollback();
         // Acquire the writer lock before checking. Another connection cannot
         // slip a change between this custody check and authoritative writes.
+        try self.checkIntegrity();
+    }
+    pub fn beginReadOnly(self: *Store) !void {
+        if (self.fenced) return error.StorageUnavailable;
+        if (self.transaction or self.projecting) return error.Busy;
+        try self.database.exec("BEGIN;");
+        self.transaction = true;
+        errdefer self.rollback();
         try self.checkIntegrity();
     }
     pub fn rollback(self: *Store) void {

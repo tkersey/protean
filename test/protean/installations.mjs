@@ -113,6 +113,7 @@ try {
   const consumer = scratch;
   copyFileSync(join(root, 'test/consumers/adaptive/build.zig'), join(consumer, 'build.zig'));
   copyFileSync(join(root, 'test/consumers/adaptive/package_surface.zig'), join(consumer, 'package_surface.zig'));
+  copyFileSync(join(root, 'test/consumers/adaptive/entry.zig'), join(consumer, 'entry.zig'));
   const zon = readFileSync(join(root, 'test/consumers/adaptive/build.zig.zon'), 'utf8').replace('.path = "../../.."', '.path = "package/source"');
   writeFileSync(join(consumer, 'build.zig.zon'), zon);
   const prefixDir = join(scratch, 'installed');

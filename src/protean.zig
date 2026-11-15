@@ -14,6 +14,7 @@ pub const participant = @import("participant.zig");
 pub const responders = @import("responders.zig");
 pub const interaction = @import("interaction.zig");
 pub const inbox = @import("inbox.zig");
+pub const notification = @import("notification.zig");
 pub const tools = @import("tools.zig");
 pub const model_invocation = @import("model_invocation.zig");
 pub const adaptive_controls = @import("adaptive_controls.zig");
