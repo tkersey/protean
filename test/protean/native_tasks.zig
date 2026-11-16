@@ -546,7 +546,7 @@ fn omitIncrementEvidence(
             count += @intFromBool(row.kind == .capture);
         } else try records.append(a, row);
     }
-    try std.testing.expectEqual(1, count);
+    try std.testing.expectEqual(2, count);
     archive.records.items = records.items;
     var objects: std.ArrayList(@TypeOf(archive.objects.items[0])) = .empty;
     var body: std.ArrayList(u8) = .empty;

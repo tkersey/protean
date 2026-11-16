@@ -120,6 +120,53 @@ pub fn rearm(value: Occurrence, binding: Binding) Error!Occurrence {
     return next;
 }
 
+pub fn nonTransmissionConsistent(value: State, attempt: Digest) bool {
+    return switch (value) {
+        .ready, .not_sent => true,
+        .dispatching, .unknown, .captured => |current_attempt| !equal(current_attempt.id, attempt),
+        .awaiting => |waiting| !equal(waiting.attempt, attempt),
+        .settled_reply => |reply| !equal(reply.attempt, attempt),
+        .admitted => |admitted| switch (admitted) {
+            .reply => |reply| !equal(reply.attempt, attempt),
+            .cancelled => |waiting| if (waiting) |pending|
+                !equal(pending.attempt, attempt)
+            else
+                true,
+        },
+    };
+}
+
+test "non-transmission evidence survives a successor but cannot contradict the same attempt" {
+    const earlier: Digest = @splat(1);
+    const later: Digest = @splat(2);
+    const waiting: Waiting = .{
+        .attempt = later,
+        .question = @splat(3),
+        .pending_digest = @splat(4),
+    };
+    const reply: Acquired = .{ .attempt = later, .reply = @splat(5) };
+    for ([_]State{
+        .{ .dispatching = .{ .id = later } },
+        .{ .unknown = .{ .id = later } },
+        .{ .captured = .{ .id = later } },
+        .{ .awaiting = waiting },
+        .{ .settled_reply = reply },
+        .{ .admitted = .{ .reply = reply } },
+        .{ .admitted = .{ .cancelled = waiting } },
+    }) |value| {
+        try std.testing.expect(nonTransmissionConsistent(value, earlier));
+        try std.testing.expect(!nonTransmissionConsistent(value, later));
+    }
+    for ([_]State{
+        .ready,
+        .{ .not_sent = .{ .id = later } },
+        .{ .admitted = .{ .cancelled = null } },
+    }) |value| {
+        try std.testing.expect(nonTransmissionConsistent(value, earlier));
+        try std.testing.expect(nonTransmissionConsistent(value, later));
+    }
+}
+
 pub fn acquired(
     value: Occurrence,
     binding: Binding,

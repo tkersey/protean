@@ -195,15 +195,84 @@ fn captureRecovery(
     };
     try historyDispositions(env);
     const task = try captureBeforeOutcome(env);
+    try rejectContradictoryNegative(env, task);
     try std.testing.expectEqual(1, sender.acquisitions);
     if (cancel_after_reply) {
         try consumeBeforeTerminal(env, task);
         try reopenConsumed(env, task);
+        try rejectContradictoryNegative(env, task);
     } else {
         try resumeCapture(env, task);
+        try rejectContradictoryNegative(env, task);
         try auditApplicationReadability(env);
     }
     try std.testing.expectEqual(1, sender.acquisitions);
+}
+
+fn rejectContradictoryNegative(env: Environment, task_id: [16]u8) !void {
+    var original = try forgeNegativeCapture(env, task_id);
+    defer original.deinit();
+    try std.testing.expectError(error.CorruptState, native.Namespace.audit(
+        env.allocator,
+        std.testing.io,
+        env.path,
+        env.handlers,
+        null,
+    ));
+    {
+        var namespace = try native.Namespace.open(env.allocator, std.testing.io, env.path);
+        defer support.cleanup("namespace", namespace.close());
+        try namespace.store.begin();
+        defer namespace.store.rollback();
+        try namespace.store.putRecord(
+            native.testing.state.Capture,
+            "capture",
+            original.value.attempt,
+            original.value.task,
+            original.value,
+        );
+        try namespace.commit("restore.capture");
+    }
+    _ = try native.Namespace.audit(env.allocator, std.testing.io, env.path, env.handlers, null);
+}
+
+fn forgeNegativeCapture(
+    env: Environment,
+    task_id: [16]u8,
+) !contracts.Decoded(native.testing.state.Capture) {
+    var namespace = try native.Namespace.open(env.allocator, std.testing.io, env.path);
+    defer support.cleanup("namespace", namespace.close());
+    var service = try openService(env, &namespace);
+    defer support.cleanup("service", service.close(env.frame));
+    const history = try service.notificationHistory(env.frame, task_id, identity);
+    const attempt = history.captured.?.attempt;
+    const encoded = (try namespace.store.recordBytes(env.frame, "capture", attempt, task_id)).?;
+    var saved = try contracts.decodeOwned(native.testing.state.Capture, env.allocator, encoded);
+    errdefer saved.deinit();
+    var false_negative = saved.value;
+    false_negative.disposition = .definitely_not_sent;
+    false_negative.response = null;
+    false_negative.projection = null;
+    try namespace.store.begin();
+    defer namespace.store.rollback();
+    try namespace.store.putRecord(
+        native.testing.state.Capture,
+        "capture",
+        attempt,
+        task_id,
+        false_negative,
+    );
+    try namespace.commit("contradict.capture");
+    const path = try std.fmt.allocPrint(
+        env.frame,
+        "{s}/../contradictory-{s}.archive",
+        .{ env.path, std.fmt.bytesToHex(task_id, .lower) },
+    );
+    try std.testing.expectError(
+        error.CorruptState,
+        service.exportCheckpoint(env.frame, task_id, path),
+    );
+    return saved;
 }
 
 fn auditApplicationReadability(env: Environment) !void {

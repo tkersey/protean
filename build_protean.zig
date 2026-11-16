@@ -1283,11 +1283,13 @@ const BuildGraph = struct {
             "public session owns worker lifetime",
             "public session task pages",
             "public session gates computed effects",
+            "durable owner replays work",
             "native_notification.test",
         });
         if (linuxX86(s.b.graph.host)) tests.use_llvm = false;
         const audit = s.native_graph.testModuleFiltered(check, s.checked_environment, &.{
             "namespace read-only audit",
+            "non-transmission evidence",
         });
         if (linuxX86(s.b.graph.host)) audit.use_llvm = false;
     }

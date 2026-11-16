@@ -442,6 +442,16 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                             validation.attempt.prepared.?,
                             validation.capture.request,
                         )) return error.CorruptState;
+                    if (validation.capture.disposition == .definitely_not_sent) {
+                        if (validation.capture.response != null or
+                            validation.capture.projection != null or
+                            validation.capture.reconciliation != null or
+                            !occurrence.nonTransmissionConsistent(
+                                validation.saved.state,
+                                validation.capture.attempt,
+                            )) return error.CorruptState;
+                        return null;
+                    }
                     if (validation.attempt.operation == .workspace_build and
                         validation.capture.response != null)
                     {
@@ -461,8 +471,6 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                                 .complete) pending.id else return error.CorruptState,
                             .unknown => |pending| if (validation.capture.disposition ==
                                 .unknown) pending.id else return error.CorruptState,
-                            .not_sent => |pending| if (validation.capture.disposition ==
-                                .definitely_not_sent) pending.id else return error.CorruptState,
                             else => return error.CorruptState,
                         };
                         if (!same(&original_attempt, &validation.row.id)) return error.CorruptState;
