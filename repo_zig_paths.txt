@@ -68,6 +68,7 @@ runtime/native/tasks.zig
 runtime/native/tasks/admission.zig
 runtime/native/tasks/archive_captures.zig
 runtime/native/tasks/archive_occurrences.zig
+runtime/native/tasks/attempt_views.zig
 runtime/native/tasks/cancellation.zig
 runtime/native/tasks/checkpoint.zig
 runtime/native/tasks/compiler_preparation.zig
@@ -183,6 +184,7 @@ test/protean/model_unknown_field.zig
 test/protean/model_unknown_parameter.zig
 test/protean/model_unsupported_codec.zig
 test/protean/native_adaptive_tests.zig
+test/protean/native_attempt_views.zig
 test/protean/native_notification.zig
 test/protean/native_owner_tests.zig
 test/protean/native_recovery_crash.zig

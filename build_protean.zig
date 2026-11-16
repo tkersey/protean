@@ -1285,6 +1285,7 @@ const BuildGraph = struct {
             "public session gates computed effects",
             "durable owner replays work",
             "native_notification.test",
+            "retained attempt views",
         });
         if (linuxX86(s.b.graph.host)) tests.use_llvm = false;
         const audit = s.native_graph.testModuleFiltered(check, s.checked_environment, &.{

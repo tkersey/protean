@@ -168,6 +168,47 @@ pub const TaskPage = struct {
         self.* = undefined;
     }
 };
+pub const AttemptView = struct {
+    id: state.Digest,
+    occurrence: state.Digest,
+    capability: []const u8,
+    inference: bool,
+    request: state.Reference,
+    prepared: ?state.Reference,
+    capture: ?struct {
+        disposition: state.CaptureDisposition,
+        response: ?state.Reference,
+        reply: ?state.Reference,
+        output_tokens: ?u64,
+    },
+};
+pub const AttemptPage = struct {
+    arena: std.heap.ArenaAllocator,
+    task: state.TaskId,
+    revision: u64,
+    attempts: []const AttemptView,
+    next: ?state.Digest,
+
+    pub fn deinit(self: *AttemptPage) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+pub const AttemptValuePart = enum { response, reply };
+pub const AttemptValue = struct {
+    allocator: std.mem.Allocator,
+    task: state.TaskId,
+    revision: u64,
+    attempt: state.Digest,
+    part: AttemptValuePart,
+    reference: state.Reference,
+    bytes: []u8,
+
+    pub fn deinit(self: *AttemptValue) void {
+        self.allocator.free(self.bytes);
+        self.* = undefined;
+    }
+};
 pub const DispatchRequest = struct {
     task: state.TaskId,
     work: ?state.Digest = null,

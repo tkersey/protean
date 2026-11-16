@@ -33,6 +33,10 @@ pub const DispatchRequest = task_types.DispatchRequest;
 pub const ApplicationValue = task_types.ApplicationValue;
 pub const NotificationHistory = task_types.NotificationHistory;
 pub const TaskPage = task_types.TaskPage;
+pub const AttemptView = task_types.AttemptView;
+pub const AttemptPage = task_types.AttemptPage;
+pub const AttemptValuePart = task_types.AttemptValuePart;
+pub const AttemptValue = task_types.AttemptValue;
 
 const Active = task_types.Active;
 const CompilerFact = task_types.CompilerFact;
@@ -146,6 +150,28 @@ pub fn Service(comptime Types: type) type {
         ) !?ApplicationValue {
             const domain = @import("tasks/task_queries.zig").Operations(Types, Self);
             return domain.applicationValue(self, a, id, selection == .result);
+        }
+        pub fn attemptPage(
+            self: *Self,
+            a: std.mem.Allocator,
+            id: state.TaskId,
+            expected_revision: u64,
+            after: ?state.Digest,
+            limit: u32,
+        ) !AttemptPage {
+            const domain = @import("tasks/attempt_views.zig").Operations(Types, Self);
+            return domain.attemptPage(self, a, id, expected_revision, after, limit);
+        }
+        pub fn attemptValue(
+            self: *Self,
+            a: std.mem.Allocator,
+            id: state.TaskId,
+            expected_revision: u64,
+            attempt_id: state.Digest,
+            part: AttemptValuePart,
+        ) !?AttemptValue {
+            const domain = @import("tasks/attempt_views.zig").Operations(Types, Self);
+            return domain.attemptValue(self, a, id, expected_revision, attempt_id, part);
         }
         pub fn projectedArtifact(
             self: *Self,

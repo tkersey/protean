@@ -87,6 +87,16 @@ for every attempt exclude transmission. A capture alone does not assert that
 the provider accepted the write; the application must interpret its outcome.
 Older attempts without retained non-transmission evidence remain unresolved.
 
+`attemptPage` enumerates retained attempts for one authorized task, including
+inference identities and capture/projection references. Its cursor orders attempt
+IDs, not execution time. Every page requires the expected task revision; a changed
+revision fails rather than combining cuts. `attemptValue` reads only the response
+or projected reply actually linked to a selected attempt's retained capture.
+These reads do not require an executable continuation or reinterpret a capture.
+The caller owns and deinitializes each page or value. Missing capture or usage
+remains missing evidence: request bytes are not input tokens, and an admitted
+inference attempt does not prove a billed call.
+
 `Namespace.audit` opens the original namespace read-only under exclusive
 ownership. It validates native retention and optionally calls historical
 application decoders on immutable input/result views. It creates no files,
