@@ -1259,9 +1259,16 @@ export class RecurrenceDriver {
     });
   }
   kill() {
-    if (this.exit || !this.child.pid) return false;
-    try { process.kill(-this.child.pid, 'SIGKILL'); return true; }
-    catch (error) { if (error.code === 'ESRCH') return false; throw error; }
+    if (this.exit || this.groupTerminationSettled || !this.child.pid) return false;
+    try {
+      process.kill(-this.child.pid, 'SIGKILL');
+      this.groupTerminationSettled = true;
+      return true;
+    } catch (error) {
+      if (error.code !== 'ESRCH') throw error;
+      this.groupTerminationSettled = true;
+      return false;
+    }
   }
   async waitClosed(timeoutMs = 6000) {
     let timer;

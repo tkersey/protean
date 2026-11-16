@@ -37,7 +37,10 @@ test('driver termination owns helpers and closes inherited pipes', {timeout: 150
     try {
       const {helper} = await driver.call('ready');
       process.kill(helper, 0);
-      if (forced) assert(driver.kill());
+      if (forced) {
+        assert(driver.kill());
+        assert.equal(driver.kill(), false);
+      }
       const exit = forced ? await driver.waitClosed() : await driver.close();
       assert.deepEqual(exit, forced ? {code: null, signal: 'SIGKILL'} : {code: 0, signal: null});
       assert.equal(driver.kill(), false);
@@ -50,6 +53,35 @@ test('driver termination owns helpers and closes inherited pipes', {timeout: 150
     } finally { driver.kill(); await driver.waitClosed(); }
   }
   assert.deepEqual(signals.map(signal => process.listenerCount(signal)), listeners);
+});
+
+test('driver group signal failures remain visible and retryable until success or absence', () => {
+  const original = process.kill;
+  const target = 123456789;
+  const driver = Object.create(RecurrenceDriver.prototype);
+  driver.child = {pid: target};
+  let calls = 0;
+  let failure = Object.assign(new Error('permission'), {code: 'EPERM'});
+  process.kill = (pid, signal) => {
+    if (pid !== -target) return original(pid, signal);
+    assert.equal(signal, 'SIGKILL');
+    calls++;
+    if (failure) throw failure;
+    return true;
+  };
+  try {
+    assert.throws(() => driver.kill(), failure);
+    failure = null;
+    assert.equal(driver.kill(), true);
+    assert.equal(driver.kill(), false);
+    assert.equal(calls, 2);
+    const absent = Object.create(RecurrenceDriver.prototype);
+    absent.child = {pid: target};
+    failure = Object.assign(new Error('absent'), {code: 'ESRCH'});
+    assert.equal(absent.kill(), false);
+    assert.equal(absent.kill(), false);
+    assert.equal(calls, 3);
+  } finally { process.kill = original; }
 });
 
 test('supervisor exit terminates all currently owned driver groups', {timeout: 15000}, async () => {
