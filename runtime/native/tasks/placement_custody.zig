@@ -577,6 +577,8 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     }
                 }
             };
+            if (!try Transport.placementDispatchPermitted(self, a, subject, transfer, .move))
+                return error.Unauthorized;
             _ = try placementFreeze(self, a, subject, peer_name, expected, transfer);
             const path = try std.fmt.allocPrint(a, "{s}/outgoing-{s}.par", .{
                 directory,

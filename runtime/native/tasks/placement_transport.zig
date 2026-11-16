@@ -12,6 +12,12 @@ const Work = task_types.Work;
 const name = task_types.name;
 const operation = task_types.operation;
 const same = task_types.same;
+const PlacementStart = union(enum) {
+    held,
+    gate_error: anyerror,
+    complete,
+    started: *@import("../placement_job.zig").Job,
+};
 
 pub fn Operations(comptime Types: type, comptime Self: type) type {
     return struct {
@@ -414,7 +420,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             task_id: state.TaskId,
             id: state.Digest,
             kind: PlacementKind,
-        ) !?*@import("../placement_job.zig").Job {
+        ) !PlacementStart {
             return switch (kind) {
                 .move => placementStartMove(self, a, task_id, id),
                 .control => placementStartControl(self, a, task_id, id),
@@ -425,19 +431,29 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             a: std.mem.Allocator,
             task_id: state.TaskId,
             id: state.Digest,
-        ) !?*@import("../placement_job.zig").Job {
+        ) !PlacementStart {
             const p = @import("../placement.zig");
             const jobs = @import("../placement_job.zig");
             var saved = try record(self, p.Move, a, "placement_move", id, task_id);
             defer saved.deinit();
             if (!std.meta.eql(saved.value.owner, try placementSite(self)))
                 return error.CustodyNotLocal;
-            if (saved.value.decision != null or saved.value.cancelled) return null;
+            if (saved.value.decision != null or saved.value.cancelled) return .complete;
             const subject = saved.value.subject;
             const prior = try self.placementStatus(a, subject);
-            if (try placementRecoverMove(self, task_id, id, &saved.value, prior)) return null;
+            if (try placementRecoverMove(self, task_id, id, &saved.value, prior)) return .complete;
+            const permitted = placementDispatchPermitted(self, a, subject, id, .move) catch |err|
+                return .{ .gate_error = err };
+            if (!permitted) return .held;
             if (saved.value.withdraw_requested)
-                return try placementWithdrawJob(self, a, id, subject, saved.value, prior);
+                return .{ .started = try placementWithdrawJob(
+                    self,
+                    a,
+                    id,
+                    subject,
+                    saved.value,
+                    prior,
+                ) };
             const expected = if (prior) |custody| expected: {
                 if (custody.intent) |intent| if (std.meta.eql(
                     intent.transfer,
@@ -454,28 +470,36 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             });
             defer a.free(path);
             const offer = try self.placementOffer(a, subject, saved.value.request.site.bytes, path);
-            return try jobs.Job.start(self.allocator, self.io, try placementPeer(
+            return .{ .started = try jobs.Job.start(self.allocator, self.io, try placementPeer(
                 self,
                 saved.value.request.site.bytes,
-            ), .{ .move = .{ .offer = offer, .path = .{ .bytes = path } } });
+            ), .{ .move = .{ .offer = offer, .path = .{ .bytes = path } } }) };
         }
         fn placementStartControl(
             self: *Self,
             a: std.mem.Allocator,
             task_id: state.TaskId,
             id: state.Digest,
-        ) !?*@import("../placement_job.zig").Job {
+        ) !PlacementStart {
             const p = @import("../placement.zig");
             const jobs = @import("../placement_job.zig");
             var saved =
                 try record(self, p.ControlRecord, a, "placement_control", id, task_id);
             defer saved.deinit();
-            if (saved.value.report != null) return null;
+            if (saved.value.report != null) return .complete;
             try requireCustody(self, a, task_id, null);
             if (!std.meta.eql(
                 saved.value.control.value.controller,
                 try placementSite(self),
             )) return error.CustodyNotLocal;
+            const permitted = placementDispatchPermitted(
+                self,
+                a,
+                saved.value.control.value.subject,
+                id,
+                .control,
+            ) catch |err| return .{ .gate_error = err };
+            if (!permitted) return .held;
             const lineage =
                 try @import("../placement_journal.zig").controllerLineage(store(self), a, task_id);
             defer a.free(lineage);
@@ -491,7 +515,24 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             const bytes = try contracts.encodeOwned(jobs.Input, a, input);
             defer a.free(bytes);
             try placementAuthorizeMessage(self, a, peer, saved.value.control.value.subject, bytes);
-            return try jobs.Job.start(self.allocator, self.io, peer, input);
+            return .{ .started = try jobs.Job.start(self.allocator, self.io, peer, input) };
+        }
+        pub fn placementDispatchPermitted(
+            self: *Self,
+            a: std.mem.Allocator,
+            subject: @import("../placement.zig").Subject,
+            id: state.Digest,
+            kind: PlacementKind,
+        ) !bool {
+            return self.dispatch_gate.permits(a, .{
+                .task = subject.task,
+                .work = subject.work,
+                .identity = id,
+                .kind = switch (kind) {
+                    .move => .placement_move,
+                    .control => .placement_control,
+                },
+            });
         }
         fn placementRecoverMove(
             self: *Self,
@@ -548,32 +589,36 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 return true;
             }
             if (self.placement_pending.items.len == 0 or self.work != null) return false;
-            const index = for (self.placement_pending.items, 0..) |pending, index| {
-                if (try self.dispatch_gate.permits(a, .{
-                    .task = pending.task,
-                    .identity = pending.id,
-                    .kind = switch (pending.kind) {
-                        .move => .placement_move,
-                        .control => .placement_control,
-                    },
-                })) break index;
-            } else return false;
-            const selected = self.placement_pending.orderedRemove(index);
-            const job =
-                placementStartJob(self, a, selected.task, selected.id, selected.kind) catch |err| {
+            for (self.placement_pending.items, 0..) |pending, index| {
+                const result = placementStartJob(
+                    self,
+                    a,
+                    pending.task,
+                    pending.id,
+                    pending.kind,
+                ) catch |err| {
                     if (store(self).fenced or err == error.OutOfMemory or
                         err == error.StorageUnavailable)
                         return err;
-                    try placementFailure(self, a, selected.task, selected.id, selected.kind, err);
+                    _ = self.placement_pending.orderedRemove(index);
+                    try placementFailure(self, a, pending.task, pending.id, pending.kind, err);
                     return true;
                 };
-            if (job) |started| self.placement_job = .{
-                .task = selected.task,
-                .id = selected.id,
-                .kind = selected.kind,
-                .job = started,
-            };
-            return true;
+                switch (result) {
+                    .held => continue,
+                    .gate_error => |err| return err,
+                    .complete => {},
+                    .started => |job| self.placement_job = .{
+                        .task = pending.task,
+                        .id = pending.id,
+                        .kind = pending.kind,
+                        .job = job,
+                    },
+                }
+                _ = self.placement_pending.orderedRemove(index);
+                return true;
+            }
+            return false;
         }
         fn publishPlacementJob(
             self: *Self,

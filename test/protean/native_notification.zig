@@ -259,13 +259,17 @@ fn notificationCustody(initial: Environment, child: bool) !void {
         .key = source_key.public_key.bytes,
         .namespace = owner.namespace.identity,
     }, "source");
-    const destination_peer = try notificationPeer(env, service, subject, .{
+    var destination_peer = try notificationPeer(env, service, subject, .{
         .key = destination_key.public_key.bytes,
         .namespace = destination_identity,
     }, "destination");
+    destination_peer.channel = .{ .argv = &.{"/usr/bin/false"}, .remote_name = "source" };
+    const transport = try std.fmt.allocPrint(env.frame, "{s}-transport", .{env.path});
+    try std.Io.Dir.cwd().createDir(std.testing.io, transport, .fromMode(0o700));
     const source_config: native.placement.Configuration = .{
         .signing_key = source_key,
         .peers = &.{destination_peer},
+        .transport_directory = transport,
     };
     const destination_config: native.placement.Configuration = .{
         .signing_key = destination_key,
@@ -274,7 +278,177 @@ fn notificationCustody(initial: Environment, child: bool) !void {
     service.profile.placement = &source_config;
     owner.env.profile.placement = &source_config;
     destination_env.profile.placement = &destination_config;
+    try placementGateTrace(&owner, destination_env, subject);
     try notificationTransfers(&owner, destination_env, subject);
+}
+
+const PlacementGateProbe = struct {
+    subject: native.placement.Subject,
+    identity: [32]u8,
+    calls: u32 = 0,
+    fail: bool = false,
+
+    fn permits(
+        context: *anyopaque,
+        _: std.mem.Allocator,
+        request: native.tasks.DispatchRequest,
+    ) !bool {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        try std.testing.expectEqualDeep(self.subject.task, request.task);
+        try std.testing.expectEqualDeep(self.subject.work, request.work);
+        try std.testing.expectEqualDeep(self.identity, request.identity);
+        try std.testing.expectEqual(.placement_move, request.kind);
+        self.calls += 1;
+        if (self.fail) return error.GateProbe;
+        return false;
+    }
+
+    fn gate(self: *@This()) native.tasks.DispatchGate {
+        return .{ .selected = .{ .context = self, .permits = permits } };
+    }
+};
+
+fn placementGateTrace(
+    owner: *NotificationHistoryOwner,
+    destination: Environment,
+    subject: native.placement.Subject,
+) !void {
+    const env = owner.env;
+    var probe: PlacementGateProbe = .{ .subject = subject, .identity = @splat(67) };
+    const expected = try owner.service.placementCut(env.frame, subject);
+    const head = owner.namespace.store.head;
+    owner.service.dispatch_gate = .held;
+    defer owner.service.dispatch_gate = .unrestricted;
+    try expectHeldPlacement(env, &owner.service, subject, expected, probe.identity);
+    owner.service.dispatch_gate = probe.gate();
+    try expectHeldPlacement(env, &owner.service, subject, expected, probe.identity);
+    try std.testing.expectEqual(2, probe.calls);
+    try std.testing.expectEqualDeep(head, owner.namespace.store.head);
+    try std.testing.expectEqual(null, try owner.service.placementStatus(env.frame, subject));
+    try queueGatePlacement(env, &owner.service, subject);
+    try std.testing.expectEqual(1, owner.service.placement_pending.items.len);
+    probe.identity = owner.service.placement_pending.items[0].id;
+    _ = try owner.service.pump(env.frame);
+    try std.testing.expectEqual(3, probe.calls);
+    try std.testing.expectEqual(1, owner.service.placement_pending.items.len);
+    try std.testing.expect(owner.service.placement_job == null);
+    probe.fail = true;
+    try std.testing.expectError(error.GateProbe, owner.service.pump(env.frame));
+    try std.testing.expectEqual(1, owner.service.placement_pending.items.len);
+    var pending = try readGateMove(owner, subject.task, probe.identity);
+    defer pending.deinit();
+    try std.testing.expect(pending.value.last_error == null);
+    try recoverGatePlacement(owner, destination, subject, &probe);
+}
+
+fn expectHeldPlacement(
+    env: Environment,
+    service: *native.tasks.Service(Types),
+    subject: native.placement.Subject,
+    expected: native.placement.Cut,
+    transfer: [32]u8,
+) !void {
+    try std.testing.expectError(error.Unauthorized, service.placementMove(
+        env.frame,
+        subject,
+        "destination",
+        expected,
+        transfer,
+    ));
+    try std.testing.expectError(error.Unauthorized, service.placementRequest(env.frame, .{
+        .move = .{
+            .subject = subject,
+            .peer = .{ .bytes = "destination" },
+            .expected = expected,
+            .transfer = transfer,
+        },
+    }));
+}
+
+fn queueGatePlacement(
+    env: Environment,
+    service: *native.tasks.Service(Types),
+    subject: native.placement.Subject,
+) !void {
+    const reply = try service.workspaceCommand(env.frame, "gate-move", subject.task, .{
+        .placement = .{ .move = .{
+            .operation = .{ .bytes = "gate-transfer" },
+            .subject = if (subject.work) |work| .{ .work = .{
+                .kind = .work,
+                .id = .{ .bytes = try std.fmt.allocPrint(env.frame, "{s}", .{
+                    std.fmt.bytesToHex(work, .lower),
+                }) },
+            } } else .{ .controller = .{} },
+            .site = .{ .bytes = "destination" },
+            .custody_epoch = 0,
+        } },
+    });
+    try std.testing.expect(reply.disposition != .rejected);
+}
+
+fn readGateMove(
+    owner: *NotificationHistoryOwner,
+    task: [16]u8,
+    transfer: [32]u8,
+) !contracts.Decoded(native.placement.Move) {
+    const bytes = (try owner.namespace.store.recordBytes(
+        owner.env.frame,
+        "placement_move",
+        transfer,
+        task,
+    )).?;
+    return contracts.decodeOwned(native.placement.Move, owner.env.allocator, bytes);
+}
+
+fn recoverGatePlacement(
+    owner: *NotificationHistoryOwner,
+    destination: Environment,
+    subject: native.placement.Subject,
+    probe: *PlacementGateProbe,
+) !void {
+    const env = owner.env;
+    const expected = try owner.service.placementCut(env.frame, subject);
+    _ = try owner.service.placementFreeze(
+        env.frame,
+        subject,
+        "destination",
+        expected,
+        probe.identity,
+    );
+    const offer = try owner.service.placementOffer(
+        env.frame,
+        subject,
+        "destination",
+        try notificationArchive(env, 67),
+    );
+    try owner.close();
+    const refusal = try notificationDecision(destination, offer, null);
+    try owner.open();
+    try owner.service.placementApplyDecision(env.frame, subject, refusal);
+    var pending = try readGateMove(owner, subject.task, probe.identity);
+    defer pending.deinit();
+    try std.testing.expect(pending.value.decision == null);
+    try owner.close();
+    try owner.open();
+    owner.service.dispatch_gate = probe.gate();
+    const calls = probe.calls;
+    const reply = try owner.service.workspaceCommand(env.frame, "gate-retry", subject.task, .{
+        .placement = .{ .retry = .{ .operation = .{ .bytes = "gate-transfer" } } },
+    });
+    try std.testing.expect(reply.disposition != .rejected);
+    try std.testing.expectEqual(.progressed, try owner.service.pump(env.frame));
+    var recovered = try readGateMove(owner, subject.task, probe.identity);
+    defer recovered.deinit();
+    try std.testing.expectEqualDeep(refusal, recovered.value.decision.?);
+    try std.testing.expectEqual(0, owner.service.placement_pending.items.len);
+    try std.testing.expectEqualDeep(refusal, try owner.service.placementMove(
+        env.frame,
+        subject,
+        "destination",
+        expected,
+        probe.identity,
+    ));
+    try std.testing.expectEqual(calls, probe.calls);
 }
 
 const NotificationHistoryOwner = struct {
