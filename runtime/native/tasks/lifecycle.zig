@@ -61,6 +61,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             try recoverWorkspace(&self, a);
             try recoverControllerResiduals(&self, a, null);
             try recoverPlacementFiles(&self, a);
+            try store(&self).installAttemptIndex();
             return self;
         }
         pub fn store(self: *Self) *storage.Store {

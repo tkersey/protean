@@ -163,7 +163,58 @@ fn runViews(a: std.mem.Allocator, image: []const u8, image_id: [32]u8) !void {
         .path = try std.fmt.allocPrint(frame, "{s}/state", .{path_buffer[0..length]}),
     };
     const saved = try exerciseViews(env);
+    try checkPageWork(env);
     try reopenedViews(env, saved);
+}
+
+fn checkPageWork(env: Environment) !void {
+    var namespace = try native.Namespace.open(env.a, std.testing.io, env.path);
+    defer support.cleanup("namespace", namespace.close());
+    var service = try env.open(&namespace);
+    defer support.cleanup("service", service.close(env.frame));
+    const populated = try service.submit(env.frame, "page-work-populated", 7);
+    const task = populated.receipt.task;
+    for (0..64) |i| {
+        const work = try nextWork(env, &service);
+        try std.testing.expectEqualDeep(task, work.task);
+        try service.notSent(env.frame, work);
+        if (i == 63) break;
+        _ = try service.resumeTask(
+            env.frame,
+            try std.fmt.allocPrint(env.frame, "page-work-retry-{d}", .{i}),
+            task,
+            try revision(env, &service, task),
+        );
+    }
+    const empty = try service.submit(env.frame, "page-work-empty", 8);
+    var trace: support.QueryWork = .{ .prefix = "SELECT id FROM records WHERE task=" };
+    try trace.start(namespace.store.database);
+    defer trace.stop();
+    var late = try service.attemptPage(
+        env.a,
+        task,
+        try revision(env, &service, task),
+        @splat(255),
+        1,
+    );
+    defer late.deinit();
+    try std.testing.expectEqual(0, late.attempts.len);
+    try std.testing.expect(late.next == null);
+    try std.testing.expectEqual(1, trace.queries);
+    try std.testing.expect(trace.steps <= 32);
+    trace.reset();
+    var absent = try service.attemptPage(
+        env.a,
+        empty.receipt.task,
+        empty.receipt.revision,
+        null,
+        1,
+    );
+    defer absent.deinit();
+    try std.testing.expectEqual(0, absent.attempts.len);
+    try std.testing.expect(absent.next == null);
+    try std.testing.expectEqual(1, trace.queries);
+    try std.testing.expect(trace.steps <= 32);
 }
 
 const Saved = struct { task: [16]u8, attempt: [32]u8, response: [32]u8, reply: [32]u8 };

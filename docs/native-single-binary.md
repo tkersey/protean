@@ -96,6 +96,12 @@ IDs, not execution time. Every page requires the expected task revision; a chang
 revision fails rather than combining cuts. `attemptValue` reads only the response
 or projected reply actually linked to a selected attempt's retained capture.
 These reads do not require an executable continuation or reinterpret a capture.
+Task pages seek directly from their cursor. Attempt pages use a task-local,
+derived SQLite index, installed during successful writable Service initialization
+after retention validation and recovery. Index installation preserves state format
+22, authoritative rows, task revisions, namespace identity and the sealed logical
+head. Read-only namespace audits do not install it. Its initial construction reads
+retained records; subsequent page queries avoid traversing unrelated tasks' attempts.
 The caller owns and deinitializes each page or value. Missing capture or usage
 remains missing evidence: request bytes are not input tokens, and an admitted
 inference attempt does not prove a billed call.

@@ -473,6 +473,24 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             }
             return result;
         }
+        fn recoveryPermitted(
+            self: *Self,
+            a: std.mem.Allocator,
+            pending: occurrence.Occurrence,
+            entry: registry.Entry,
+            id: state.Digest,
+        ) !bool {
+            return self.dispatch_gate.permits(a, .{
+                .task = pending.task,
+                .work = pending.work,
+                .residual = pending.residual,
+                .identity = id,
+                .kind = .recovery_lookup,
+                .capability = entry.declaration.identity,
+                .resource_role = entry.declaration.resource_role,
+                .inference = entry.declaration.inference,
+            });
+        }
         pub fn recoveryWork(
             self: *Self,
             a: std.mem.Allocator,
@@ -487,13 +505,6 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             const item = saved.value;
             if (item.outcome != .pending or item.owner_epoch == null or
                 !same(&item.owner_epoch.?, &self.owner_epoch)) return error.CorruptState;
-            if (item.selection != .rederive and !try self.dispatch_gate.permits(a, .{
-                .task = value.id,
-                .work = pending.work,
-                .residual = pending.residual,
-                .identity = id,
-                .kind = .recovery_lookup,
-            })) return .idle;
             const request = try store(self).object(self.allocator, item.request, null);
             errdefer self.allocator.free(request);
             var decoded = try data.invocation.decode(data.invocation.Request, a, request);
@@ -515,6 +526,12 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 self.allocator.free(request);
                 return .progressed;
             };
+            if (item.selection != .rederive and
+                !try recoveryPermitted(self, a, pending, entry, id))
+            {
+                self.allocator.free(request);
+                return .idle;
+            }
             const prepared = if (item.prepared) |ref| try store(self).object(
                 self.allocator,
                 ref,

@@ -739,6 +739,20 @@ pub const Store = struct {
         try state.visitReferencesAs(T, Ref, value, &sink);
     }
 
+    pub fn installAttemptIndex(self: *Store) !void {
+        _ = try self.publicationEpoch();
+        try self.begin();
+        errdefer self.rollback();
+        try self.database.exec(
+            "CREATE INDEX IF NOT EXISTS attempt_tasks ON records(task,id) WHERE kind='attempt';",
+        );
+        self.database.exec("COMMIT;") catch |err| {
+            self.fence();
+            return err;
+        };
+        self.transaction = false;
+    }
+
     pub fn begin(self: *Store) !void {
         if (self.fenced) return error.StorageUnavailable;
         if (self.transaction or self.projecting) return error.Busy;

@@ -162,11 +162,12 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             try allowed(self);
             if (limit == 0) return error.InvalidParams;
             const cursor = after orelse @as(state.TaskId, @splat(0));
-            var query = try store(self).database.prepare(
-                "SELECT id FROM tasks WHERE (?=0 OR id>?) ORDER BY id LIMIT ?",
-                &.{ .{ .integer = @intFromBool(after != null) }, .{ .blob = &cursor }, .{
-                    .integer = limit,
-                } },
+            var query = if (after != null) try store(self).database.prepare(
+                "SELECT id FROM tasks WHERE id>? ORDER BY id LIMIT ?",
+                &.{ .{ .blob = &cursor }, .{ .integer = limit } },
+            ) else try store(self).database.prepare(
+                "SELECT id FROM tasks ORDER BY id LIMIT ?",
+                &.{.{ .integer = limit }},
             );
             defer query.deinit();
             var ids: std.ArrayList(state.TaskId) = .empty;

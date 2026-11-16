@@ -26,15 +26,13 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             errdefer arena.deinit();
             const scratch = arena.allocator();
             const cursor = after orelse @as(state.Digest, @splat(0));
-            var rows = try Lifecycle.store(self).database.prepare(
+            var rows = if (after != null) try Lifecycle.store(self).database.prepare(
                 "SELECT id FROM records WHERE task=? AND kind='attempt' " ++
-                    "AND (?=0 OR id>?) ORDER BY id LIMIT ?",
-                &.{
-                    .{ .blob = &id },
-                    .{ .integer = @intFromBool(after != null) },
-                    .{ .blob = &cursor },
-                    .{ .integer = limit },
-                },
+                    "AND id>? ORDER BY id LIMIT ?",
+                &.{ .{ .blob = &id }, .{ .blob = &cursor }, .{ .integer = limit } },
+            ) else try Lifecycle.store(self).database.prepare(
+                "SELECT id FROM records WHERE task=? AND kind='attempt' ORDER BY id LIMIT ?",
+                &.{ .{ .blob = &id }, .{ .integer = limit } },
             );
             defer rows.deinit();
             var entries: std.ArrayList(types.AttemptView) = .empty;
