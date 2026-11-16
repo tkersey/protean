@@ -4292,6 +4292,333 @@ test "public session owns worker lifetime and publishes acquired results" {
     return error.SessionDidNotComplete;
 }
 
+test "public session owns worker lifetime across retryable publication failure" {
+    var fixture: FairSchedulingFixture = .{};
+    defer fixture.deinit();
+    try fixture.initAssets();
+    try fixture.initHandlers();
+    try fixture.initOwner();
+    const placement: native.placement.Configuration = .{
+        .signing_key = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(@splat(46)),
+        .peers = &.{},
+    };
+    fixture.service.profile.placement = &placement;
+    var session = try native.Session(FairTypes).init(&fixture.service);
+    defer session.deinit() catch @panic("session left busy");
+    const id = try sessionPublicationReady(&fixture, &session);
+    const before = fixture.namespace.store.head;
+    const work = fixture.service.work.?;
+    var failing = std.testing.FailingAllocator.init(fixture.frame, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, session.collect(failing.allocator(), false));
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqualDeep(before, fixture.namespace.store.head);
+    try std.testing.expect(!fixture.namespace.store.fenced);
+    try std.testing.expect(session.busy() and session.publication_pending);
+    try std.testing.expect(session.slot.future == null);
+    try std.testing.expect(session.slot.result != null and session.slot.result.? == .acquired);
+    try std.testing.expectEqualSlices(u8, &work.attempt, &fixture.service.work.?.attempt);
+    try std.testing.expectEqualSlices(u8, work.request, fixture.service.work.?.request);
+    try std.testing.expectError(error.Busy, session.deinit());
+    try std.testing.expectEqual(.completed, try session.collect(fixture.frame, false));
+    try std.testing.expect(!session.busy() and fixture.service.work == null);
+    for (0..8) |_| _ = try session.tick(fixture.frame);
+    var value = try fixture.service.task(fixture.frame, id);
+    defer value.deinit();
+    try std.testing.expectEqual(.completed, value.value.outcome_kind);
+    try std.testing.expectEqual(1, FairCapture.acquisitions);
+    try std.testing.expectEqual(1, try fixture.namespace.store.capabilityAttempts(
+        id,
+        "fair.leaf.v1",
+    ));
+}
+
+test "public session owns worker lifetime after consumed publication failure" {
+    for ([_]SessionPublicationFailure{ .allocation, .storage }) |failure| {
+        var fixture: FairSchedulingFixture = .{};
+        defer fixture.deinit();
+        try fixture.initAssets();
+        try fixture.initHandlers();
+        try fixture.initOwner();
+        var session = try native.Session(FairTypes).init(&fixture.service);
+        var session_live = true;
+        defer if (session_live) session.deinit() catch @panic("session left busy");
+        const id = try sessionPublicationReady(&fixture, &session);
+        const before = fixture.namespace.store.head;
+        try sessionPublicationFail(&fixture, &session, failure);
+        try std.testing.expectEqualDeep(before, fixture.namespace.store.head);
+        try std.testing.expect(fixture.namespace.store.fenced and fixture.service.work == null);
+        try std.testing.expect(!session.busy() and !session.publication_pending);
+        try std.testing.expect(session.slot.result == null);
+        try std.testing.expectEqual(.none, try session.collect(fixture.frame, false));
+        try std.testing.expectError(error.StorageUnavailable, session.tick(fixture.frame));
+        try session.deinit();
+        session_live = false;
+        try sessionPublicationReopen(&fixture);
+        session = try native.Session(FairTypes).init(&fixture.service);
+        session_live = true;
+        for (0..8) |_| _ = try session.tick(fixture.frame);
+        var value = try fixture.service.task(fixture.frame, id);
+        defer value.deinit();
+        try std.testing.expectEqual(
+            .unknown,
+            try fixture.service.status(fixture.frame, value.value),
+        );
+        try std.testing.expectEqual(1, FairCapture.acquisitions);
+        try std.testing.expectEqual(1, try fixture.namespace.store.capabilityAttempts(
+            id,
+            "fair.leaf.v1",
+        ));
+        try std.testing.expect(!session.busy());
+    }
+}
+
+test "read-only namespace task audit preserves retained bindings and callback order" {
+    var fixture: FairSchedulingFixture = .{};
+    defer fixture.deinit();
+    try fixture.initAssets();
+    try fixture.initHandlers();
+    fixture.profile.resources = &.{ "audit-resource-one", "audit-resource-two" };
+    for (&fixture.grants) |*grant| grant.resource_identity = try fixture.profile.resourceIdentity(
+        fixture.a,
+        fixture.application.image_identity,
+    );
+    try fixture.initOwner();
+    const pending = try fixture.service.submit(fixture.frame, "audit-pending", 2);
+    const completed = try fixture.service.submit(fixture.frame, "audit-completed", 4);
+    for (0..8) |_| try std.testing.expect(try fixture.service.pump(fixture.frame) != .work);
+    var first = try fixture.service.task(fixture.frame, pending.receipt.task);
+    defer first.deinit();
+    var second = try fixture.service.task(fixture.frame, completed.receipt.task);
+    defer second.deinit();
+    try std.testing.expect(!first.value.terminal() and second.value.terminal());
+    try std.testing.expectEqual(2, first.value.resources.items.len);
+    const head = fixture.namespace.store.head;
+    try fixture.service.close(fixture.frame);
+    fixture.service_live = false;
+    try fixture.namespace.close();
+    fixture.namespace_live = false;
+    var audit: NamespaceTaskAudit = .{ .expected = .{ first.value, second.value } };
+    try audit.check(&fixture);
+    fixture.namespace = try native.Namespace.open(fixture.a, fixture.io, fixture.path);
+    fixture.namespace_live = true;
+    try std.testing.expectEqualDeep(head, fixture.namespace.store.head);
+}
+
+const NamespaceTaskAudit = struct {
+    expected: [2]native.testing.state.Task,
+    values: [2]u32 = @splat(0),
+    tasks: [2]u32 = @splat(0),
+    reject_value: bool = false,
+    reject_task: bool = false,
+
+    fn check(self: *@This(), fixture: *FairSchedulingFixture) !void {
+        const before = try namespaceAuditBytes(fixture);
+        self.reject_task = true;
+        try std.testing.expectError(error.UnsupportedExecutionBinding, native.Namespace.audit(
+            fixture.a,
+            fixture.io,
+            fixture.path,
+            fixture.handlers,
+            .{ .context = self, .validate = validate, .task = observe },
+        ));
+        try std.testing.expectEqual(1, self.tasks[0] + self.tasks[1]);
+        try std.testing.expectEqualSlices(u8, &before, &try namespaceAuditBytes(fixture));
+        self.reset();
+        const report = try native.Namespace.audit(
+            fixture.a,
+            fixture.io,
+            fixture.path,
+            fixture.handlers,
+            .{ .context = self, .validate = validate, .task = observe },
+        );
+        try std.testing.expectEqual(2, report.tasks);
+        try std.testing.expectEqual(1, report.nonterminal_tasks);
+        try std.testing.expectEqual(.verified, report.application_readability);
+        try std.testing.expectEqual(.not_assessed, report.continuation_compatibility);
+        try std.testing.expectEqualDeep([_]u32{ 1, 1 }, self.tasks);
+        try std.testing.expectEqualDeep([_]u32{ 1, 3 }, self.values);
+        self.reset();
+        _ = try native.Namespace.audit(
+            fixture.a,
+            fixture.io,
+            fixture.path,
+            fixture.handlers,
+            .{ .context = self, .validate = validate },
+        );
+        try std.testing.expectEqualDeep([_]u32{ 0, 0 }, self.tasks);
+        try std.testing.expectEqualDeep([_]u32{ 1, 3 }, self.values);
+        self.reset();
+        self.reject_value = true;
+        try std.testing.expectError(error.UnsupportedApplicationSchema, native.Namespace.audit(
+            fixture.a,
+            fixture.io,
+            fixture.path,
+            fixture.handlers,
+            .{ .context = self, .validate = validate, .task = observe },
+        ));
+        try std.testing.expectEqualDeep([_]u32{ 0, 0 }, self.tasks);
+        try std.testing.expectEqualSlices(u8, &before, &try namespaceAuditBytes(fixture));
+    }
+
+    fn reset(self: *@This()) void {
+        self.values = @splat(0);
+        self.tasks = @splat(0);
+        self.reject_value = false;
+        self.reject_task = false;
+    }
+
+    fn index(self: *const @This(), task: [16]u8) !usize {
+        for (self.expected, 0..) |expected, offset| {
+            if (std.mem.eql(u8, &expected.id, &task)) return offset;
+        }
+        return error.UnexpectedAuditTask;
+    }
+
+    fn validate(context: ?*anyopaque, value: native.NamespaceApplicationValue) !void {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        if (self.reject_value) return error.UnsupportedApplicationSchema;
+        const offset = try self.index(value.task);
+        try std.testing.expectEqual(0, self.tasks[offset]);
+        try std.testing.expectEqualStrings(FairTypes.application_id, value.application_id);
+        const number = if (value.encoding == .contract) blk: {
+            var decoded = try protean.contracts.decodeOwned(
+                u32,
+                std.testing.allocator,
+                value.bytes,
+            );
+            defer decoded.deinit();
+            break :blk decoded.value;
+        } else try std.fmt.parseInt(u32, value.bytes, 10);
+        try std.testing.expectEqual(@as(u32, if (offset == 0) 2 else 4), number);
+        try std.testing.expectEqualStrings(
+            if (value.kind == .input) FairTypes.input_schema_id else FairTypes.output_schema_id,
+            value.schema_id,
+        );
+        self.values[offset] += 1;
+    }
+
+    fn observe(context: ?*anyopaque, view: native.Namespace.AuditTaskView) !void {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        const offset = try self.index(view.task);
+        const expected = self.expected[offset];
+        try std.testing.expectEqual(0, self.tasks[offset]);
+        try std.testing.expectEqual(
+            @as(u32, if (expected.terminal()) 3 else 1),
+            self.values[offset],
+        );
+        try std.testing.expectEqual(expected.revision, view.revision);
+        try std.testing.expectEqual(expected.terminal(), view.terminal);
+        try std.testing.expectEqualStrings(expected.application_id.bytes, view.application_id);
+        try std.testing.expectEqualStrings(expected.principal.bytes, view.principal);
+        try std.testing.expectEqualStrings(expected.tenant.bytes, view.tenant);
+        try std.testing.expectEqualDeep(expected.image, view.image);
+        try std.testing.expectEqualDeep(expected.profile, view.profile);
+        try std.testing.expectEqualDeep(expected.resources.items, view.resources);
+        try std.testing.expectEqualSlices(u8, &expected.runtime_identity, &view.runtime_identity);
+        try std.testing.expectEqual(expected.controller != null, view.has_controller);
+        self.tasks[offset] += 1;
+        if (self.reject_task) return error.UnsupportedExecutionBinding;
+    }
+};
+
+fn namespaceAuditBytes(fixture: *FairSchedulingFixture) ![32]u8 {
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    for ([_][]const u8{
+        "owner.lock",
+        "identity",
+        "state.sqlite",
+        "state.sqlite-journal",
+        "seal",
+        "seal.next",
+    }) |name| {
+        hash.update(name);
+        const path = try std.fmt.allocPrint(fixture.frame, "{s}/{s}", .{ fixture.path, name });
+        const bytes = std.Io.Dir.cwd().readFileAlloc(
+            fixture.io,
+            path,
+            fixture.a,
+            .unlimited,
+        ) catch |err| switch (err) {
+            error.FileNotFound => {
+                hash.update(&.{0});
+                continue;
+            },
+            else => return err,
+        };
+        defer fixture.a.free(bytes);
+        hash.update(&.{1});
+        hash.update(bytes);
+    }
+    var result: [32]u8 = undefined;
+    hash.final(&result);
+    return result;
+}
+
+const SessionPublicationFailure = enum { allocation, storage };
+
+fn sessionPublicationReady(
+    fixture: *FairSchedulingFixture,
+    session: *native.Session(FairTypes),
+) ![16]u8 {
+    const accepted = try fixture.service.submit(fixture.frame, "session-publication", 1);
+    for (0..8) |_| {
+        _ = try session.advance(fixture.frame);
+        if (session.slot.future != null) break;
+    } else return error.SessionDidNotStart;
+    const deadline = std.Io.Clock.awake.now(fixture.io).toMilliseconds() + 5000;
+    while (!session.slot.finished()) {
+        if (std.Io.Clock.awake.now(fixture.io).toMilliseconds() >= deadline)
+            return error.SessionDidNotFinish;
+        try fixture.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(1, FairCapture.acquisitions);
+    return accepted.receipt.task;
+}
+
+fn sessionPublicationFail(
+    fixture: *FairSchedulingFixture,
+    session: *native.Session(FairTypes),
+    failure: SessionPublicationFailure,
+) !void {
+    switch (failure) {
+        .allocation => {
+            var failing = std.testing.FailingAllocator.init(fixture.frame, .{ .fail_index = 0 });
+            try std.testing.expectError(
+                error.OutOfMemory,
+                session.collect(failing.allocator(), false),
+            );
+            try std.testing.expect(failing.has_induced_failure);
+        },
+        .storage => {
+            try fixture.namespace.store.database.exec("PRAGMA query_only=ON;");
+            defer expectCleanup(fixture.namespace.store.database.exec("PRAGMA query_only=OFF;"));
+            try std.testing.expectError(
+                error.StorageUnavailable,
+                session.collect(fixture.frame, false),
+            );
+        },
+    }
+}
+
+fn sessionPublicationReopen(fixture: *FairSchedulingFixture) !void {
+    try fixture.service.close(fixture.frame);
+    fixture.service_live = false;
+    try fixture.namespace.close();
+    fixture.namespace_live = false;
+    fixture.namespace = try native.Namespace.open(fixture.a, fixture.io, fixture.path);
+    fixture.namespace_live = true;
+    fixture.service = try native.tasks.Service(FairTypes).init(
+        fixture.failing.allocator(),
+        fixture.io,
+        &fixture.namespace,
+        fixture.assets,
+        &fixture.application,
+        fixture.handlers,
+        fixture.profile,
+    );
+    fixture.service_live = true;
+}
+
 test "round robin progresses peers and cancellation while one worker is held" {
     var fixture: FairSchedulingFixture = .{};
     defer fixture.deinit();

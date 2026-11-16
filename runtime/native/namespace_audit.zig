@@ -15,9 +15,24 @@ pub const Value = struct {
     bytes: []const u8,
 };
 
+pub const AuditTaskView = struct {
+    task: state.TaskId,
+    revision: u64,
+    terminal: bool,
+    application_id: []const u8,
+    principal: []const u8,
+    tenant: []const u8,
+    image: state.Reference,
+    profile: state.Reference,
+    resources: []const state.Reference,
+    runtime_identity: state.Digest,
+    has_controller: bool,
+};
+
 pub const Decoder = struct {
     context: ?*anyopaque = null,
     validate: *const fn (?*anyopaque, Value) anyerror!void,
+    task: ?*const fn (?*anyopaque, AuditTaskView) anyerror!void = null,
 };
 
 pub const Report = struct {
@@ -51,7 +66,22 @@ pub fn verify(
         if (!task.value.terminal()) {
             report.nonterminal_tasks = try std.math.add(u64, report.nonterminal_tasks, 1);
         }
-        if (decoder) |selected| try application(store, task.value, selected);
+        if (decoder) |selected| {
+            try application(store, task.value, selected);
+            if (selected.task) |observe| try observe(selected.context, .{
+                .task = task.value.id,
+                .revision = task.value.revision,
+                .terminal = task.value.terminal(),
+                .application_id = task.value.application_id.bytes,
+                .principal = task.value.principal.bytes,
+                .tenant = task.value.tenant.bytes,
+                .image = task.value.image,
+                .profile = task.value.profile,
+                .resources = task.value.resources.items,
+                .runtime_identity = task.value.runtime_identity,
+                .has_controller = task.value.controller != null,
+            });
+        }
     }
     return report;
 }

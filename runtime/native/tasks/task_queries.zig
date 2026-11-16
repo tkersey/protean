@@ -126,7 +126,9 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 &.{.{ .blob = &id }},
             );
             defer query.deinit();
-            var history: task_types.NotificationHistory = .{};
+            var history: task_types.NotificationHistory = .{
+                .complete = try notificationHistoryComplete(self, a, id),
+            };
             while (try query.step() == .row) {
                 const bytes = try query.bytes(0);
                 if (bytes.len != 32) return error.CorruptState;
@@ -137,6 +139,19 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 try includeNotificationAttempt(self, a, &history, attempt.value);
             }
             return history;
+        }
+        fn notificationHistoryComplete(
+            self: *Self,
+            a: std.mem.Allocator,
+            id: state.TaskId,
+        ) !bool {
+            if (!try hasLocalCustody(self, a, id, null)) return false;
+            const children = try workspaceIds(self, a, id);
+            defer a.free(children);
+            for (children) |child| {
+                if (!try hasLocalCustody(self, a, id, child)) return false;
+            }
+            return true;
         }
         pub fn taskPage(
             self: *Self,
@@ -191,7 +206,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 attempt.id,
                 attempt.task,
             )) orelse {
-                history.unresolved = try std.math.add(u64, history.unresolved, 1);
+                try includeUncapturedNotification(self, a, history, attempt);
                 return;
             };
             defer a.free(bytes);
@@ -208,7 +223,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     history.definitely_not_sent,
                     1,
                 ),
-                .unknown => history.unresolved = try std.math.add(u64, history.unresolved, 1),
+                .unknown => try includeUncapturedNotification(self, a, history, attempt),
                 .complete => {
                     history.complete_captures = try std.math.add(u64, history.complete_captures, 1);
                     history.captured = if (history.complete_captures == 1) .{
@@ -219,6 +234,56 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     } else null;
                 },
             }
+        }
+        fn includeUncapturedNotification(
+            self: *Self,
+            a: std.mem.Allocator,
+            history: *task_types.NotificationHistory,
+            attempt: state.Attempt,
+        ) !void {
+            const count = if (try notificationRecoveredNotSent(self, a, attempt))
+                &history.definitely_not_sent
+            else
+                &history.unresolved;
+            count.* = try std.math.add(u64, count.*, 1);
+        }
+        fn notificationRecoveredNotSent(
+            self: *Self,
+            a: std.mem.Allocator,
+            attempt: state.Attempt,
+        ) !bool {
+            var rows = try store(self).database.prepare(
+                "SELECT id FROM records WHERE task=? AND kind='reconciliation' ORDER BY id",
+                &.{.{ .blob = &attempt.task }},
+            );
+            defer rows.deinit();
+            while (try rows.step() == .row) {
+                const id = try rows.bytes(0);
+                if (id.len != 32) return error.CorruptState;
+                var saved = try record(
+                    self,
+                    state.Reconciliation,
+                    a,
+                    "reconciliation",
+                    id[0..32].*,
+                    attempt.task,
+                );
+                defer saved.deinit();
+                const item = saved.value;
+                if (!same(&item.attempt, &attempt.id) or item.outcome != .not_sent) continue;
+                if (!same(&item.id, id) or !same(&item.task, &attempt.task) or
+                    !same(&item.occurrence, &attempt.occurrence) or
+                    !std.meta.eql(item.request, attempt.request) or
+                    !std.meta.eql(item.prepared, attempt.prepared) or
+                    !std.meta.eql(item.profile, attempt.profile) or
+                    !same(item.capability.bytes, attempt.capability.bytes))
+                    return error.CorruptState;
+                try state.visitReconciliationHistory(a, store(self), item, struct {
+                    pub fn typed(_: @This(), comptime T: type, _: state.Reference, _: T) !void {}
+                }{});
+                return true;
+            }
+            return false;
         }
         pub fn projectedArtifact(
             self: *Self,

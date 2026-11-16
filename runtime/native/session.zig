@@ -44,9 +44,12 @@ pub fn Session(comptime Types: type) type {
             }
             if (!self.publication_pending) return .none;
             const result = self.slot.result orelse tasks.WorkResult.not_sent;
-            try self.service.completeWork(frame, self.slot.work, result);
-            try self.slot.release();
-            self.publication_pending = false;
+            const publication = self.service.completeWork(frame, self.slot.work, result);
+            if (self.service.work == null) {
+                try self.slot.release();
+                self.publication_pending = false;
+            }
+            try publication;
             return if (result == .unknown) .unknown else .completed;
         }
 

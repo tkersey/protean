@@ -143,6 +143,7 @@ pub const ApplicationValue = struct {
     }
 };
 pub const NotificationHistory = struct {
+    complete: bool = false,
     attempts: u64 = 0,
     definitely_not_sent: u64 = 0,
     complete_captures: u64 = 0,
@@ -155,7 +156,7 @@ pub const NotificationHistory = struct {
     } = null,
 
     pub fn transmissionExcluded(self: NotificationHistory) bool {
-        return self.attempts == self.definitely_not_sent;
+        return self.complete and self.attempts == self.definitely_not_sent;
     }
 };
 pub const TaskPage = struct {

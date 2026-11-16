@@ -82,8 +82,11 @@ rows; a page can be empty with a non-null cursor because another principal or
 application owns the scanned rows. Continue until the cursor is null.
 Returned pages, values and receipt owners must be deinitialized by the caller.
 `notificationHistory` counts all attempts of the selected registered
-`agent.notification.*` capability. Only zero attempts or explicit non-transmission
-for every attempt exclude transmission. A capture alone does not assert that
+`agent.notification.*` capability. Transmission is excluded only when local
+custody covers the task and all workspace children, and either no attempts exist
+or every attempt has explicit non-transmission evidence. Authoritative retained
+`not_sent` reconciliations count alongside captures; incomplete custody history
+cannot exclude transmission. A capture alone does not assert that
 the provider accepted the write; the application must interpret its outcome.
 Older attempts without retained non-transmission evidence remain unresolved.
 
@@ -104,7 +107,12 @@ performs no startup recovery and does not repair a seal gap or hot journal;
 those require recovery by a compatible ordinary owner. Application readability
 is only verified when a decoder is supplied. The report does not assess
 continuation compatibility: readable history and executable continuations are
-separate questions.
+separate questions. An optional decoder `task` callback receives
+`Namespace.AuditTaskView` after retention and that task's application values have
+validated. Its borrowed view exposes the original application, principal, tenant,
+image, profile, resources, runtime identity and controller presence, allowing the
+application to classify compatibility without executing or rewriting old tasks.
+Callback errors propagate without modifying the namespace.
 
 For an input-bound write, `protean.notification.Dispatcher(Input, Result)`
 constructs the delivery branch of a tagged application entry. Its `delivery`

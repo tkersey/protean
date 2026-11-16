@@ -78,6 +78,23 @@ const Sender = struct {
             .receipt = 42,
         }) };
     }
+
+    fn lookup(
+        ctx: native.Context,
+        _: native.registry.RecoveryInput,
+        _: []const u8,
+        _: ?[]const u8,
+    ) ![]u8 {
+        return ctx.allocator.dupe(u8, "not-sent");
+    }
+
+    fn verify(
+        _: native.registry.ProjectionContext,
+        _: native.registry.RecoveryInput,
+        evidence: []const u8,
+    ) !native.registry.RecoveryFinding {
+        return if (std.mem.eql(u8, evidence, "not-sent")) .not_sent else .inconclusive;
+    }
 };
 
 fn requestInput() Types.Input {
@@ -106,6 +123,11 @@ fn notificationDeclaration() native.Declaration {
         .acquire = Sender.acquire,
         .interpret = Sender.interpret,
         .dependencies = native.registry.opaqueProjection,
+    };
+    declaration.recovery = .{
+        .identity = "notification.receipt.v1",
+        .version = 1,
+        .lookup = .{ .acquire = Sender.lookup, .verify = Sender.verify },
     };
     return declaration;
 }
@@ -205,8 +227,385 @@ fn captureRecovery(
         try resumeCapture(env, task);
         try rejectContradictoryNegative(env, task);
         try auditApplicationReadability(env);
+        try recoveredHistory(env, false);
+        try recoveredHistory(env, true);
     }
     try std.testing.expectEqual(1, sender.acquisitions);
+    if (!cancel_after_reply) {
+        try notificationCustody(env, false);
+        try notificationCustody(env, true);
+    }
+}
+
+fn notificationCustody(initial: Environment, child: bool) !void {
+    var env = initial;
+    env.path = try std.fmt.allocPrint(env.frame, "{s}-custody-{any}", .{ env.path, child });
+    var destination_env = env;
+    destination_env.path = try std.fmt.allocPrint(env.frame, "{s}-destination", .{env.path});
+    const destination_identity = try notificationNamespaceIdentity(destination_env);
+    var owner: NotificationHistoryOwner = .{ .env = env };
+    defer owner.deinit();
+    try owner.open();
+    const service = &owner.service;
+    const submitted = try service.submit(env.frame, "placement", requestInput());
+    const task = submitted.receipt.task;
+    const subject: native.placement.Subject = .{
+        .task = task,
+        .work = if (child) try notificationChild(env, service, task) else null,
+    };
+    const source_key = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(@splat(61));
+    const destination_key = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(@splat(62));
+    const source_peer = try notificationPeer(env, service, subject, .{
+        .key = source_key.public_key.bytes,
+        .namespace = owner.namespace.identity,
+    }, "source");
+    const destination_peer = try notificationPeer(env, service, subject, .{
+        .key = destination_key.public_key.bytes,
+        .namespace = destination_identity,
+    }, "destination");
+    const source_config: native.placement.Configuration = .{
+        .signing_key = source_key,
+        .peers = &.{destination_peer},
+    };
+    const destination_config: native.placement.Configuration = .{
+        .signing_key = destination_key,
+        .peers = &.{source_peer},
+    };
+    service.profile.placement = &source_config;
+    owner.env.profile.placement = &source_config;
+    destination_env.profile.placement = &destination_config;
+    try notificationTransfers(&owner, destination_env, subject);
+}
+
+const NotificationHistoryOwner = struct {
+    env: Environment,
+    namespace: native.Namespace = undefined,
+    service: native.tasks.Service(Types) = undefined,
+    namespace_live: bool = false,
+    service_live: bool = false,
+
+    fn open(self: *@This()) !void {
+        self.namespace = try native.Namespace.open(
+            self.env.allocator,
+            std.testing.io,
+            self.env.path,
+        );
+        self.namespace_live = true;
+        self.service = try openService(self.env, &self.namespace);
+        self.service_live = true;
+    }
+
+    fn close(self: *@This()) !void {
+        try self.service.close(self.env.frame);
+        self.service_live = false;
+        try self.namespace.close();
+        self.namespace_live = false;
+    }
+
+    fn deinit(self: *@This()) void {
+        if (self.service_live) support.cleanup("service", self.service.close(self.env.frame));
+        if (self.namespace_live) support.cleanup("namespace", self.namespace.close());
+    }
+};
+
+fn notificationNamespaceIdentity(env: Environment) ![32]u8 {
+    var namespace = try native.Namespace.open(env.allocator, std.testing.io, env.path);
+    defer support.cleanup("namespace", namespace.close());
+    return namespace.identity;
+}
+
+fn notificationTransfers(
+    owner: *NotificationHistoryOwner,
+    destination: Environment,
+    subject: native.placement.Subject,
+) !void {
+    const env = owner.env;
+    try expectCoverage(env, &owner.service, subject.task, true);
+    const refused = try notificationOffer(env, &owner.service, subject, 63);
+    try owner.close();
+    const refusal = try notificationDecision(destination, refused, null);
+    try owner.open();
+    try owner.service.placementApplyDecision(env.frame, subject, refusal);
+    try expectCoverage(env, &owner.service, subject.task, true);
+    const offer = try notificationOffer(env, &owner.service, subject, 64);
+    try owner.close();
+    const accepted = try notificationDecision(destination, offer, try notificationArchive(env, 64));
+    try owner.open();
+    try expectCoverage(env, &owner.service, subject.task, false);
+    try owner.service.placementApplyDecision(env.frame, subject, accepted);
+    try expectCoverage(env, &owner.service, subject.task, false);
+}
+
+fn notificationDecision(
+    env: Environment,
+    offer: native.placement.Signed(native.placement.Offer),
+    archive: ?[]const u8,
+) !native.placement.Signed(native.placement.Decision) {
+    var namespace = try native.Namespace.open(env.allocator, std.testing.io, env.path);
+    defer support.cleanup("namespace", namespace.close());
+    var service = try openService(env, &namespace);
+    defer support.cleanup("service", service.close(env.frame));
+    const path = archive orelse return service.placementRefuse(
+        env.frame,
+        "source",
+        offer,
+        .withdrawn,
+    );
+    const decision = try service.placementAccept(env.frame, "accept", "source", offer, path);
+    const subject = offer.value.intent.subject;
+    try expectCoverage(env, &service, subject.task, subject.work == null);
+    if (subject.work == null) try destinationNotification(env, &service, subject.task);
+    return decision;
+}
+
+fn notificationChild(
+    env: Environment,
+    service: *native.tasks.Service(Types),
+    task: [16]u8,
+) ![32]u8 {
+    var builder = horos.source.Builder.init(env.allocator);
+    defer builder.deinit();
+    const number = try builder.scalar(u32);
+    const entry = try builder.declare(&.{number}, number, &.{}, &.{});
+    try builder.define(entry, try builder.pure(try builder.reference(builder.parameter(entry, 0))));
+    const document = try native.source_records.encode(
+        env.frame,
+        builder.module(entry, try builder.scalar(void)),
+    );
+    var diagnostic: native.program_construction.Diagnostic = .{};
+    const program = try service.workspaceBuild(
+        env.frame,
+        "child-build",
+        task,
+        document,
+        &diagnostic,
+    );
+    const started = try service.workspaceStart(
+        env.frame,
+        "child-start",
+        task,
+        program.receipt.workspace.?,
+        try contracts.encodeOwned(u32, env.frame, 19),
+        .{ .stop = .terminal, .continuation = .owner_scheduled },
+    );
+    return started.receipt.workspace.?;
+}
+
+fn notificationPeer(
+    env: Environment,
+    service: *native.tasks.Service(Types),
+    subject: native.placement.Subject,
+    site: native.placement.Site,
+    name: []const u8,
+) !native.placement.Peer {
+    return .{
+        .name = name,
+        .site = site,
+        .native_build = env.profile.runtime_identity,
+        .compatibility = try service.placementCompatibility(env.frame, subject),
+        .resource_binding = try env.profile.resourceIdentity(
+            env.frame,
+            env.application.image_identity,
+        ),
+        .disclosure_policy = @splat(65),
+        .context = undefined,
+        .disclose = struct {
+            fn disclose(
+                _: *anyopaque,
+                _: native.placement.Subject,
+                _: []const native.testing.state.Reference,
+            ) !void {}
+        }.disclose,
+    };
+}
+
+fn notificationArchive(env: Environment, transfer: u8) ![]const u8 {
+    return std.fmt.allocPrint(env.frame, "{s}-{d}.archive", .{ env.path, transfer });
+}
+
+fn notificationOffer(
+    env: Environment,
+    service: *native.tasks.Service(Types),
+    subject: native.placement.Subject,
+    transfer: u8,
+) !native.placement.Signed(native.placement.Offer) {
+    _ = try service.placementFreeze(
+        env.frame,
+        subject,
+        "destination",
+        try service.placementCut(env.frame, subject),
+        @splat(transfer),
+    );
+    try expectCoverage(env, service, subject.task, false);
+    const offer = try service.placementOffer(
+        env.frame,
+        subject,
+        "destination",
+        try notificationArchive(env, transfer),
+    );
+    try expectCoverage(env, service, subject.task, false);
+    return offer;
+}
+
+fn expectCoverage(
+    env: Environment,
+    service: *native.tasks.Service(Types),
+    task: [16]u8,
+    complete: bool,
+) !void {
+    const history = try service.notificationHistory(env.frame, task, identity);
+    try std.testing.expectEqual(0, history.attempts);
+    try std.testing.expectEqual(complete, history.complete);
+    try std.testing.expectEqual(complete, history.transmissionExcluded());
+}
+
+fn destinationNotification(
+    env: Environment,
+    service: *native.tasks.Service(Types),
+    task: [16]u8,
+) !void {
+    var saved = try service.task(env.frame, task);
+    defer saved.deinit();
+    _ = try service.resumeTask(env.frame, "destination-resume", task, saved.value.revision);
+    const work = try nextWork(env, service);
+    const acquired = try Sender.acquire(.{
+        .allocator = env.frame,
+        .io = std.testing.io,
+        .authority = &env.profile.authority,
+        .task_id = "notification-test",
+        .profile = env.profile.bytes,
+        .environment = env.profile.environment,
+    }, work.prepared.?);
+    try service.acquire(env.frame, work, acquired.captured);
+    _ = try expectCapturedHistory(env, service, task, false);
+}
+
+fn recoveredHistory(initial: Environment, unknown_capture: bool) !void {
+    var env = initial;
+    env.path = try std.fmt.allocPrint(env.frame, "{s}-recovery-{any}", .{
+        env.path, unknown_capture,
+    });
+    const original = try recoverNotification(env, unknown_capture);
+    var namespace = try native.Namespace.open(env.allocator, std.testing.io, env.path);
+    defer support.cleanup("namespace", namespace.close());
+    var service = try openService(env, &namespace);
+    defer support.cleanup("service", service.close(env.frame));
+    try expectUnsentHistory(env, &service, original.task);
+    var saved = try service.task(env.frame, original.task);
+    defer saved.deinit();
+    _ = try service.resumeTask(env.frame, "retry", original.task, saved.value.revision);
+    const later = try nextWork(env, &service);
+    try std.testing.expect(!std.mem.eql(u8, &later.attempt, &original.attempt));
+    if (unknown_capture) {
+        try service.acquire(env.frame, later, "delivered:42");
+    } else {
+        try service.unknown(env.frame, later);
+    }
+    const unresolved = try service.notificationHistory(env.frame, original.task, identity);
+    try std.testing.expectEqual(2, unresolved.attempts);
+    try std.testing.expectEqual(1, unresolved.definitely_not_sent);
+    try std.testing.expectEqual(@intFromBool(!unknown_capture), unresolved.unresolved);
+    try std.testing.expectEqual(@intFromBool(unknown_capture), unresolved.complete_captures);
+    try std.testing.expectEqual(unknown_capture, unresolved.captured != null);
+    try std.testing.expect(!unresolved.transmissionExcluded());
+}
+
+fn recoverNotification(env: Environment, unknown_capture: bool) !native.tasks.Work {
+    var namespace = try native.Namespace.open(env.allocator, std.testing.io, env.path);
+    defer support.cleanup("namespace", namespace.close());
+    var service = try openService(env, &namespace);
+    defer support.cleanup("service", service.close(env.frame));
+    _ = try service.submit(env.frame, "recoverable", requestInput());
+    const work = try nextWork(env, &service);
+    try service.unknown(env.frame, work);
+    if (unknown_capture) try retainUnknownCapture(env, &namespace, work);
+    const first = try lookupNotification(env, &service, work, "inconclusive");
+    try expectUnresolvedHistory(env, &service, work.task);
+    try service.acquire(env.frame, first, "no proof");
+    try expectUnresolvedHistory(env, &service, work.task);
+    const second = try lookupNotification(env, &service, work, "authoritative");
+    try expectUnresolvedHistory(env, &service, work.task);
+    try service.acquire(env.frame, second, "not-sent");
+    try expectUnsentHistory(env, &service, work.task);
+    return work;
+}
+
+fn retainUnknownCapture(
+    env: Environment,
+    namespace: *native.Namespace,
+    work: native.tasks.Work,
+) !void {
+    const bytes = (try namespace.store.recordBytes(
+        env.frame,
+        "attempt",
+        work.attempt,
+        work.task,
+    )).?;
+    var attempt = try contracts.decodeOwned(native.testing.state.Attempt, env.frame, bytes);
+    defer attempt.deinit();
+    try namespace.store.begin();
+    defer namespace.store.rollback();
+    try namespace.store.createRecord(
+        native.testing.state.Capture,
+        "capture",
+        work.attempt,
+        work.task,
+        .{
+            .task = work.task,
+            .occurrence = work.occurrence,
+            .attempt = work.attempt,
+            .request = attempt.value.prepared.?,
+            .response = null,
+            .disposition = .unknown,
+        },
+    );
+    try namespace.commit("test.unknown-capture");
+}
+
+fn lookupNotification(
+    env: Environment,
+    service: *native.tasks.Service(Types),
+    work: native.tasks.Work,
+    operation: []const u8,
+) !native.tasks.Work {
+    var saved = try service.task(env.frame, work.task);
+    defer saved.deinit();
+    _ = try service.reconcile(
+        env.frame,
+        operation,
+        work.task,
+        saved.value.revision,
+        work.occurrence,
+        work.attempt,
+        .lookup,
+    );
+    return nextWork(env, service);
+}
+
+fn expectUnresolvedHistory(
+    env: Environment,
+    service: *native.tasks.Service(Types),
+    task: [16]u8,
+) !void {
+    const history = try service.notificationHistory(env.frame, task, identity);
+    try std.testing.expect(history.complete);
+    try std.testing.expectEqual(1, history.attempts);
+    try std.testing.expectEqual(1, history.unresolved);
+    try std.testing.expectEqual(0, history.definitely_not_sent);
+    try std.testing.expect(!history.transmissionExcluded());
+}
+
+fn expectUnsentHistory(
+    env: Environment,
+    service: *native.tasks.Service(Types),
+    task: [16]u8,
+) !void {
+    const history = try service.notificationHistory(env.frame, task, identity);
+    try std.testing.expect(history.complete);
+    try std.testing.expectEqual(1, history.attempts);
+    try std.testing.expectEqual(0, history.unresolved);
+    try std.testing.expectEqual(1, history.definitely_not_sent);
+    try std.testing.expect(history.transmissionExcluded());
 }
 
 fn rejectContradictoryNegative(env: Environment, task_id: [16]u8) !void {

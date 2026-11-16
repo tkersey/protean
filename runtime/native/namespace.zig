@@ -176,6 +176,8 @@ pub fn openDirectory(
 }
 
 pub const Namespace = struct {
+    pub const AuditTaskView = @import("namespace_audit.zig").AuditTaskView;
+
     allocator: std.mem.Allocator,
     directory: c_int,
     lock: c_int,
