@@ -8205,6 +8205,38 @@ test "controller outer capsule moves without compatibility acquiring an executio
     try controllerMicroprogress(true);
 }
 
+test "resident computation yields to queued peers at a cut or eight bounded owner turns" {
+    var fixture: ControllerMicroprogressFixture = .{ .moving = false };
+    defer fixture.deinit();
+    try fixture.initImageWithLength(4096);
+    try fixture.initApplication();
+    try fixture.initPaths();
+    try fixture.initOwner();
+    const first = try fixture.service.submit(fixture.frame, "resident-first", 10);
+    const peer = try fixture.service.submit(fixture.frame, "resident-peer", 20);
+    var retained_turns: u32 = 0;
+    for (0..8) |turn| {
+        try std.testing.expectEqual(.progressed, try fixture.service.pump(fixture.frame));
+        try std.testing.expectEqual(first.receipt.task, fixture.service.active.?.task);
+        retained_turns += 1;
+        if (fixture.service.active.?.root_control == null or
+            fixture.service.active.?.root_cut_ready) break;
+        if (turn == 0) _ = try fixture.service.submit(fixture.frame, "resident-newcomer", 30);
+    }
+    try std.testing.expect(retained_turns > 1);
+    try std.testing.expectEqual(.progressed, try fixture.service.pump(fixture.frame));
+    try std.testing.expectEqual(peer.receipt.task, fixture.service.active.?.task);
+    _ = try fixture.service.requestCancel(
+        fixture.frame,
+        "resident-cancel",
+        first.receipt.task,
+        "stop",
+    );
+    var cancelled = try fixture.service.task(fixture.frame, first.receipt.task);
+    defer cancelled.deinit();
+    try std.testing.expect(cancelled.value.cancellation != null);
+}
+
 fn controllerMicroprogress(comptime moving: bool) !void {
     var fixture: ControllerMicroprogressFixture = .{ .moving = moving };
     defer fixture.deinit();
@@ -8294,6 +8326,10 @@ const ControllerMicroprogressFixture = struct {
     completed_source_config: p.Configuration = undefined,
 
     fn initImage(self: *ControllerMicroprogressFixture) !void {
+        try self.initImageWithLength(256);
+    }
+
+    fn initImageWithLength(self: *ControllerMicroprogressFixture, comptime length: usize) !void {
         self.arena = std.heap.ArenaAllocator.init(self.a);
         self.arena_live = true;
         self.frame = self.arena.allocator();
@@ -8303,7 +8339,7 @@ const ControllerMicroprogressFixture = struct {
                 const number = try b.scalar(u32);
                 const entry = try b.declare(&.{number}, number, &.{}, &.{});
                 var result = try b.reference(b.parameter(entry, 0));
-                for (0..256) |_| result = try b.primitive(
+                for (0..length) |_| result = try b.primitive(
                     number,
                     .integer_bit_xor,
                     &.{ result, try b.constant(u32, 1) },

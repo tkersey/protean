@@ -62,6 +62,7 @@ pub fn Service(comptime Types: type) type {
         /// Logical queue order is items[cursor..] followed by items[0..cursor].
         /// Advancing a turn must not move every remaining ID.
         runnable_cursor: usize = 0,
+        resident_turns: u8 = 0,
         /// Unsettled cleanup retains ownership, but never runnable work.
         owned: std.ArrayList(state.TaskId) = .empty,
         cleanup_cursor: usize = 0,

@@ -294,6 +294,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             }
             self.runnable.clearRetainingCapacity();
             self.runnable_cursor = 0;
+            self.resident_turns = 0;
             try retire(self, a);
         }
     };
