@@ -31,7 +31,7 @@ TigerStyle and still cannot pass the terminal gate.
 | Lane | Checks |
 | --- | --- |
 | `authoring` | Source inventory, `check-protean` and `check-native-https`: authoring, model/value contracts, construction, compile-time rejection, helper integrity, adaptive asset emission, formatting, wire checks and the independent HTTPS endpoint. |
-| `owners` | All 55 retained native task/response/model-custody owner tests, including session gating and publication failures, pagination, checked notification recovery, retained attempt views, read-only task auditing and their participant imports. |
+| `owners` | All 56 retained native task/response/model-custody owner tests, including session gating and publication failures, pagination, checked notification recovery, retained attempt views, read-only task auditing and their participant imports. |
 | `owner-adaptive-control` | Nineteen adaptive owner tests across four independent processes: controls/recovery, projection resource failures, constructed succession, and delegated-answer ancestry. |
 | `owner-projection-repair` | The executable projection repair/restart witness. |
 | `owner-projection-boundaries` | Eight tests across three independent processes: projection authenticity, receipt/archive checks, current/profile/delegated bindings, and ChatGPT SSE controls and delegation. |

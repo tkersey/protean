@@ -4313,7 +4313,7 @@ test "public session owns worker lifetime across retryable publication failure" 
     try std.testing.expect(failing.has_induced_failure);
     try std.testing.expectEqualDeep(before, fixture.namespace.store.head);
     try std.testing.expect(!fixture.namespace.store.fenced);
-    try std.testing.expect(session.busy() and session.publication_pending);
+    try std.testing.expect(session.busy() and session.publication == .joined);
     try std.testing.expect(session.slot.future == null);
     try std.testing.expect(session.slot.result != null and session.slot.result.? == .acquired);
     try std.testing.expectEqualSlices(u8, &work.attempt, &fixture.service.work.?.attempt);
@@ -4347,7 +4347,7 @@ test "public session owns worker lifetime after consumed publication failure" {
         try sessionPublicationFail(&fixture, &session, failure);
         try std.testing.expectEqualDeep(before, fixture.namespace.store.head);
         try std.testing.expect(fixture.namespace.store.fenced and fixture.service.work == null);
-        try std.testing.expect(!session.busy() and !session.publication_pending);
+        try std.testing.expect(!session.busy() and session.publication == .none);
         try std.testing.expect(session.slot.result == null);
         try std.testing.expectEqual(.none, try session.collect(fixture.frame, false));
         try std.testing.expectError(error.StorageUnavailable, session.tick(fixture.frame));
@@ -4369,6 +4369,83 @@ test "public session owns worker lifetime after consumed publication failure" {
             "fair.leaf.v1",
         ));
         try std.testing.expect(!session.busy());
+    }
+}
+
+const SessionLaunchFailure = struct {
+    var failing: ?*std.testing.FailingAllocator = null;
+    var calls: u32 = 0;
+
+    fn concurrent(
+        _: ?*anyopaque,
+        _: usize,
+        _: std.mem.Alignment,
+        _: []const u8,
+        _: std.mem.Alignment,
+        _: *const fn (*const anyopaque, *anyopaque) void,
+    ) std.Io.ConcurrentError!*std.Io.AnyFuture {
+        calls += 1;
+        if (failing) |allocator| allocator.fail_index = allocator.alloc_index;
+        return error.ConcurrencyUnavailable;
+    }
+};
+
+test "public session owns worker lifetime after failed launch and publication" {
+    const failures = [_]enum { uninterrupted, retryable, consumed }{
+        .uninterrupted, .retryable, .consumed,
+    };
+    for (failures) |failure| {
+        var fixture: FairSchedulingFixture = .{};
+        defer fixture.deinit();
+        try fixture.initAssets();
+        try fixture.initHandlers();
+        try fixture.initOwner();
+        const placement: native.placement.Configuration = .{
+            .signing_key = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(@splat(46)),
+            .peers = &.{},
+        };
+        if (failure == .retryable) fixture.service.profile.placement = &placement;
+        var failing = std.testing.FailingAllocator.init(fixture.frame, .{});
+        SessionLaunchFailure.failing = if (failure == .uninterrupted) null else &failing;
+        defer SessionLaunchFailure.failing = null;
+        SessionLaunchFailure.calls = 0;
+        var vtable = fixture.io.vtable.*;
+        vtable.concurrent = SessionLaunchFailure.concurrent;
+        fixture.service.io.vtable = &vtable;
+        var session = try native.Session(FairTypes).init(&fixture.service);
+        defer session.deinit() catch @panic("session left busy");
+        const accepted = try fixture.service.submit(fixture.frame, "session-launch-failure", 1);
+        for (0..8) |_| {
+            _ = session.advance(failing.allocator()) catch |err| {
+                try std.testing.expectEqual(error.OutOfMemory, err);
+                break;
+            };
+            if (SessionLaunchFailure.calls != 0) break;
+        } else return error.WorkerLaunchNotReached;
+        try std.testing.expectEqual(1, SessionLaunchFailure.calls);
+        try std.testing.expectEqual(failure != .uninterrupted, failing.has_induced_failure);
+        try std.testing.expectEqual(0, FairCapture.acquisitions);
+        try std.testing.expect(session.slot.future == null);
+        try std.testing.expectEqual(failure == .consumed, fixture.namespace.store.fenced);
+        try std.testing.expectEqual(failure == .retryable, fixture.service.work != null);
+        try std.testing.expectEqual(failure == .retryable, session.busy());
+        if (failure == .retryable) {
+            try std.testing.expectEqual(.unstarted, session.publication);
+            try std.testing.expectError(error.Busy, session.deinit());
+            try std.testing.expectEqual(.completed, try session.collect(fixture.frame, false));
+        }
+        try std.testing.expect(!session.busy() and fixture.service.work == null);
+        try std.testing.expectEqual(.none, session.publication);
+        try std.testing.expectEqual(.none, try session.collect(fixture.frame, false));
+        if (failure != .consumed) {
+            var task = try fixture.service.task(fixture.frame, accepted.receipt.task);
+            defer task.deinit();
+            try std.testing.expectEqual(
+                .blocked,
+                try fixture.service.status(fixture.frame, task.value),
+            );
+            try session.park(fixture.frame);
+        }
     }
 }
 

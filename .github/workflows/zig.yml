@@ -244,7 +244,7 @@ jobs:
             zig build check-protean check-native-https \
               -Doptimize=safe --summary all
           elif [ "${{ matrix.lane }}" = owners ]; then
-            run_compiled_tests native-owner-tasks 55
+            run_compiled_tests native-owner-tasks 56
           elif [ "${{ matrix.compiled_profile }}" = owner-adaptive-control ]; then
             log="$RUNNER_TEMP/native-owner-adaptive-tests.log"
             /usr/bin/time -v node tools/native/qualification_tests.mjs \

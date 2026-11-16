@@ -8,10 +8,11 @@ pub const Completion = enum { none, completed, unknown };
 pub fn Session(comptime Types: type) type {
     return struct {
         const Self = @This();
+        const Publication = enum { none, joined, unstarted };
 
         service: *tasks.Service(Types),
         slot: *Worker,
-        publication_pending: bool = false,
+        publication: Publication = .none,
 
         pub fn init(service: *tasks.Service(Types)) !Self {
             if (service.work != null or service.session_attached) return error.Busy;
@@ -31,7 +32,7 @@ pub fn Session(comptime Types: type) type {
         }
 
         pub fn busy(self: *const Self) bool {
-            return self.slot.future != null or self.publication_pending;
+            return self.slot.future != null or self.publication != .none;
         }
 
         pub fn collect(self: *Self, frame: std.mem.Allocator, cancel: bool) !Completion {
@@ -40,21 +41,24 @@ pub fn Session(comptime Types: type) type {
                     self.slot.cancel();
                 if (!self.slot.finished()) return .none;
                 try self.slot.join();
-                self.publication_pending = true;
+                self.publication = .joined;
             }
-            if (!self.publication_pending) return .none;
-            const result = self.slot.result orelse tasks.WorkResult.not_sent;
+            if (self.publication == .none) return .none;
+            const result = if (self.publication == .unstarted)
+                tasks.WorkResult.not_sent
+            else
+                self.slot.result orelse tasks.WorkResult.not_sent;
             const publication = self.service.completeWork(frame, self.slot.work, result);
             if (self.service.work == null) {
-                try self.slot.release();
-                self.publication_pending = false;
+                if (self.publication == .joined) try self.slot.release();
+                self.publication = .none;
             }
             try publication;
             return if (result == .unknown) .unknown else .completed;
         }
 
         pub fn advance(self: *Self, frame: std.mem.Allocator) !Progress {
-            if (self.publication_pending) return error.Busy;
+            if (self.publication != .none) return error.Busy;
             return switch (try self.service.pump(frame)) {
                 .idle => .idle,
                 .waiting => .waiting,
@@ -64,7 +68,10 @@ pub fn Session(comptime Types: type) type {
                         work,
                         self.service.profile.authority,
                         self.service.profile.environment,
-                    ) catch try self.service.notSent(frame, work);
+                    ) catch {
+                        self.publication = .unstarted;
+                        _ = try self.collect(frame, false);
+                    };
                     break :blk .progressed;
                 },
             };
