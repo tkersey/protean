@@ -61,6 +61,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             try recoverWorkspace(&self, a);
             try recoverControllerResiduals(&self, a, null);
             try recoverPlacementFiles(&self, a);
+            try store(&self).installAttemptIndex();
             return self;
         }
         pub fn store(self: *Self) *storage.Store {
@@ -251,7 +252,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             return driver;
         }
         pub fn close(self: *Self, a: std.mem.Allocator) !void {
-            if (self.work != null) return error.Busy;
+            if (self.work != null or self.session_attached) return error.Busy;
             if (self.placement_job) |job| {
                 job.job.deinit();
                 self.placement_job = null;
@@ -294,6 +295,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             }
             self.runnable.clearRetainingCapacity();
             self.runnable_cursor = 0;
+            self.resident_turns = 0;
             try retire(self, a);
         }
     };

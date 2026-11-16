@@ -8,7 +8,7 @@ const client_api = @import("client.zig");
 const tasks = @import("tasks.zig");
 const Namespace = @import("namespace.zig").Namespace;
 const transport_api = @import("transport.zig");
-const Worker = @import("worker.zig").Worker;
+const Session = @import("session.zig").Session;
 const c = @import("native_c");
 const identity = @import("identity.zig");
 const Shutdown = enum { park, cancel };
@@ -1098,10 +1098,11 @@ fn driveHuman(
     interrupts.store(0, .release);
     if (c.protean_native_signals_begin(interrupt) != 0) return error.IoUnavailable;
     defer c.protean_native_signals_end();
-    const slot = try Worker.init(a, service.io);
+    var session = try Session(Types).init(service);
+    const slot = &session;
     defer {
-        if (slot.future != null) std.process.exit(2);
-        slot.deinit(a) catch |err| {
+        if (slot.busy()) std.process.exit(2);
+        slot.deinit() catch |err| {
             _ = reportFailure(err);
         };
     }
@@ -1123,25 +1124,13 @@ fn driveHuman(
             });
             try service.cancelOwned(frame, operation, "human requested cancellation");
         }
-        if (slot.future != null) {
-            if (try service.shouldCancelWork(slot.work)) slot.cancel();
-            if (slot.finished()) {
-                try slot.join();
-                try service.completeWork(frame, slot.work, slot.result orelse .not_sent);
-                try slot.release();
-            }
-        }
-        const step = try service.pump(frame);
+        _ = try slot.collect(frame, false);
+        const step = try slot.advance(frame);
         switch (step) {
-            .work => |work| slot.start(
-                work,
-                service.profile.authority,
-                service.profile.environment,
-            ) catch try service.notSent(frame, work),
             .progressed => {},
             .waiting, .idle => {
                 if (!humanCanPark(
-                    slot.future != null,
+                    slot.busy(),
                     service.runnable.items.len != 0,
                     service.placementActive(),
                 )) {
@@ -1519,12 +1508,16 @@ fn serve(
     interrupts.store(0, .release);
     if (c.protean_native_signals_begin(interrupt) != 0) return error.IoUnavailable;
     defer c.protean_native_signals_end();
-    const worker: ?*Worker = if (connection.client != null) try Worker.init(a, io) else null;
+    var session: ?Session(Types) = if (connection.client) |client|
+        try Session(Types).init(client.service)
+    else
+        null;
+    const worker: ?*Session(Types) = if (session) |*owner| owner else null;
     defer if (worker) |slot| {
         // Unexpected failure with live I/O uses process-crash recovery. Never
         // release the namespace while a thread can still dispatch or publish.
-        if (slot.future != null) std.process.exit(74);
-        slot.deinit(a) catch |err| {
+        if (slot.busy()) std.process.exit(74);
+        slot.deinit() catch |err| {
             _ = reportFailure(err);
         };
     };
@@ -1543,7 +1536,7 @@ fn HostLoop(comptime Types: type) type {
     return struct {
         transport: *transport_api.Transport,
         connection: *Connection(Types),
-        worker: ?*Worker,
+        worker: ?*Session(Types),
         shutdown_at: ?i64 = null,
         code: u8 = 0,
         writable: bool = true,
@@ -1722,8 +1715,8 @@ fn HostLoop(comptime Types: type) type {
                     );
                     self.cancelled_owned = true;
                 }
-                try self.finishWorker(frame, time, mode, service, slot);
-                const pump_idle = try self.pump(frame, time, mode, service, slot);
+                try self.finishWorker(frame, time, mode, slot);
+                const pump_idle = try self.pump(frame, time, mode, slot);
                 if (self.writable and
                     self.shutdown_at == null and
                     !self.closed_notice and
@@ -1736,7 +1729,7 @@ fn HostLoop(comptime Types: type) type {
                 }
                 if (self.shutdown_at != null and
                     !self.parked and
-                    slot.future == null and
+                    !slot.busy() and
                     shutdownCanPark(
                         mode,
                         self.code,
@@ -1755,63 +1748,37 @@ fn HostLoop(comptime Types: type) type {
             frame: std.mem.Allocator,
             time: i64,
             mode: Shutdown,
-            service: *tasks.Service(Types),
-            slot: *Worker,
+            slot: *Session(Types),
         ) !void {
-            if (slot.future != null) {
-                const deadline_near = if (self.shutdown_at) |start|
-                    time - start >= self.connection.limits.output_stall_ms - 100
-                else
-                    false;
-                if ((try service.shouldCancelWork(
-                    slot.work,
-                )) or (self.shutdown_at != null and mode == .park) or deadline_near) slot.cancel();
-                if (slot.finished()) {
-                    try slot.join();
-                    const result = slot.result orelse .not_sent;
-                    try service.completeWork(frame, slot.work, result);
-                    if (result == .unknown and
-                        self.shutdown_at != null and
-                        self.code == 0) self.code = 2;
-                    try slot.release();
-                    self.progressed = true;
-                }
-            }
+            const deadline_near = if (self.shutdown_at) |started|
+                time - started >= self.connection.limits.output_stall_ms - 100
+            else
+                false;
+            const completion = try slot.collect(
+                frame,
+                (self.shutdown_at != null and mode == .park) or deadline_near,
+            );
+            if (completion == .unknown and self.shutdown_at != null and self.code == 0)
+                self.code = 2;
+            if (completion != .none) self.progressed = true;
         }
         fn pump(
             self: *@This(),
             frame: std.mem.Allocator,
             time: i64,
             mode: Shutdown,
-            service: *tasks.Service(Types),
-            slot: *Worker,
+            slot: *Session(Types),
         ) !bool {
-            var pump_idle = true;
-            if (!self.parked and
-                (self.shutdown_at == null or
-                    (mode == .cancel and
-                        self.code == 0)))
-            {
-                const step = service.pump(frame) catch |err| blk: {
-                    if (self.shutdown_at == null) self.shutdown_at = time;
-                    _ = reportFailure(err);
-                    self.code = if (err == error.Denied) 2 else 74;
-                    break :blk tasks.Step.idle;
-                };
-                pump_idle = step == .idle;
-                switch (step) {
-                    .work => |work| slot.start(
-                        work,
-                        service.profile.authority,
-                        service.profile.environment,
-                    ) catch {
-                        try service.notSent(frame, work);
-                    },
-                    .progressed, .waiting => self.progressed = true,
-                    .idle => {},
-                }
-            }
-            return pump_idle;
+            if (self.parked or (self.shutdown_at != null and
+                (mode != .cancel or self.code != 0))) return true;
+            const step = slot.advance(frame) catch |err| {
+                if (self.shutdown_at == null) self.shutdown_at = time;
+                _ = reportFailure(err);
+                self.code = if (err == error.Denied) 2 else 74;
+                return true;
+            };
+            if (step != .idle) self.progressed = true;
+            return step == .idle;
         }
         fn shutdown(self: *@This(), frame: std.mem.Allocator, time: i64, mode: Shutdown) !?u8 {
             if (self.shutdown_at) |start| {
@@ -1819,7 +1786,7 @@ fn HostLoop(comptime Types: type) type {
                     // A joined worker is the only ordinary path to releasing the
                     // lock. At the hard deadline process exit terminates all native
                     // threads together; durable DISPATCHING recovers as UNKNOWN.
-                    const worker_live = if (self.worker) |slot| slot.future != null else false;
+                    const worker_live = if (self.worker) |slot| slot.busy() else false;
                     const notice_pending = self.parked and
                         self.writable and
                         self.connection.initialized and

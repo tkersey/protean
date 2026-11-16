@@ -60,6 +60,232 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             try allowed(self);
             return self.application.schemaArtifact(id);
         }
+        pub fn operationLookup(
+            self: *Self,
+            a: std.mem.Allocator,
+            id: []const u8,
+        ) !?contracts.Decoded(state.Receipt) {
+            try allowed(self);
+            const key = try Records.operationKey(self, a, id);
+            const bytes = (try store(self).savedReceipt(a, &key)) orelse return null;
+            defer a.free(bytes);
+            var receipt = try contracts.decodeOwned(state.Receipt, a, bytes);
+            errdefer receipt.deinit();
+            var value = try task(self, a, receipt.value.task);
+            defer value.deinit();
+            if (!same(receipt.value.client_operation_id.bytes, id)) return error.CorruptState;
+            return receipt;
+        }
+        pub fn applicationValue(
+            self: *Self,
+            a: std.mem.Allocator,
+            id: state.TaskId,
+            result: bool,
+        ) !?task_types.ApplicationValue {
+            var value = try task(self, a, id);
+            defer value.deinit();
+            if (!same(value.value.application_id.bytes, Types.application_id))
+                return error.IncompatibleProfile;
+            const reference = if (result)
+                value.value.client_result orelse return null
+            else
+                value.value.input;
+            const outcome = value.value.outcome_kind;
+            const schema = if (!result) value.value.input_schema_id else switch (outcome) {
+                .completed => value.value.output_schema_id,
+                .failed => value.value.failure_schema_id,
+                else => return null,
+            };
+            const schema_id = try a.dupe(u8, schema.bytes);
+            errdefer a.free(schema_id);
+            return .{
+                .allocator = a,
+                .task = id,
+                .revision = value.value.revision,
+                .schema_id = schema_id,
+                .reference = reference,
+                .encoding = if (result) .json else .contract,
+                .bytes = try store(self).object(a, reference, null),
+            };
+        }
+        pub fn notificationHistory(
+            self: *Self,
+            a: std.mem.Allocator,
+            id: state.TaskId,
+            capability: []const u8,
+        ) !task_types.NotificationHistory {
+            var value = try task(self, a, id);
+            defer value.deinit();
+            if (!std.mem.startsWith(u8, capability, "agent.notification."))
+                return error.InvalidCapability;
+            for (self.handlers.entries) |entry| {
+                if (same(entry.declaration.identity, capability)) break;
+            } else return error.UnsupportedCapability;
+            var query = try store(self).database.prepare(
+                "SELECT id FROM records WHERE task=? AND kind='attempt' ORDER BY id",
+                &.{.{ .blob = &id }},
+            );
+            defer query.deinit();
+            var history: task_types.NotificationHistory = .{
+                .complete = try notificationHistoryComplete(self, a, id),
+            };
+            while (try query.step() == .row) {
+                const bytes = try query.bytes(0);
+                if (bytes.len != 32) return error.CorruptState;
+                var attempt = try record(self, state.Attempt, a, "attempt", bytes[0..32].*, id);
+                defer attempt.deinit();
+                if (!same(attempt.value.capability.bytes, capability)) continue;
+                if (attempt.value.operation != .environment) return error.CorruptState;
+                try includeNotificationAttempt(self, a, &history, attempt.value);
+            }
+            return history;
+        }
+        fn notificationHistoryComplete(
+            self: *Self,
+            a: std.mem.Allocator,
+            id: state.TaskId,
+        ) !bool {
+            if (!try hasLocalCustody(self, a, id, null)) return false;
+            const children = try workspaceIds(self, a, id);
+            defer a.free(children);
+            for (children) |child| {
+                if (!try hasLocalCustody(self, a, id, child)) return false;
+            }
+            return true;
+        }
+        pub fn taskPage(
+            self: *Self,
+            a: std.mem.Allocator,
+            after: ?state.TaskId,
+            limit: u32,
+        ) !task_types.TaskPage {
+            try allowed(self);
+            if (limit == 0) return error.InvalidParams;
+            const cursor = after orelse @as(state.TaskId, @splat(0));
+            var query = if (after != null) try store(self).database.prepare(
+                "SELECT id FROM tasks WHERE id>? ORDER BY id LIMIT ?",
+                &.{ .{ .blob = &cursor }, .{ .integer = limit } },
+            ) else try store(self).database.prepare(
+                "SELECT id FROM tasks ORDER BY id LIMIT ?",
+                &.{.{ .integer = limit }},
+            );
+            defer query.deinit();
+            var ids: std.ArrayList(state.TaskId) = .empty;
+            errdefer ids.deinit(a);
+            var scanned: u32 = 0;
+            var last: ?state.TaskId = null;
+            while (try query.step() == .row) {
+                const bytes = try query.bytes(0);
+                if (bytes.len != 16) return error.CorruptState;
+                const id = bytes[0..16].*;
+                last = id;
+                scanned = try std.math.add(u32, scanned, 1);
+                var value = task(self, a, id) catch |err| switch (err) {
+                    error.Denied => continue,
+                    else => return err,
+                };
+                defer value.deinit();
+                if (!same(value.value.application_id.bytes, Types.application_id)) continue;
+                try ids.append(a, id);
+            }
+            return .{
+                .allocator = a,
+                .tasks = try ids.toOwnedSlice(a),
+                .next = if (scanned == limit) last else null,
+            };
+        }
+        fn includeNotificationAttempt(
+            self: *Self,
+            a: std.mem.Allocator,
+            history: *task_types.NotificationHistory,
+            attempt: state.Attempt,
+        ) !void {
+            history.attempts = try std.math.add(u64, history.attempts, 1);
+            const bytes = (try store(self).recordBytes(
+                a,
+                "capture",
+                attempt.id,
+                attempt.task,
+            )) orelse {
+                try includeUncapturedNotification(self, a, history, attempt);
+                return;
+            };
+            defer a.free(bytes);
+            var decoded = try contracts.decodeOwned(state.Capture, a, bytes);
+            defer decoded.deinit();
+            const capture = decoded.value;
+            if (!same(&capture.task, &attempt.task) or !same(&capture.attempt, &attempt.id) or
+                !same(&capture.occurrence, &attempt.occurrence) or
+                attempt.prepared == null or
+                !std.meta.eql(capture.request, attempt.prepared.?)) return error.CorruptState;
+            switch (capture.disposition) {
+                .definitely_not_sent => history.definitely_not_sent = try std.math.add(
+                    u64,
+                    history.definitely_not_sent,
+                    1,
+                ),
+                .unknown => try includeUncapturedNotification(self, a, history, attempt),
+                .complete => {
+                    history.complete_captures = try std.math.add(u64, history.complete_captures, 1);
+                    history.captured = if (history.complete_captures == 1) .{
+                        .attempt = attempt.id,
+                        .occurrence = attempt.occurrence,
+                        .response = capture.response,
+                        .reply = if (capture.projection) |projection| projection.reply else null,
+                    } else null;
+                },
+            }
+        }
+        fn includeUncapturedNotification(
+            self: *Self,
+            a: std.mem.Allocator,
+            history: *task_types.NotificationHistory,
+            attempt: state.Attempt,
+        ) !void {
+            const count = if (try notificationRecoveredNotSent(self, a, attempt))
+                &history.definitely_not_sent
+            else
+                &history.unresolved;
+            count.* = try std.math.add(u64, count.*, 1);
+        }
+        fn notificationRecoveredNotSent(
+            self: *Self,
+            a: std.mem.Allocator,
+            attempt: state.Attempt,
+        ) !bool {
+            var rows = try store(self).database.prepare(
+                "SELECT id FROM records WHERE task=? AND kind='reconciliation' ORDER BY id",
+                &.{.{ .blob = &attempt.task }},
+            );
+            defer rows.deinit();
+            while (try rows.step() == .row) {
+                const id = try rows.bytes(0);
+                if (id.len != 32) return error.CorruptState;
+                var saved = try record(
+                    self,
+                    state.Reconciliation,
+                    a,
+                    "reconciliation",
+                    id[0..32].*,
+                    attempt.task,
+                );
+                defer saved.deinit();
+                const item = saved.value;
+                if (!same(&item.attempt, &attempt.id) or item.outcome != .not_sent) continue;
+                if (!same(&item.id, id) or !same(&item.task, &attempt.task) or
+                    !same(&item.occurrence, &attempt.occurrence) or
+                    !std.meta.eql(item.request, attempt.request) or
+                    !std.meta.eql(item.prepared, attempt.prepared) or
+                    !std.meta.eql(item.profile, attempt.profile) or
+                    !same(item.capability.bytes, attempt.capability.bytes))
+                    return error.CorruptState;
+                try state.visitReconciliationHistory(a, store(self), item, struct {
+                    pub fn typed(_: @This(), comptime T: type, _: state.Reference, _: T) !void {}
+                }{});
+                return true;
+            }
+            return false;
+        }
         pub fn projectedArtifact(
             self: *Self,
             a: std.mem.Allocator,

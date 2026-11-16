@@ -1260,6 +1260,8 @@ const BuildGraph = struct {
             else
                 s.native_graph.testModuleGrouped(checks, suite, &.{&.{".test"}}, null);
             if (linuxX86(s.b.graph.host)) tests.use_llvm = false;
+            if (comptime std.mem.eql(u8, group[0], "tasks"))
+                s.nativeEmbeddingDiagnostic(suite);
             s.b.step(
                 "build-native-owner-" ++ group[0] ++ "-check",
                 "Build the retained native " ++ group[0] ++ " test executable",
@@ -1270,6 +1272,28 @@ const BuildGraph = struct {
             }).step);
             s.native_owner_integration.dependOn(checks);
         }
+    }
+
+    fn nativeEmbeddingDiagnostic(s: *BuildGraph, suite: *std.Build.Module) void {
+        const check = s.b.step(
+            "check-native-embedding",
+            "Diagnose session and notification owners",
+        );
+        const tests = s.native_graph.testModuleFiltered(check, suite, &.{
+            "public session owns worker lifetime",
+            "public session task pages",
+            "public session gates computed effects",
+            "durable owner replays work",
+            "native_notification.test",
+            "retained attempt views",
+            "read-only namespace task audit",
+        });
+        if (linuxX86(s.b.graph.host)) tests.use_llvm = false;
+        const audit = s.native_graph.testModuleFiltered(check, s.checked_environment, &.{
+            "namespace read-only audit",
+            "non-transmission evidence",
+        });
+        if (linuxX86(s.b.graph.host)) audit.use_llvm = false;
     }
 
     fn workspaceRecovery(s: *BuildGraph) void {

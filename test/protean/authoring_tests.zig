@@ -3,4 +3,5 @@ test {
     _ = @import("values.zig");
     _ = @import("callable.zig");
     _ = @import("compiled_tool.zig");
+    _ = @import("notification.zig");
 }

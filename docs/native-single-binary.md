@@ -52,6 +52,83 @@ supplies an executable name, an environment source, and either:
   resources, plus its input/output/failure/message type mapping;
 - `.application.emitted`: an exact image, application metadata, and type mapping.
 
+The optional `.entry` source replaces the default stdio entry. It receives
+`protean_native`, `environment`, `application_types`, `protean_contracts`, and
+the embedded `native_image`, `native_application` and `native_manifest` modules.
+The default entry and its protocol remain available when `.entry` is omitted.
+
+A custom host creates `native.Session(Types)` over a stable `tasks.Service(Types)`
+address. The session owns the ordinary worker and publishes its captured result
+through that same service. Call `collect` and `advance`, or `tick`, from the
+serialized owner that admits client operations. A second session is refused;
+the session must finish collecting its worker before `park` or `deinit`, and
+must be released before closing the service. Transport threads may queue inputs
+but must not call owner operations concurrently.
+
+The service's `dispatch_gate` defaults to unrestricted for existing hosts. A
+host with application control policy installs `held` or a `selected` callback
+before driving restored tasks. The callback receives the task and effect
+identity immediately before external acquisition, recovery lookup or placement
+dispatch. It derives current permission from admitted facts under the owner;
+it must not mutate the service or recursively drive it. Refusal preserves
+pending work. Capture interpretation and pure recovery rederivation do not
+require a new external-dispatch grant. Work dispatched before a restrictive
+admission may still complete and retains its outcome.
+
+Owner views include stable operation lookup, schema-labelled admitted input and
+terminal result bytes, scoped task pages, and task-wide notification history.
+`taskPage` uses task-ID order, not admission order. Its limit bounds scanned
+rows; a page can be empty with a non-null cursor because another principal or
+application owns the scanned rows. Continue until the cursor is null.
+Returned pages, values and receipt owners must be deinitialized by the caller.
+`notificationHistory` counts all attempts of the selected registered
+`agent.notification.*` capability. Transmission is excluded only when local
+custody covers the task and all workspace children, and either no attempts exist
+or every attempt has explicit non-transmission evidence. Authoritative retained
+`not_sent` reconciliations count alongside captures; incomplete custody history
+cannot exclude transmission. A capture alone does not assert that
+the provider accepted the write; the application must interpret its outcome.
+Older attempts without retained non-transmission evidence remain unresolved.
+
+`attemptPage` enumerates retained attempts for one authorized task, including
+inference identities and capture/projection references. Its cursor orders attempt
+IDs, not execution time. Every page requires the expected task revision; a changed
+revision fails rather than combining cuts. `attemptValue` reads only the response
+or projected reply actually linked to a selected attempt's retained capture.
+These reads do not require an executable continuation or reinterpret a capture.
+Task pages seek directly from their cursor. Attempt pages use a task-local,
+derived SQLite index, installed during successful writable Service initialization
+after retention validation and recovery. Index installation preserves state format
+22, authoritative rows, task revisions, namespace identity and the sealed logical
+head. Read-only namespace audits do not install it. Its initial construction reads
+retained records; subsequent page queries avoid traversing unrelated tasks' attempts.
+The caller owns and deinitializes each page or value. Missing capture or usage
+remains missing evidence: request bytes are not input tokens, and an admitted
+inference attempt does not prove a billed call.
+
+`Namespace.audit` opens the original namespace read-only under exclusive
+ownership. It validates native retention and optionally calls historical
+application decoders on immutable input/result views. It creates no files,
+performs no startup recovery and does not repair a seal gap or hot journal;
+those require recovery by a compatible ordinary owner. Application readability
+is only verified when a decoder is supplied. The report does not assess
+continuation compatibility: readable history and executable continuations are
+separate questions. An optional decoder `task` callback receives
+`Namespace.AuditTaskView` after retention and that task's application values have
+validated. Its borrowed view exposes the original application, principal, tenant,
+image, profile, resources, runtime identity and controller presence, allowing the
+application to classify compatibility without executing or rewriting old tasks.
+Callback errors propagate without modifying the namespace.
+
+For an input-bound write, `protean.notification.Dispatcher(Input, Result)`
+constructs the delivery branch of a tagged application entry. Its `delivery`
+input has destination, key and payload fields and its matching result carries
+the typed reply. The checked branch performs one registered notification write;
+other input variants delegate to the ordinary authored function. Installed
+native handlers still own resource binding checks and provider semantics.
+These additions keep persisted format 22: non-transmission evidence uses the
+existing Capture representation, and the session and gate are process-local.
+
 `tools/native/emit.zig` runs on the build host and emits the image and ordinary
 contracts together. The shared metadata helper checks their correspondence and
 records the selected target, optimization, compiler/library identity, source

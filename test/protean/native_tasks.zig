@@ -546,7 +546,7 @@ fn omitIncrementEvidence(
             count += @intFromBool(row.kind == .capture);
         } else try records.append(a, row);
     }
-    try std.testing.expectEqual(1, count);
+    try std.testing.expectEqual(2, count);
     archive.records.items = records.items;
     var objects: std.ArrayList(@TypeOf(archive.objects.items[0])) = .empty;
     var body: std.ArrayList(u8) = .empty;
@@ -4213,11 +4213,13 @@ pub const FairApplication = struct {
 };
 const FairCapture = struct {
     var preparations: usize = 0;
+    var acquisitions: usize = 0;
     fn prepare(ctx: native.registry.ProjectionContext, payload: []const u8) ![]u8 {
         preparations += 1;
         return ctx.allocator.dupe(u8, payload);
     }
     fn acquire(ctx: native.Context, _: []const u8) !native.registry.Acquisition {
+        acquisitions += 1;
         return .{ .captured = try protean.contracts.encodeOwned(u32, ctx.allocator, 99) };
     }
     fn interpret(
@@ -4233,6 +4235,585 @@ const FairCapture = struct {
     }
 };
 
+test "public session owns worker lifetime and publishes acquired results" {
+    var fixture: FairSchedulingFixture = .{};
+    defer fixture.deinit();
+    try fixture.initAssets();
+    try fixture.initHandlers();
+    try fixture.initOwner();
+    var session = try native.Session(FairTypes).init(&fixture.service);
+    defer session.deinit() catch @panic("session left busy");
+    try std.testing.expectError(error.Busy, native.Session(FairTypes).init(&fixture.service));
+    try std.testing.expectError(error.Busy, fixture.service.close(fixture.a));
+    const accepted = try fixture.service.submit(fixture.frame, "session-read", 1);
+    var found = (try fixture.service.operationLookup(fixture.frame, "session-read")).?;
+    defer found.deinit();
+    try std.testing.expectEqual(accepted.receipt.task, found.value.task);
+    var input = (try fixture.service.applicationValue(
+        fixture.frame,
+        accepted.receipt.task,
+        .input,
+    )).?;
+    defer input.deinit();
+    try std.testing.expectEqual(.contract, input.encoding);
+    var decoded = try protean.contracts.decodeOwned(u32, fixture.frame, input.bytes);
+    defer decoded.deinit();
+    try std.testing.expectEqual(1, decoded.value);
+    try std.testing.expectError(
+        error.OperationConflict,
+        fixture.service.submit(fixture.frame, "session-read", 2),
+    );
+    fixture.service.dispatch_gate = .held;
+    for (0..8) |_| _ = try session.tick(fixture.frame);
+    try std.testing.expectEqual(0, FairCapture.acquisitions);
+    try std.testing.expect(!session.busy());
+    fixture.service.dispatch_gate = .unrestricted;
+    const deadline = std.Io.Clock.awake.now(fixture.io).toMilliseconds() + 5000;
+    while (std.Io.Clock.awake.now(fixture.io).toMilliseconds() < deadline) {
+        _ = try session.tick(fixture.frame);
+        var value = try fixture.service.task(fixture.frame, accepted.receipt.task);
+        defer value.deinit();
+        if (value.value.terminal()) {
+            try std.testing.expectEqual(.completed, value.value.outcome_kind);
+            try std.testing.expect(!session.busy());
+            try std.testing.expectEqual(1, FairCapture.acquisitions);
+            var output = (try fixture.service.applicationValue(
+                fixture.frame,
+                accepted.receipt.task,
+                .result,
+            )).?;
+            defer output.deinit();
+            try std.testing.expectEqual(.json, output.encoding);
+            try std.testing.expectEqualStrings("99", output.bytes);
+            try session.park(fixture.frame);
+            return;
+        }
+    }
+    return error.SessionDidNotComplete;
+}
+
+test "public session owns worker lifetime across retryable publication failure" {
+    var fixture: FairSchedulingFixture = .{};
+    defer fixture.deinit();
+    try fixture.initAssets();
+    try fixture.initHandlers();
+    try fixture.initOwner();
+    const placement: native.placement.Configuration = .{
+        .signing_key = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(@splat(46)),
+        .peers = &.{},
+    };
+    fixture.service.profile.placement = &placement;
+    var session = try native.Session(FairTypes).init(&fixture.service);
+    defer session.deinit() catch @panic("session left busy");
+    const id = try sessionPublicationReady(&fixture, &session);
+    const before = fixture.namespace.store.head;
+    const work = fixture.service.work.?;
+    var failing = std.testing.FailingAllocator.init(fixture.frame, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, session.collect(failing.allocator(), false));
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqualDeep(before, fixture.namespace.store.head);
+    try std.testing.expect(!fixture.namespace.store.fenced);
+    try std.testing.expect(session.busy() and session.publication == .joined);
+    try std.testing.expect(session.slot.future == null);
+    try std.testing.expect(session.slot.result != null and session.slot.result.? == .acquired);
+    try std.testing.expectEqualSlices(u8, &work.attempt, &fixture.service.work.?.attempt);
+    try std.testing.expectEqualSlices(u8, work.request, fixture.service.work.?.request);
+    try std.testing.expectError(error.Busy, session.deinit());
+    try std.testing.expectEqual(.completed, try session.collect(fixture.frame, false));
+    try std.testing.expect(!session.busy() and fixture.service.work == null);
+    for (0..8) |_| _ = try session.tick(fixture.frame);
+    var value = try fixture.service.task(fixture.frame, id);
+    defer value.deinit();
+    try std.testing.expectEqual(.completed, value.value.outcome_kind);
+    try std.testing.expectEqual(1, FairCapture.acquisitions);
+    try std.testing.expectEqual(1, try fixture.namespace.store.capabilityAttempts(
+        id,
+        "fair.leaf.v1",
+    ));
+}
+
+test "public session owns worker lifetime after consumed publication failure" {
+    for ([_]SessionPublicationFailure{ .allocation, .storage }) |failure| {
+        var fixture: FairSchedulingFixture = .{};
+        defer fixture.deinit();
+        try fixture.initAssets();
+        try fixture.initHandlers();
+        try fixture.initOwner();
+        var session = try native.Session(FairTypes).init(&fixture.service);
+        var session_live = true;
+        defer if (session_live) session.deinit() catch @panic("session left busy");
+        const id = try sessionPublicationReady(&fixture, &session);
+        const before = fixture.namespace.store.head;
+        try sessionPublicationFail(&fixture, &session, failure);
+        try std.testing.expectEqualDeep(before, fixture.namespace.store.head);
+        try std.testing.expect(fixture.namespace.store.fenced and fixture.service.work == null);
+        try std.testing.expect(!session.busy() and session.publication == .none);
+        try std.testing.expect(session.slot.result == null);
+        try std.testing.expectEqual(.none, try session.collect(fixture.frame, false));
+        try std.testing.expectError(error.StorageUnavailable, session.tick(fixture.frame));
+        try session.deinit();
+        session_live = false;
+        try sessionPublicationReopen(&fixture);
+        session = try native.Session(FairTypes).init(&fixture.service);
+        session_live = true;
+        for (0..8) |_| _ = try session.tick(fixture.frame);
+        var value = try fixture.service.task(fixture.frame, id);
+        defer value.deinit();
+        try std.testing.expectEqual(
+            .unknown,
+            try fixture.service.status(fixture.frame, value.value),
+        );
+        try std.testing.expectEqual(1, FairCapture.acquisitions);
+        try std.testing.expectEqual(1, try fixture.namespace.store.capabilityAttempts(
+            id,
+            "fair.leaf.v1",
+        ));
+        try std.testing.expect(!session.busy());
+    }
+}
+
+const SessionLaunchFailure = struct {
+    var failing: ?*std.testing.FailingAllocator = null;
+    var calls: u32 = 0;
+
+    fn concurrent(
+        _: ?*anyopaque,
+        _: usize,
+        _: std.mem.Alignment,
+        _: []const u8,
+        _: std.mem.Alignment,
+        _: *const fn (*const anyopaque, *anyopaque) void,
+    ) std.Io.ConcurrentError!*std.Io.AnyFuture {
+        calls += 1;
+        if (failing) |allocator| allocator.fail_index = allocator.alloc_index;
+        return error.ConcurrencyUnavailable;
+    }
+};
+
+test "public session owns worker lifetime after failed launch and publication" {
+    const failures = [_]enum { uninterrupted, retryable, consumed }{
+        .uninterrupted, .retryable, .consumed,
+    };
+    for (failures) |failure| {
+        var fixture: FairSchedulingFixture = .{};
+        defer fixture.deinit();
+        try fixture.initAssets();
+        try fixture.initHandlers();
+        try fixture.initOwner();
+        const placement: native.placement.Configuration = .{
+            .signing_key = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(@splat(46)),
+            .peers = &.{},
+        };
+        if (failure == .retryable) fixture.service.profile.placement = &placement;
+        var failing = std.testing.FailingAllocator.init(fixture.frame, .{});
+        SessionLaunchFailure.failing = if (failure == .uninterrupted) null else &failing;
+        defer SessionLaunchFailure.failing = null;
+        SessionLaunchFailure.calls = 0;
+        var vtable = fixture.io.vtable.*;
+        vtable.concurrent = SessionLaunchFailure.concurrent;
+        fixture.service.io.vtable = &vtable;
+        var session = try native.Session(FairTypes).init(&fixture.service);
+        defer session.deinit() catch @panic("session left busy");
+        const accepted = try fixture.service.submit(fixture.frame, "session-launch-failure", 1);
+        for (0..8) |_| {
+            _ = session.advance(failing.allocator()) catch |err| {
+                try std.testing.expectEqual(error.OutOfMemory, err);
+                break;
+            };
+            if (SessionLaunchFailure.calls != 0) break;
+        } else return error.WorkerLaunchNotReached;
+        try std.testing.expectEqual(1, SessionLaunchFailure.calls);
+        try std.testing.expectEqual(failure != .uninterrupted, failing.has_induced_failure);
+        try std.testing.expectEqual(0, FairCapture.acquisitions);
+        try std.testing.expect(session.slot.future == null);
+        try std.testing.expectEqual(failure == .consumed, fixture.namespace.store.fenced);
+        try std.testing.expectEqual(failure == .retryable, fixture.service.work != null);
+        try std.testing.expectEqual(failure == .retryable, session.busy());
+        if (failure == .retryable) {
+            try std.testing.expectEqual(.unstarted, session.publication);
+            try std.testing.expectError(error.Busy, session.deinit());
+            try std.testing.expectEqual(.completed, try session.collect(fixture.frame, false));
+        }
+        try std.testing.expect(!session.busy() and fixture.service.work == null);
+        try std.testing.expectEqual(.none, session.publication);
+        try std.testing.expectEqual(.none, try session.collect(fixture.frame, false));
+        if (failure != .consumed) {
+            var task = try fixture.service.task(fixture.frame, accepted.receipt.task);
+            defer task.deinit();
+            try std.testing.expectEqual(
+                .blocked,
+                try fixture.service.status(fixture.frame, task.value),
+            );
+            try session.park(fixture.frame);
+        }
+    }
+}
+
+test "read-only namespace task audit preserves retained bindings and callback order" {
+    var fixture: FairSchedulingFixture = .{};
+    defer fixture.deinit();
+    try fixture.initAssets();
+    try fixture.initHandlers();
+    fixture.profile.resources = &.{ "audit-resource-one", "audit-resource-two" };
+    for (&fixture.grants) |*grant| grant.resource_identity = try fixture.profile.resourceIdentity(
+        fixture.a,
+        fixture.application.image_identity,
+    );
+    try fixture.initOwner();
+    const pending = try fixture.service.submit(fixture.frame, "audit-pending", 2);
+    const completed = try fixture.service.submit(fixture.frame, "audit-completed", 4);
+    for (0..8) |_| try std.testing.expect(try fixture.service.pump(fixture.frame) != .work);
+    var first = try fixture.service.task(fixture.frame, pending.receipt.task);
+    defer first.deinit();
+    var second = try fixture.service.task(fixture.frame, completed.receipt.task);
+    defer second.deinit();
+    try std.testing.expect(!first.value.terminal() and second.value.terminal());
+    try std.testing.expectEqual(2, first.value.resources.items.len);
+    const head = fixture.namespace.store.head;
+    try fixture.service.close(fixture.frame);
+    fixture.service_live = false;
+    try fixture.namespace.close();
+    fixture.namespace_live = false;
+    var audit: NamespaceTaskAudit = .{ .expected = .{ first.value, second.value } };
+    try audit.check(&fixture);
+    fixture.namespace = try native.Namespace.open(fixture.a, fixture.io, fixture.path);
+    fixture.namespace_live = true;
+    try std.testing.expectEqualDeep(head, fixture.namespace.store.head);
+}
+
+test "derived attempt index preserves sealed history and read-only admission" {
+    var fixture: FairSchedulingFixture = .{};
+    defer fixture.deinit();
+    try fixture.initAssets();
+    try fixture.initHandlers();
+    try fixture.initOwner();
+    const admitted = try fixture.service.submit(fixture.frame, "index-terminal", 4);
+    for (0..8) |_| try std.testing.expect(try fixture.service.pump(fixture.frame) != .work);
+    var task = try fixture.service.task(fixture.frame, admitted.receipt.task);
+    defer task.deinit();
+    try std.testing.expect(task.value.terminal());
+    const head = fixture.namespace.store.head;
+    const identity = fixture.namespace.identity;
+    const seal = try indexSealBytes(&fixture);
+    try fixture.service.close(fixture.frame);
+    fixture.service_live = false;
+    try fixture.namespace.store.database.exec("DROP INDEX attempt_tasks;");
+    try fixture.namespace.close();
+    fixture.namespace_live = false;
+    try checkUnindexedAudit(&fixture);
+    fixture.namespace = try native.Namespace.open(fixture.a, fixture.io, fixture.path);
+    fixture.namespace_live = true;
+    try checkIndexAdmission(&fixture);
+    try openIndexService(&fixture);
+    try expectAttemptIndex(&fixture, true);
+    try std.testing.expectEqualDeep(head, fixture.namespace.store.head);
+    try std.testing.expectEqualDeep(identity, fixture.namespace.identity);
+    try std.testing.expectEqualSlices(u8, seal, try indexSealBytes(&fixture));
+    var current = try fixture.service.task(fixture.frame, admitted.receipt.task);
+    defer current.deinit();
+    try std.testing.expectEqualDeep(task.value, current.value);
+    try fixture.service.close(fixture.frame);
+    fixture.service_live = false;
+    const indexed = try namespaceAuditBytes(&fixture);
+    try openIndexService(&fixture);
+    try std.testing.expectEqualSlices(u8, &indexed, &try namespaceAuditBytes(&fixture));
+    try fixture.namespace.store.begin();
+    defer fixture.namespace.store.rollback();
+    try fixture.namespace.commit("test.derived-index.next-transition");
+    try std.testing.expectEqual(head.generation + 1, fixture.namespace.store.head.generation);
+}
+
+fn indexSealBytes(fixture: *FairSchedulingFixture) ![]u8 {
+    return std.Io.Dir.cwd().readFileAlloc(
+        fixture.io,
+        try std.fmt.allocPrint(fixture.frame, "{s}/seal", .{fixture.path}),
+        fixture.frame,
+        .unlimited,
+    );
+}
+
+fn checkUnindexedAudit(fixture: *FairSchedulingFixture) !void {
+    const before = try namespaceAuditBytes(fixture);
+    try std.testing.expectError(error.UnsupportedApplicationSchema, native.Namespace.audit(
+        fixture.a,
+        fixture.io,
+        fixture.path,
+        fixture.handlers,
+        .{ .validate = rejectIndexHistoricalValue },
+    ));
+    try std.testing.expectEqualSlices(u8, &before, &try namespaceAuditBytes(fixture));
+    const report = try native.Namespace.audit(
+        fixture.a,
+        fixture.io,
+        fixture.path,
+        fixture.handlers,
+        null,
+    );
+    try std.testing.expectEqual(1, report.tasks);
+    try std.testing.expectEqualSlices(u8, &before, &try namespaceAuditBytes(fixture));
+}
+
+fn rejectIndexHistoricalValue(_: ?*anyopaque, _: native.NamespaceApplicationValue) !void {
+    return error.UnsupportedApplicationSchema;
+}
+
+fn checkIndexAdmission(fixture: *FairSchedulingFixture) !void {
+    try expectAttemptIndex(fixture, false);
+    const before = try namespaceAuditBytes(fixture);
+    fixture.profile.authority.revoked = true;
+    try std.testing.expectError(error.Denied, openIndexService(fixture));
+    fixture.profile.authority.revoked = false;
+    try std.testing.expectEqualSlices(u8, &before, &try namespaceAuditBytes(fixture));
+    try fixture.namespace.store.database.exec("PRAGMA query_only=ON;");
+    try std.testing.expectError(
+        error.StorageUnavailable,
+        fixture.namespace.store.installAttemptIndex(),
+    );
+    try fixture.namespace.store.database.exec("PRAGMA query_only=OFF;");
+    try std.testing.expect(!fixture.namespace.store.transaction);
+    try std.testing.expect(!fixture.namespace.store.fenced);
+    try expectAttemptIndex(fixture, false);
+    try std.testing.expectEqualSlices(u8, &before, &try namespaceAuditBytes(fixture));
+}
+
+fn openIndexService(fixture: *FairSchedulingFixture) !void {
+    fixture.service = try native.tasks.Service(FairTypes).init(
+        fixture.a,
+        fixture.io,
+        &fixture.namespace,
+        fixture.assets,
+        &fixture.application,
+        fixture.handlers,
+        fixture.profile,
+    );
+    fixture.service_live = true;
+}
+
+fn expectAttemptIndex(fixture: *FairSchedulingFixture, exists: bool) !void {
+    var row = try fixture.namespace.store.database.prepare(
+        "SELECT count(*) FROM sqlite_schema WHERE type='index' AND name='attempt_tasks'",
+        &.{},
+    );
+    defer row.deinit();
+    try std.testing.expectEqual(.row, try row.step());
+    try std.testing.expectEqual(@as(i64, @intFromBool(exists)), try row.integer(0));
+}
+
+const NamespaceTaskAudit = struct {
+    expected: [2]native.testing.state.Task,
+    values: [2]u32 = @splat(0),
+    tasks: [2]u32 = @splat(0),
+    reject_value: bool = false,
+    reject_task: bool = false,
+
+    fn check(self: *@This(), fixture: *FairSchedulingFixture) !void {
+        const before = try namespaceAuditBytes(fixture);
+        self.reject_task = true;
+        try std.testing.expectError(error.UnsupportedExecutionBinding, native.Namespace.audit(
+            fixture.a,
+            fixture.io,
+            fixture.path,
+            fixture.handlers,
+            .{ .context = self, .validate = validate, .task = observe },
+        ));
+        try std.testing.expectEqual(1, self.tasks[0] + self.tasks[1]);
+        try std.testing.expectEqualSlices(u8, &before, &try namespaceAuditBytes(fixture));
+        self.reset();
+        const report = try native.Namespace.audit(
+            fixture.a,
+            fixture.io,
+            fixture.path,
+            fixture.handlers,
+            .{ .context = self, .validate = validate, .task = observe },
+        );
+        try std.testing.expectEqual(2, report.tasks);
+        try std.testing.expectEqual(1, report.nonterminal_tasks);
+        try std.testing.expectEqual(.verified, report.application_readability);
+        try std.testing.expectEqual(.not_assessed, report.continuation_compatibility);
+        try std.testing.expectEqualDeep([_]u32{ 1, 1 }, self.tasks);
+        try std.testing.expectEqualDeep([_]u32{ 1, 3 }, self.values);
+        self.reset();
+        _ = try native.Namespace.audit(
+            fixture.a,
+            fixture.io,
+            fixture.path,
+            fixture.handlers,
+            .{ .context = self, .validate = validate },
+        );
+        try std.testing.expectEqualDeep([_]u32{ 0, 0 }, self.tasks);
+        try std.testing.expectEqualDeep([_]u32{ 1, 3 }, self.values);
+        self.reset();
+        self.reject_value = true;
+        try std.testing.expectError(error.UnsupportedApplicationSchema, native.Namespace.audit(
+            fixture.a,
+            fixture.io,
+            fixture.path,
+            fixture.handlers,
+            .{ .context = self, .validate = validate, .task = observe },
+        ));
+        try std.testing.expectEqualDeep([_]u32{ 0, 0 }, self.tasks);
+        try std.testing.expectEqualSlices(u8, &before, &try namespaceAuditBytes(fixture));
+    }
+
+    fn reset(self: *@This()) void {
+        self.values = @splat(0);
+        self.tasks = @splat(0);
+        self.reject_value = false;
+        self.reject_task = false;
+    }
+
+    fn index(self: *const @This(), task: [16]u8) !usize {
+        for (self.expected, 0..) |expected, offset| {
+            if (std.mem.eql(u8, &expected.id, &task)) return offset;
+        }
+        return error.UnexpectedAuditTask;
+    }
+
+    fn validate(context: ?*anyopaque, value: native.NamespaceApplicationValue) !void {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        if (self.reject_value) return error.UnsupportedApplicationSchema;
+        const offset = try self.index(value.task);
+        try std.testing.expectEqual(0, self.tasks[offset]);
+        try std.testing.expectEqualStrings(FairTypes.application_id, value.application_id);
+        const number = if (value.encoding == .contract) blk: {
+            var decoded = try protean.contracts.decodeOwned(
+                u32,
+                std.testing.allocator,
+                value.bytes,
+            );
+            defer decoded.deinit();
+            break :blk decoded.value;
+        } else try std.fmt.parseInt(u32, value.bytes, 10);
+        try std.testing.expectEqual(@as(u32, if (offset == 0) 2 else 4), number);
+        try std.testing.expectEqualStrings(
+            if (value.kind == .input) FairTypes.input_schema_id else FairTypes.output_schema_id,
+            value.schema_id,
+        );
+        self.values[offset] += 1;
+    }
+
+    fn observe(context: ?*anyopaque, view: native.Namespace.AuditTaskView) !void {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        const offset = try self.index(view.task);
+        const expected = self.expected[offset];
+        try std.testing.expectEqual(0, self.tasks[offset]);
+        try std.testing.expectEqual(
+            @as(u32, if (expected.terminal()) 3 else 1),
+            self.values[offset],
+        );
+        try std.testing.expectEqual(expected.revision, view.revision);
+        try std.testing.expectEqual(expected.terminal(), view.terminal);
+        try std.testing.expectEqualStrings(expected.application_id.bytes, view.application_id);
+        try std.testing.expectEqualStrings(expected.principal.bytes, view.principal);
+        try std.testing.expectEqualStrings(expected.tenant.bytes, view.tenant);
+        try std.testing.expectEqualDeep(expected.image, view.image);
+        try std.testing.expectEqualDeep(expected.profile, view.profile);
+        try std.testing.expectEqualDeep(expected.resources.items, view.resources);
+        try std.testing.expectEqualSlices(u8, &expected.runtime_identity, &view.runtime_identity);
+        try std.testing.expectEqual(expected.controller != null, view.has_controller);
+        self.tasks[offset] += 1;
+        if (self.reject_task) return error.UnsupportedExecutionBinding;
+    }
+};
+
+fn namespaceAuditBytes(fixture: *FairSchedulingFixture) ![32]u8 {
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    for ([_][]const u8{
+        "owner.lock",
+        "identity",
+        "state.sqlite",
+        "state.sqlite-journal",
+        "seal",
+        "seal.next",
+    }) |name| {
+        hash.update(name);
+        const path = try std.fmt.allocPrint(fixture.frame, "{s}/{s}", .{ fixture.path, name });
+        const bytes = std.Io.Dir.cwd().readFileAlloc(
+            fixture.io,
+            path,
+            fixture.a,
+            .unlimited,
+        ) catch |err| switch (err) {
+            error.FileNotFound => {
+                hash.update(&.{0});
+                continue;
+            },
+            else => return err,
+        };
+        defer fixture.a.free(bytes);
+        hash.update(&.{1});
+        hash.update(bytes);
+    }
+    var result: [32]u8 = undefined;
+    hash.final(&result);
+    return result;
+}
+
+const SessionPublicationFailure = enum { allocation, storage };
+
+fn sessionPublicationReady(
+    fixture: *FairSchedulingFixture,
+    session: *native.Session(FairTypes),
+) ![16]u8 {
+    const accepted = try fixture.service.submit(fixture.frame, "session-publication", 1);
+    for (0..8) |_| {
+        _ = try session.advance(fixture.frame);
+        if (session.slot.future != null) break;
+    } else return error.SessionDidNotStart;
+    const deadline = std.Io.Clock.awake.now(fixture.io).toMilliseconds() + 5000;
+    while (!session.slot.finished()) {
+        if (std.Io.Clock.awake.now(fixture.io).toMilliseconds() >= deadline)
+            return error.SessionDidNotFinish;
+        try fixture.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(1, FairCapture.acquisitions);
+    return accepted.receipt.task;
+}
+
+fn sessionPublicationFail(
+    fixture: *FairSchedulingFixture,
+    session: *native.Session(FairTypes),
+    failure: SessionPublicationFailure,
+) !void {
+    switch (failure) {
+        .allocation => {
+            var failing = std.testing.FailingAllocator.init(fixture.frame, .{ .fail_index = 0 });
+            try std.testing.expectError(
+                error.OutOfMemory,
+                session.collect(failing.allocator(), false),
+            );
+            try std.testing.expect(failing.has_induced_failure);
+        },
+        .storage => {
+            try fixture.namespace.store.database.exec("PRAGMA query_only=ON;");
+            defer expectCleanup(fixture.namespace.store.database.exec("PRAGMA query_only=OFF;"));
+            try std.testing.expectError(
+                error.StorageUnavailable,
+                session.collect(fixture.frame, false),
+            );
+        },
+    }
+}
+
+fn sessionPublicationReopen(fixture: *FairSchedulingFixture) !void {
+    try fixture.service.close(fixture.frame);
+    fixture.service_live = false;
+    try fixture.namespace.close();
+    fixture.namespace_live = false;
+    fixture.namespace = try native.Namespace.open(fixture.a, fixture.io, fixture.path);
+    fixture.namespace_live = true;
+    fixture.service = try native.tasks.Service(FairTypes).init(
+        fixture.failing.allocator(),
+        fixture.io,
+        &fixture.namespace,
+        fixture.assets,
+        &fixture.application,
+        fixture.handlers,
+        fixture.profile,
+    );
+    fixture.service_live = true;
+}
+
 test "round robin progresses peers and cancellation while one worker is held" {
     var fixture: FairSchedulingFixture = .{};
     defer fixture.deinit();
@@ -4247,6 +4828,158 @@ test "round robin progresses peers and cancellation while one worker is held" {
     try fixture.finishWorker();
     try fixture.resumeRound();
     try fixture.recoverFenced();
+}
+
+test "public session task pages preserve scoped ownership and cursor progress" {
+    var fixture: FairSchedulingFixture = .{};
+    defer fixture.deinit();
+    try fixture.initAssets();
+    try fixture.initHandlers();
+    try fixture.initOwner();
+    const first = try fixture.service.submit(fixture.frame, "page-first", 1);
+    const second = try fixture.service.submit(fixture.frame, "page-second", 2);
+    const principal = fixture.service.profile.authority.principal;
+    fixture.service.profile.authority.principal = "different-page-principal";
+    _ = try fixture.service.submit(fixture.frame, "page-foreign", 3);
+    try std.testing.expect(
+        (try fixture.service.operationLookup(fixture.frame, "page-first")) == null,
+    );
+    fixture.service.profile.authority.principal = principal;
+    try std.testing.expectError(
+        error.InvalidParams,
+        fixture.service.taskPage(fixture.frame, null, 0),
+    );
+    var cursor: ?native.testing.state.TaskId = null;
+    var observed: [2]native.testing.state.TaskId = undefined;
+    var count: usize = 0;
+    for (0..4) |_| {
+        var page = try fixture.service.taskPage(fixture.a, cursor, 1);
+        defer page.deinit();
+        try std.testing.expect(page.tasks.len <= 1);
+        for (page.tasks) |id| {
+            try std.testing.expect(count < observed.len);
+            observed[count] = id;
+            count += 1;
+        }
+        if (page.next) |next| {
+            if (cursor) |previous| {
+                try std.testing.expect(std.mem.order(u8, &previous, &next) == .lt);
+            }
+            cursor = next;
+        } else break;
+    } else return error.TaskPageDidNotTerminate;
+    try std.testing.expectEqual(2, count);
+    try std.testing.expect(std.mem.order(u8, &observed[0], &observed[1]) == .lt);
+    for ([_]native.testing.state.TaskId{ first.receipt.task, second.receipt.task }) |expected| {
+        try std.testing.expect(std.meta.eql(expected, observed[0]) or
+            std.meta.eql(expected, observed[1]));
+    }
+    try std.testing.checkAllAllocationFailures(fixture.a, checkOwnedTaskPage, .{&fixture.service});
+    try checkTaskPageWork(&fixture);
+}
+
+fn checkTaskPageWork(fixture: *FairSchedulingFixture) !void {
+    for (0..64) |i| {
+        _ = try fixture.service.submit(
+            fixture.frame,
+            try std.fmt.allocPrint(fixture.frame, "page-scale-{d}", .{i}),
+            4,
+        );
+    }
+    var trace: @import("native_test_support.zig").QueryWork = .{
+        .prefix = "SELECT id FROM tasks ",
+    };
+    try trace.start(fixture.namespace.store.database);
+    defer trace.stop();
+    var page = try fixture.service.taskPage(fixture.a, @splat(255), 1);
+    defer page.deinit();
+    try std.testing.expectEqual(0, page.tasks.len);
+    try std.testing.expect(page.next == null);
+    try std.testing.expectEqual(1, trace.queries);
+    try std.testing.expect(trace.steps <= 32);
+}
+
+fn checkOwnedTaskPage(a: std.mem.Allocator, service: *native.tasks.Service(FairTypes)) !void {
+    var page = try service.taskPage(a, null, 3);
+    defer page.deinit();
+    try std.testing.expectEqual(2, page.tasks.len);
+}
+
+test "public session gates computed effects using durably admitted controls" {
+    var fixture: FairSchedulingFixture = .{};
+    defer fixture.deinit();
+    try fixture.initAssets();
+    try fixture.initHandlers();
+    try fixture.initOwner();
+    fixture.service.dispatch_gate = .{ .selected = .{
+        .context = &fixture.service,
+        .permits = admissionReceiptGate,
+    } };
+    const accepted = try fixture.service.submit(fixture.frame, "gated-read", 1);
+    try std.testing.expectEqual(.progressed, try fixture.service.pump(fixture.frame));
+    _ = try fixture.service.submit(fixture.frame, "gate-pause", 4);
+    for (0..8) |_| try std.testing.expect(try fixture.service.pump(fixture.frame) != .work);
+    try std.testing.expectEqual(0, try fixture.namespace.store.capabilityAttempts(
+        accepted.receipt.task,
+        "fair.leaf.v1",
+    ));
+    try fixture.service.close(fixture.frame);
+    fixture.service_live = false;
+    try fixture.namespace.close();
+    fixture.namespace_live = false;
+    fixture.namespace = try native.Namespace.open(fixture.a, fixture.io, fixture.path);
+    fixture.namespace_live = true;
+    fixture.service = try native.tasks.Service(FairTypes).init(
+        fixture.a,
+        fixture.io,
+        &fixture.namespace,
+        fixture.assets,
+        &fixture.application,
+        fixture.handlers,
+        fixture.profile,
+    );
+    fixture.service_live = true;
+    fixture.service.dispatch_gate = .{ .selected = .{
+        .context = &fixture.service,
+        .permits = admissionReceiptGate,
+    } };
+    var task = try fixture.service.task(fixture.frame, accepted.receipt.task);
+    defer task.deinit();
+    _ = try fixture.service.resumeTask(
+        fixture.frame,
+        "gated-read-resume",
+        accepted.receipt.task,
+        task.value.revision,
+    );
+    for (0..8) |_| try std.testing.expect(try fixture.service.pump(fixture.frame) != .work);
+    _ = try fixture.service.submit(fixture.frame, "gate-resume", 4);
+    for (0..8) |_| {
+        const progress = try fixture.service.pump(fixture.frame);
+        if (progress != .work) continue;
+        try std.testing.expectEqual(accepted.receipt.task, progress.work.task);
+        try fixture.service.acquire(
+            fixture.frame,
+            progress.work,
+            try protean.contracts.encodeOwned(u32, fixture.frame, 99),
+        );
+        return;
+    }
+    return error.EligibleWorkDidNotResume;
+}
+
+fn admissionReceiptGate(
+    context: *anyopaque,
+    a: std.mem.Allocator,
+    request: native.tasks.DispatchRequest,
+) !bool {
+    const service: *native.tasks.Service(FairTypes) = @ptrCast(@alignCast(context));
+    try std.testing.expectEqual(.acquisition, request.kind);
+    try std.testing.expectEqualStrings("fair.leaf.v1", request.capability);
+    var pause = (try service.operationLookup(a, "gate-pause")) orelse return true;
+    defer pause.deinit();
+    var resume_receipt = (try service.operationLookup(a, "gate-resume")) orelse return false;
+    defer resume_receipt.deinit();
+    return true;
 }
 
 const FairSchedulingFixture = struct {
@@ -4328,6 +5061,7 @@ const FairSchedulingFixture = struct {
 
     fn initAssets(self: *@This()) !void {
         FairCapture.preparations = 0;
+        FairCapture.acquisitions = 0;
         self.compiled = try protean.compile(
             self.a,
             protean.system(.{
@@ -6192,7 +6926,7 @@ test "receipt lookup retains exclusive admission and verifies evidence through i
     const original = try h.admitOriginal();
     try h.expectInferenceObservation(original.work.task, .{ 1, 4, 0 });
     try h.exclusiveAdmission(original);
-    try h.runHeldLookup(original);
+    try h.runGatedLookup(original);
     try h.settleOriginal(original);
     try h.expectInferenceObservation(original.work.task, .{ 1, 4, 7 });
     const interrupted = try h.exportInterrupted(original);
@@ -6209,6 +6943,22 @@ test "receipt lookup retains exclusive admission and verifies evidence through i
 }
 
 const LookupState = native.testing.state;
+const LookupDispatchGate = struct {
+    expected: native.tasks.DispatchRequest,
+    allow: bool = false,
+    calls: u32 = 0,
+
+    fn permits(
+        context: *anyopaque,
+        _: std.mem.Allocator,
+        request: native.tasks.DispatchRequest,
+    ) !bool {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        try std.testing.expectEqualDeep(self.expected, request);
+        self.calls += 1;
+        return self.allow;
+    }
+};
 const LookupCase = struct {
     work: native.tasks.Work,
     revision: u64,
@@ -6510,6 +7260,29 @@ const ReceiptLookupHarness = struct {
         );
     }
 
+    fn runGatedLookup(h: *ReceiptLookupHarness, original_case: LookupCase) !void {
+        const original = original_case.work;
+        var gate: LookupDispatchGate = .{ .expected = .{
+            .task = original.task,
+            .work = original.subject_work,
+            .residual = original.subject_residual,
+            .identity = original_case.admission.receipt.reconciliation.?,
+            .kind = .recovery_lookup,
+            .capability = "fair.leaf.v1",
+            .resource_role = "local",
+            .inference = true,
+        } };
+        h.service.dispatch_gate = .{ .selected = .{
+            .context = &gate,
+            .permits = LookupDispatchGate.permits,
+        } };
+        defer h.service.dispatch_gate = .unrestricted;
+        try h.expectHeldLookup(&gate);
+        gate.allow = true;
+        try h.runHeldLookup(original_case);
+        try std.testing.expect(gate.calls > 2);
+    }
+
     fn runHeldLookup(h: *ReceiptLookupHarness, original_case: LookupCase) !void {
         const original = original_case.work;
         const revision = original_case.revision;
@@ -6562,6 +7335,22 @@ const ReceiptLookupHarness = struct {
         try h.service.acquire(h.frame, work, evidence);
         try h.worker.?.release();
         try std.testing.expectError(error.StaleOccurrence, h.service.acquire(h.frame, work, &.{}));
+    }
+
+    fn expectHeldLookup(h: *ReceiptLookupHarness, gate: *LookupDispatchGate) !void {
+        const head = h.namespace.store.head;
+        for (0..2) |_| try std.testing.expectEqual(.idle, try h.service.pump(h.frame));
+        try std.testing.expectEqual(2, gate.calls);
+        try std.testing.expectEqual(0, h.fixture.calls.load(.acquire));
+        try std.testing.expect(h.service.work == null);
+        try std.testing.expectEqualDeep(head, h.namespace.store.head);
+        var pending = try h.service.reconciliation(
+            h.frame,
+            gate.expected.task,
+            gate.expected.identity,
+        );
+        defer pending.deinit();
+        try std.testing.expectEqual(.pending, pending.value.outcome);
     }
 
     fn settleOriginal(h: *ReceiptLookupHarness, original_case: LookupCase) !void {
@@ -7611,6 +8400,38 @@ test "controller outer capsule moves without compatibility acquiring an executio
     try controllerMicroprogress(true);
 }
 
+test "resident computation yields to queued peers at a cut or eight bounded owner turns" {
+    var fixture: ControllerMicroprogressFixture = .{ .moving = false };
+    defer fixture.deinit();
+    try fixture.initImageWithLength(4096);
+    try fixture.initApplication();
+    try fixture.initPaths();
+    try fixture.initOwner();
+    const first = try fixture.service.submit(fixture.frame, "resident-first", 10);
+    const peer = try fixture.service.submit(fixture.frame, "resident-peer", 20);
+    var retained_turns: u32 = 0;
+    for (0..8) |turn| {
+        try std.testing.expectEqual(.progressed, try fixture.service.pump(fixture.frame));
+        try std.testing.expectEqual(first.receipt.task, fixture.service.active.?.task);
+        retained_turns += 1;
+        if (fixture.service.active.?.root_control == null or
+            fixture.service.active.?.root_cut_ready) break;
+        if (turn == 0) _ = try fixture.service.submit(fixture.frame, "resident-newcomer", 30);
+    }
+    try std.testing.expect(retained_turns > 1);
+    try std.testing.expectEqual(.progressed, try fixture.service.pump(fixture.frame));
+    try std.testing.expectEqual(peer.receipt.task, fixture.service.active.?.task);
+    _ = try fixture.service.requestCancel(
+        fixture.frame,
+        "resident-cancel",
+        first.receipt.task,
+        "stop",
+    );
+    var cancelled = try fixture.service.task(fixture.frame, first.receipt.task);
+    defer cancelled.deinit();
+    try std.testing.expect(cancelled.value.cancellation != null);
+}
+
 fn controllerMicroprogress(comptime moving: bool) !void {
     var fixture: ControllerMicroprogressFixture = .{ .moving = moving };
     defer fixture.deinit();
@@ -7700,6 +8521,10 @@ const ControllerMicroprogressFixture = struct {
     completed_source_config: p.Configuration = undefined,
 
     fn initImage(self: *ControllerMicroprogressFixture) !void {
+        try self.initImageWithLength(256);
+    }
+
+    fn initImageWithLength(self: *ControllerMicroprogressFixture, comptime length: usize) !void {
         self.arena = std.heap.ArenaAllocator.init(self.a);
         self.arena_live = true;
         self.frame = self.arena.allocator();
@@ -7709,7 +8534,7 @@ const ControllerMicroprogressFixture = struct {
                 const number = try b.scalar(u32);
                 const entry = try b.declare(&.{number}, number, &.{}, &.{});
                 var result = try b.reference(b.parameter(entry, 0));
-                for (0..256) |_| result = try b.primitive(
+                for (0..length) |_| result = try b.primitive(
                     number,
                     .integer_bit_xor,
                     &.{ result, try b.constant(u32, 1) },

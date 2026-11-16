@@ -4,5 +4,5 @@
     .minimum_zig_version = "0.17.1",
     .fingerprint = 0x6504cc5493b78865,
     .dependencies = .{ .protean = .{ .path = "../../.." } },
-    .paths = .{ "build.zig", "build.zig.zon" },
+    .paths = .{ "build.zig", "build.zig.zon", "entry.zig", "package_surface.zig" },
 }

@@ -28,6 +28,15 @@ pub const Status = task_types.Status;
 pub const Work = task_types.Work;
 pub const WorkResult = task_types.WorkResult;
 pub const Step = task_types.Step;
+pub const DispatchGate = task_types.DispatchGate;
+pub const DispatchRequest = task_types.DispatchRequest;
+pub const ApplicationValue = task_types.ApplicationValue;
+pub const NotificationHistory = task_types.NotificationHistory;
+pub const TaskPage = task_types.TaskPage;
+pub const AttemptView = task_types.AttemptView;
+pub const AttemptPage = task_types.AttemptPage;
+pub const AttemptValuePart = task_types.AttemptValuePart;
+pub const AttemptValue = task_types.AttemptValue;
 
 const Active = task_types.Active;
 const CompilerFact = task_types.CompilerFact;
@@ -53,6 +62,7 @@ pub fn Service(comptime Types: type) type {
         /// Logical queue order is items[cursor..] followed by items[0..cursor].
         /// Advancing a turn must not move every remaining ID.
         runnable_cursor: usize = 0,
+        resident_turns: u8 = 0,
         /// Unsettled cleanup retains ownership, but never runnable work.
         owned: std.ArrayList(state.TaskId) = .empty,
         cleanup_cursor: usize = 0,
@@ -60,6 +70,8 @@ pub fn Service(comptime Types: type) type {
         remote_stopped_parent: ?state.TaskId = null,
         owner_epoch: state.Digest = undefined,
         work: ?Work = null,
+        session_attached: bool = false,
+        dispatch_gate: DispatchGate = .unrestricted,
         placement_pending: std.ArrayList(PlacementPending) = .empty,
         placement_job: ?PlacementJob = null,
         checked_workspace_programs: std.AutoHashMapUnmanaged(state.Digest, u64) = .empty,
@@ -104,6 +116,63 @@ pub fn Service(comptime Types: type) type {
         pub fn schemaArtifact(self: *Self, id: state.Digest) !discovery.Artifact {
             const domain = @import("tasks/task_queries.zig").Operations(Types, Self);
             return domain.schemaArtifact(self, id);
+        }
+        pub fn operationLookup(
+            self: *Self,
+            a: std.mem.Allocator,
+            id: []const u8,
+        ) !?contracts.Decoded(state.Receipt) {
+            const domain = @import("tasks/task_queries.zig").Operations(Types, Self);
+            return domain.operationLookup(self, a, id);
+        }
+        pub fn notificationHistory(
+            self: *Self,
+            a: std.mem.Allocator,
+            id: state.TaskId,
+            capability: []const u8,
+        ) !NotificationHistory {
+            const domain = @import("tasks/task_queries.zig").Operations(Types, Self);
+            return domain.notificationHistory(self, a, id, capability);
+        }
+        pub fn taskPage(
+            self: *Self,
+            a: std.mem.Allocator,
+            after: ?state.TaskId,
+            limit: u32,
+        ) !TaskPage {
+            const domain = @import("tasks/task_queries.zig").Operations(Types, Self);
+            return domain.taskPage(self, a, after, limit);
+        }
+        pub fn applicationValue(
+            self: *Self,
+            a: std.mem.Allocator,
+            id: state.TaskId,
+            selection: enum { input, result },
+        ) !?ApplicationValue {
+            const domain = @import("tasks/task_queries.zig").Operations(Types, Self);
+            return domain.applicationValue(self, a, id, selection == .result);
+        }
+        pub fn attemptPage(
+            self: *Self,
+            a: std.mem.Allocator,
+            id: state.TaskId,
+            expected_revision: u64,
+            after: ?state.Digest,
+            limit: u32,
+        ) !AttemptPage {
+            const domain = @import("tasks/attempt_views.zig").Operations(Types, Self);
+            return domain.attemptPage(self, a, id, expected_revision, after, limit);
+        }
+        pub fn attemptValue(
+            self: *Self,
+            a: std.mem.Allocator,
+            id: state.TaskId,
+            expected_revision: u64,
+            attempt_id: state.Digest,
+            part: AttemptValuePart,
+        ) !?AttemptValue {
+            const domain = @import("tasks/attempt_views.zig").Operations(Types, Self);
+            return domain.attemptValue(self, a, id, expected_revision, attempt_id, part);
         }
         pub fn projectedArtifact(
             self: *Self,

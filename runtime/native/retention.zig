@@ -381,6 +381,7 @@ const Audit = struct {
             entry.declaration.identity,
             attempt.value.capability.bytes,
         ) or entry.declaration.inference != attempt.value.inference) return error.CorruptState;
+        try negativeCapture(capture, saved.value.state);
         if (attempt.value.operation == .workspace_build) {
             if (entry.declaration.kind != .workspace or
                 attempt.value.inference or
@@ -406,6 +407,13 @@ const Audit = struct {
             return error.CorruptState;
         }
         try self.projectionDependencies(adapter, projection);
+    }
+    fn negativeCapture(capture: state.Capture, saved: occurrence.State) !void {
+        if (capture.disposition != .definitely_not_sent) return;
+        if (capture.response != null or capture.projection != null or
+            capture.reconciliation != null or
+            !occurrence.nonTransmissionConsistent(saved, capture.attempt))
+            return error.CorruptState;
     }
     fn projectionDependencies(
         self: *Audit,
@@ -531,7 +539,8 @@ const Audit = struct {
     ) !void {
         switch (item.outcome) {
             .pending => try self.pendingReconciliation(key, item, task, saved, pending_owners),
-            .not_sent => {},
+            .not_sent => if (!occurrence.nonTransmissionConsistent(saved.state, item.attempt))
+                return error.CorruptState,
             .unresolved => {},
             .capture_admitted => |ref| try self.admittedCapture(key, item, saved, ref),
             .reply_settled => |ref| try self.settledReply(key, item, saved, entry, ref),

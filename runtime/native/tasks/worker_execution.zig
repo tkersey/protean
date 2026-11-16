@@ -575,6 +575,8 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
         ) !Step {
             try requireCustody(self, a, initial.id, pending.work);
             if (self.work != null) return .idle;
+            if (operation_kind == .environment and
+                !try acquisitionPermitted(self, a, pending, entry)) return .idle;
             const subject = try occurrenceSubject(self, a, initial, pending);
             // Consume the already-authorized transition. Preparation and
             // settlement cannot reconstruct a different cancellation policy.
@@ -618,6 +620,23 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 attempt,
                 work,
             );
+        }
+        fn acquisitionPermitted(
+            self: *Self,
+            a: std.mem.Allocator,
+            pending: Occurrence,
+            entry: registry.Entry,
+        ) !bool {
+            return self.dispatch_gate.permits(a, .{
+                .task = pending.task,
+                .work = pending.work,
+                .residual = pending.residual,
+                .identity = pending.id,
+                .kind = .acquisition,
+                .capability = entry.declaration.identity,
+                .resource_role = entry.declaration.resource_role,
+                .inference = entry.declaration.inference,
+            });
         }
         fn chargeAcquisition(
             value: *state.Task,
@@ -1638,6 +1657,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             }
             try store(self).begin();
             defer store(self).rollback();
+            try retainNonTransmission(self, work);
             try store(self).putRecord(Occurrence, "occurrence", work.occurrence, work.task, next);
             try notSentEvent(self, a, &value, work, blocker);
             try effectSchedule(
@@ -1657,6 +1677,18 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 saved.value,
                 cancelling,
             );
+        }
+        fn retainNonTransmission(self: *Self, work: Work) !void {
+            if (work.entry.declaration.capture == null) return;
+            const prepared = work.prepared orelse return error.InvalidPreparedRequest;
+            try store(self).createRecord(state.Capture, "capture", work.attempt, work.task, .{
+                .task = work.task,
+                .occurrence = work.occurrence,
+                .attempt = work.attempt,
+                .request = try store(self).putObject(prepared),
+                .response = null,
+                .disposition = .definitely_not_sent,
+            });
         }
     };
 }

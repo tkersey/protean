@@ -1,6 +1,55 @@
 //! Shared manifest construction for native test fixtures.
 const std = @import("std");
 
+pub const QueryWork = struct {
+    prefix: []const u8,
+    steps: u64 = 0,
+    queries: u32 = 0,
+    database: ?*anyopaque = null,
+
+    extern "c" fn sqlite3_db_handle(?*anyopaque) ?*anyopaque;
+    extern "c" fn sqlite3_sql(?*anyopaque) ?[*:0]const u8;
+    extern "c" fn sqlite3_stmt_status(?*anyopaque, c_int, c_int) c_int;
+    extern "c" fn sqlite3_trace_v2(
+        ?*anyopaque,
+        c_uint,
+        ?*const fn (c_uint, ?*anyopaque, ?*anyopaque, ?*anyopaque) callconv(.c) c_int,
+        ?*anyopaque,
+    ) c_int;
+
+    pub fn start(self: *@This(), database: anytype) !void {
+        var query = try database.prepare("SELECT 1", &.{});
+        defer query.deinit();
+        self.database = sqlite3_db_handle(query.handle);
+        try std.testing.expect(self.database != null);
+        try std.testing.expectEqual(0, sqlite3_trace_v2(self.database, 2, observe, self));
+    }
+
+    pub fn stop(self: *@This()) void {
+        std.debug.assert(sqlite3_trace_v2(self.database, 0, null, null) == 0);
+        self.database = null;
+    }
+
+    pub fn reset(self: *@This()) void {
+        self.steps = 0;
+        self.queries = 0;
+    }
+
+    fn observe(
+        _: c_uint,
+        context: ?*anyopaque,
+        statement: ?*anyopaque,
+        _: ?*anyopaque,
+    ) callconv(.c) c_int {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        const sql = std.mem.span(sqlite3_sql(statement) orelse return 0);
+        if (!std.mem.startsWith(u8, sql, self.prefix)) return 0;
+        self.queries += 1;
+        self.steps += @intCast(sqlite3_stmt_status(statement, 4, 0));
+        return 0;
+    }
+};
+
 pub fn expectRetainedReceipt(a: std.mem.Allocator, namespace: anytype, expected: anytype) !void {
     var rows = try namespace.store.database.prepare(
         "SELECT o.body FROM operations p JOIN objects o ON o.digest=p.receipt " ++

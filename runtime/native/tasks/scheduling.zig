@@ -136,9 +136,30 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     => .idle,
                     else => return err,
                 };
+                retainResidentTurn(self, id, step);
                 if (step != .idle) return step;
             }
             return .idle;
+        }
+        fn retainResidentTurn(self: *Self, subject: workspace.Subject, step: Step) void {
+            const active = self.active orelse {
+                self.resident_turns = 0;
+                return;
+            };
+            if (step != .progressed or subject.work != null or subject.residual != null or
+                active.subject != .root or !same(&active.task, &subject.task) or
+                active.root_control == null or active.root_cut_ready or self.resident_turns == 7)
+            {
+                self.resident_turns = 0;
+                return;
+            }
+            for (self.runnable.items, 0..) |candidate, position| {
+                if (!std.meta.eql(candidate, subject)) continue;
+                self.runnable_cursor = position;
+                self.resident_turns += 1;
+                return;
+            }
+            self.resident_turns = 0;
         }
         fn pumpOwnedCleanup(self: *Self, a: std.mem.Allocator, count: usize) !bool {
             // Cancellation is a retained obligation, independent of root runnable

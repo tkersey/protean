@@ -11,6 +11,7 @@ pub const Error = error{
     AlreadyOpen,
     Closed,
     Busy,
+    RecoveryRequired,
 } || std.mem.Allocator.Error;
 
 fn result(code: c_int) Error!void {
@@ -20,6 +21,10 @@ fn result(code: c_int) Error!void {
         c.SQLITE_CORRUPT, c.SQLITE_NOTADB => error.CorruptState,
         c.SQLITE_CONSTRAINT => error.Constraint,
         c.SQLITE_BUSY, c.SQLITE_LOCKED => error.Busy,
+        c.SQLITE_READONLY => if (code == c.SQLITE_READONLY_ROLLBACK)
+            error.RecoveryRequired
+        else
+            error.StorageUnavailable,
         else => error.StorageUnavailable,
     };
 }
@@ -43,6 +48,17 @@ pub const Database = opaque {
     /// One connection per native process, using SQLite's system allocator. The caller
     /// must acquire the namespace's OS lock before opening its database.
     pub fn open(a: std.mem.Allocator, path: []const u8, create: bool) Error!*Database {
+        return openFlags(a, path, c.SQLITE_OPEN_READWRITE | (if (create) @as(
+            c_int,
+            c.SQLITE_OPEN_CREATE,
+        ) else 0));
+    }
+
+    pub fn openReadOnly(a: std.mem.Allocator, path: []const u8) Error!*Database {
+        return openFlags(a, path, c.SQLITE_OPEN_READONLY);
+    }
+
+    fn openFlags(a: std.mem.Allocator, path: []const u8, mode: c_int) Error!*Database {
         if (std.mem.indexOfScalar(u8, path, 0) != null) return error.StorageUnavailable;
         if (in_use.cmpxchgStrong(
             false,
@@ -59,10 +75,7 @@ pub const Database = opaque {
         const name = try a.dupeSentinel(u8, path, 0);
         defer a.free(name);
         var db: ?*c.sqlite3 = null;
-        const flags: c_int = c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_FULLMUTEX | (if (create) @as(
-            c_int,
-            c.SQLITE_OPEN_CREATE,
-        ) else 0);
+        const flags: c_int = mode | c.SQLITE_OPEN_FULLMUTEX;
         const opened = c.sqlite3_open_v2(name.ptr, &db, flags, null);
         errdefer if (db) |ptr| {
             _ = c.sqlite3_close(ptr);

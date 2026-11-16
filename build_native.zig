@@ -26,6 +26,7 @@ pub const Source = struct { definition: std.Build.LazyPath, types: std.Build.Laz
 pub const Options = struct {
     name: []const u8,
     environment: std.Build.LazyPath,
+    entry: ?std.Build.LazyPath = null,
     /// Reuse the complete emitted application for another target. Its type
     /// mapping travels with its image, so a second source cannot be ignored.
     application: union(enum) { source: Source, emitted: Assets },
@@ -108,7 +109,7 @@ pub fn addWithModules(b: *std.Build, modules: Modules, options: Options) Product
     const manifest_file = createManifest(b, modules, options.name, assets, target, optimize);
 
     const root = b.createModule(.{
-        .root_source_file = modules.root.path(b, "runtime/native/entry.zig"),
+        .root_source_file = options.entry orelse modules.root.path(b, "runtime/native/entry.zig"),
         .target = target,
         .optimize = optimize,
         .strip = optimize != .debug,
