@@ -355,6 +355,12 @@ fn verifySqlite(c: Context, path: []const u8, lock_path: []const u8) !Value {
     });
 }
 
+fn compileFlags(c: Context, encoded: []const u8) !Value {
+    const flags = try std.json.parseFromSliceLeaky(Value, c.a, encoded, .{});
+    if (flags != .array) return error.InvalidMetadata;
+    return flags;
+}
+
 fn manifest(c: Context, args: []const []const u8) !void {
     if (args.len != 17 and args.len != 19) return error.ExpectedManifestArguments;
     const compiler_digest = try c.fileDigest(args[15]);
@@ -372,9 +378,7 @@ fn manifest(c: Context, args: []const []const u8) !void {
         try std.fmt.parseInt(u32, args[10][19..], 10) == 0)
         return error.InvalidMetadata;
     try c.put(&sqlite, "allocator", "system");
-    const flags = try std.json.parseFromSliceLeaky(Value, c.a, args[8], .{});
-    if (flags != .array) return error.InvalidMetadata;
-    try sqlite.object.put(c.a, "compile_flags", flags);
+    try sqlite.object.put(c.a, "compile_flags", try compileFlags(c, args[8]));
     const library_path = try Dir.cwd().realPathFileAlloc(c.io, args[16], c.a);
     const library = try Inventory.load(c, library_path, 100000);
     const licenses = try dependencyLicenses(c, args, library_path);
@@ -388,9 +392,7 @@ fn manifest(c: Context, args: []const []const u8) !void {
     if (args.len == 19) {
         try c.put(&compiler, "backend", "self-hosted");
         try sqlite.object.put(c.a, "compiler", try c.json(args[17]));
-        const shim = try std.json.parseFromSliceLeaky(Value, c.a, args[18], .{});
-        if (shim != .array) return error.InvalidMetadata;
-        try sqlite.object.put(c.a, "posix_shim_compile_flags", shim);
+        try sqlite.object.put(c.a, "posix_shim_compile_flags", try compileFlags(c, args[18]));
     }
     const result = .{
         .format = "agent-native-build/v2",
