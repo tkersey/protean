@@ -356,7 +356,7 @@ fn verifySqlite(c: Context, path: []const u8, lock_path: []const u8) !Value {
 }
 
 fn manifest(c: Context, args: []const []const u8) !void {
-    if (args.len != 17) return error.ExpectedManifestArguments;
+    if (args.len != 17 and args.len != 19) return error.ExpectedManifestArguments;
     const compiler_digest = try c.fileDigest(args[15]);
     const image = try c.read(args[0], null);
     const application_bytes = try c.read(args[1], null);
@@ -378,6 +378,20 @@ fn manifest(c: Context, args: []const []const u8) !void {
     const library_path = try Dir.cwd().realPathFileAlloc(c.io, args[16], c.a);
     const library = try Inventory.load(c, library_path, 100000);
     const licenses = try dependencyLicenses(c, args, library_path);
+    var compiler = try c.value(.{
+        .version = @import("builtin").zig_version_string,
+        .executable_sha256 = compiler_digest,
+        .library_inventory_sha256 = try library.libraryIdentity(c),
+        .library_entries = library.files.items.len,
+        .library_bytes = library.bytes,
+    });
+    if (args.len == 19) {
+        try c.put(&compiler, "backend", "self-hosted");
+        try sqlite.object.put(c.a, "compiler", try c.json(args[17]));
+        const shim = try std.json.parseFromSliceLeaky(Value, c.a, args[18], .{});
+        if (shim != .array) return error.InvalidMetadata;
+        try sqlite.object.put(c.a, "posix_shim_compile_flags", shim);
+    }
     const result = .{
         .format = "agent-native-build/v2",
         .application_id = try text(application, "application_id"),
@@ -398,13 +412,7 @@ fn manifest(c: Context, args: []const []const u8) !void {
             .dependency_lock_sha256 = try c.fileDigest(args[2]),
             .sqlite = sqlite,
         },
-        .compiler = .{
-            .version = @import("builtin").zig_version_string,
-            .executable_sha256 = compiler_digest,
-            .library_inventory_sha256 = try library.libraryIdentity(c),
-            .library_entries = library.files.items.len,
-            .library_bytes = library.bytes,
-        },
+        .compiler = compiler,
         .runtime_dependencies = runtimeDependencies(args[11]),
         .binary_identity = "Final executable SHA-256 is recorded externally; this manife" ++
             "st does not authenticate itself.",

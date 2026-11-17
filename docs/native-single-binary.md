@@ -45,6 +45,14 @@ The default native inputs are `.protean-native/inputs/kosmos` and
 `-Dhoros-source` overrides receive the same admission checks. Pure authoring
 consumers can select `-Dnative=false`; they still authenticate Horos.
 
+On x86-64 Linux, a downstream dependency can set `.@"native-gcc" = "musl-gcc"`.
+Protean then uses self-hosted
+Zig for its exported build tools, hash library, asset emitter and product, and
+that GCC for the admitted SQLite amalgamation and POSIX shim. The product
+manifest records the Zig backend, GCC identity and C flags. The embedding build
+selects `.use_llvm = false` on its own tests and other compile steps.
+Apple Silicon macOS qualification of this build option is pending.
+
 `addNativeSystem(b, dependency, options)` is exported by `build.zig`. A caller
 supplies an executable name, an environment source, and either:
 
