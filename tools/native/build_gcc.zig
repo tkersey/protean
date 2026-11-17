@@ -107,7 +107,7 @@ pub const Gcc = struct {
             "-fno-ipa-modref",
             "-Wno-builtin-declaration-mismatch",
             switch (optimize) {
-                .safe => "-O1",
+                .safe => "-O2",
                 .debug => "-Og",
                 .fast => "-O3",
                 .small => "-Os",
