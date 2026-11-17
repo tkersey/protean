@@ -139,7 +139,7 @@ jobs:
           mkdir -p .zig-cache/tmp
           lane="${{ matrix.lane }}"
           packages=()
-          if [ -z "${{ matrix.compiled_profile }}" ] || [ "${{ matrix.compiled_profile }}" = product ] || [ "$lane" = authoring ]; then
+          if [[ "$lane" != recurrence-driver && ( -z "${{ matrix.compiled_profile }}" || "${{ matrix.compiled_profile }}" = product || "$lane" = authoring ) ]]; then
             command -v rg >/dev/null || packages+=(ripgrep)
           fi
           if [[ "$lane" == native* ]] || [ "$lane" = downstream ]; then
@@ -168,7 +168,7 @@ jobs:
           path: |
             .protean-native/inputs/*.tar.gz
             .protean-native/inputs/*.zip
-          key: protean-native-archives-v2-${{ matrix.lane == 'downstream' && 'native' || matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}
+          key: protean-native-archives-v2-${{ (matrix.lane == 'downstream' || matrix.lane == 'recurrence-driver') && 'native' || matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}
       - name: Authenticate and provision selected native inputs
         if: ${{ !matrix.product_consumer && matrix.lane != 'downstream' }}
         run: |
