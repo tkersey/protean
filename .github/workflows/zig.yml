@@ -59,7 +59,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'authoring' && '[{"lane":"authoring"}]' || github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'owners' && '[{"lane":"owners","compiled_profile":"owners"}]' || github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'downstream' && '[{"lane":"downstream"}]' || '[{"lane":"authoring"},{"lane":"owners","compiled_profile":"owners"},{"lane":"owner-adaptive-control","compiled_profile":"owner-adaptive-control","adaptive_groups":"[0,2,5,6]","adaptive_tests":19,"adaptive_group_count":4},{"lane":"owner-projection-repair","compiled_profile":"owner-adaptive-control","adaptive_groups":"[1]","adaptive_tests":1,"adaptive_group_count":1},{"lane":"owner-projection-boundaries","compiled_profile":"owner-adaptive-control","adaptive_groups":"[3,4,7,8]","adaptive_tests":8,"adaptive_group_count":4},{"lane":"owner-support"},{"lane":"workspace","compiled_profile":"workspace"},{"lane":"workspace-retention","compiled_profile":"workspace-retention"},{"lane":"workspace-history","compiled_profile":"workspace-history"},{"lane":"correspondence"},{"lane":"native","compiled_profile":"product"},{"lane":"native-placement","product_consumer":true},{"lane":"downstream"}]') }}
+        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'authoring' && '[{"lane":"authoring"}]' || github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'owners' && '[{"lane":"owners","compiled_profile":"owners"}]' || github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'downstream' && '[{"lane":"downstream"}]' || '[{"lane":"authoring"},{"lane":"owners","compiled_profile":"owners"},{"lane":"owner-adaptive-control","compiled_profile":"owner-adaptive-control","adaptive_groups":"[0,2,5,6]","adaptive_tests":19,"adaptive_group_count":4},{"lane":"owner-projection-repair","compiled_profile":"owner-adaptive-control","adaptive_groups":"[1]","adaptive_tests":1,"adaptive_group_count":1},{"lane":"owner-projection-boundaries","compiled_profile":"owner-adaptive-control","adaptive_groups":"[3,4,7,8]","adaptive_tests":8,"adaptive_group_count":4},{"lane":"owner-support"},{"lane":"workspace","compiled_profile":"workspace"},{"lane":"workspace-retention","compiled_profile":"workspace-retention"},{"lane":"workspace-history","compiled_profile":"workspace-history"},{"lane":"correspondence"},{"lane":"recurrence-driver"},{"lane":"native","compiled_profile":"product"},{"lane":"native-placement","product_consumer":true},{"lane":"downstream"}]') }}
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     env:
@@ -266,7 +266,9 @@ jobs:
           elif [ "${{ matrix.lane }}" = workspace-history ]; then
             run_compiled_tests workspace-general 3
           elif [ "${{ matrix.lane }}" = correspondence ]; then
-            zig build check-workspace-semantics check-recurrence-driver -Doptimize=safe --summary all
+            zig build check-workspace-semantics -Doptimize=safe --summary all
+          elif [ "${{ matrix.lane }}" = recurrence-driver ]; then
+            zig build check-recurrence-driver -Doptimize=safe --summary all
           elif [ "${{ matrix.lane }}" = downstream ]; then
             # The downstream witness authenticates its own inputs and builds
             # independently, without competing with native tests on one runner.
