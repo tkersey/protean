@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 export LC_ALL=C
-driver=$1
-target=$2
+case $# in
+  2) driver=$1; target=$2 ;;
+  4) driver=$1/$2; target=$3 ;;
+  *) exit 64 ;;
+esac
 macros=$("$driver" -dM -E -x c - </dev/null)
 has_macro() { grep -Eq "^#define $1 " <<<"$macros"; }
 fail() { printf '%s\n' "$*" >&2; exit 1; }
@@ -35,11 +38,32 @@ digest=$({
     [[ -r $spec ]] || fail "cannot read GCC specs file: $spec"
     shasum -a 256 "$spec"
   done < <(sed -n 's/^Reading specs from //p' <<<"$configuration")
+  if [[ $target == aarch64-macos* ]]; then
+    sysroot=$("$driver" -print-sysroot)
+    for tool in "$("$driver" -print-prog-name=collect2)" "$("$driver" -print-prog-name=ld)"; do
+      component=$(command -v "$tool") || fail "cannot locate GCC link component: $tool"
+      shasum -a 256 "$component"
+    done
+    shasum -a 256 "$(xcrun --find as)" "$(xcrun --find clang)" "$(xcrun --find ld)"
+    for library in libgcc.a libemutls_w.a libheapt_w.a; do
+      shasum -a 256 "$("$driver" -print-file-name="$library")"
+    done
+    shasum -a 256 "$sysroot/usr/lib/libSystem.tbd" "$sysroot"/usr/lib/system/*.tbd
+  fi
   for tool in "$(sed -n 's/^COLLECT_GCC=//p' <<<"$configuration")" \
       "$("$driver" -print-prog-name=cc1)" "$("$driver" -print-prog-name=as)"; do
     component=$(command -v "$tool") || fail "cannot locate GCC component: $tool"
     shasum -a 256 "$component"
   done
 } | shasum -a 256)
-printf '{"family":"gcc","version":"%s","driver_machine":"%s","toolchain_sha256":"%s"}\n' \
-  "$version" "$machine" "${digest%% *}"
+identity=$(printf '{"family":"gcc","version":"%s","driver_machine":"%s","toolchain_sha256":"%s"}' \
+  "$version" "$machine" "${digest%% *}")
+if [[ $# == 2 ]]; then
+  printf '%s\n' "$identity"
+else
+  out=$4
+  tmp=$(mktemp "$out.XXXXXXXX")
+  trap 'rm -f "$tmp"' EXIT
+  printf '%s\n' "$identity" >"$tmp"
+  if ! cmp -s "$tmp" "$out"; then mv -f "$tmp" "$out"; fi
+fi

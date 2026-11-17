@@ -45,13 +45,23 @@ The default native inputs are `.protean-native/inputs/kosmos` and
 `-Dhoros-source` overrides receive the same admission checks. Pure authoring
 consumers can select `-Dnative=false`; they still authenticate Horos.
 
-On x86-64 Linux, a downstream dependency can set `.@"native-gcc" = "musl-gcc"`.
-Protean then uses self-hosted
-Zig for its exported build tools, hash library, asset emitter and product, and
-that GCC for the admitted SQLite amalgamation and POSIX shim. The product
-manifest records the Zig backend, GCC identity and C flags. The embedding build
-selects `.use_llvm = false` on its own tests and other compile steps.
-Apple Silicon macOS qualification of this build option is pending.
+On x86-64 Linux, set `.@"native-gcc" = "musl-gcc"` on the Protean dependency
+to build Zig sources with the self-hosted backend and compile SQLite and the
+POSIX shim with GNU GCC. On Apple Silicon macOS, select Homebrew GNU GCC with
+`.@"native-gcc" = "gcc-16"`. Zig emits C for the host tools, hash code,
+application and compiler runtime. GCC compiles that C with `-std=gnu17`
+and links the native executable. The product manifest records the compiler
+identity and flags, including the macOS deployment minimum.
+
+An embedding build can use `NativeBinary.addExecutable(b, dependency, options,
+link_native)` and `NativeBinary.addTest(b, dependency, options, link_native)`.
+Set `link_native` for roots importing `protean_native`. Pass the usual Zig
+executable or test options, including `.use_llvm = false` for self-hosted
+Linux builds. Use the result's `.run(b)` for execution and `.path` for
+installation or as an input to another step. For the product returned by
+`addNativeSystem`, `.binary` identifies the executable and `.strip = false`
+in the options requests debugging symbols. Native dependencies expose their
+host build tool at `dependency.namedLazyPath("native-build-tool")`.
 
 `addNativeSystem(b, dependency, options)` is exported by `build.zig`. A caller
 supplies an executable name, an environment source, and either:

@@ -1,4 +1,7 @@
 const std = @import("std");
+const backend = @import("tools/native/build_gcc.zig");
+const Gcc = backend.Gcc;
+const Binary = backend.Binary;
 const adaptive_owner_groups = [_][]const []const u8{
     &.{ "adaptive_controls.", "adaptive_reports.", "adaptive_recovery." },
     &.{"projection_recovery."},
@@ -36,6 +39,8 @@ const Graph = struct {
     contracts: *std.Build.Module,
     gate: *std.Build.Step,
     target: ?std.Build.ResolvedTarget = null,
+    darwin: ?Gcc = null,
+    library: ?std.Build.LazyPath = null,
 
     fn module(g: Graph, path: []const u8) *std.Build.Module {
         return g.b.createModule(.{
@@ -58,7 +63,7 @@ const Graph = struct {
         g: Graph,
         step: *std.Build.Step,
         module_value: *std.Build.Module,
-    ) *std.Build.Step.Compile {
+    ) Binary {
         return g.testModuleFiltered(step, module_value, &.{});
     }
     fn testModuleFiltered(
@@ -66,9 +71,9 @@ const Graph = struct {
         step: *std.Build.Step,
         module_value: *std.Build.Module,
         filters: []const []const u8,
-    ) *std.Build.Step.Compile {
+    ) Binary {
         const tests = g.compileTests(module_value, filters);
-        const run = g.b.addRunArtifact(tests);
+        const run = tests.run(g.b);
         run.has_side_effects = true;
         step.dependOn(&run.step);
         return tests;
@@ -77,13 +82,13 @@ const Graph = struct {
         g: Graph,
         module_value: *std.Build.Module,
         filters: []const []const u8,
-    ) *std.Build.Step.Compile {
-        const tests = g.b.addTest(.{
+    ) Binary {
+        const tests = Binary.create(g.b, std.Build.TestOptions{
             .root_module = module_value,
             .filters = filters,
             .use_llvm = if (linuxX86(g.b.graph.host)) g.optimize != .debug else null,
-        });
-        tests.step.dependOn(g.gate);
+        }, g.darwin, g.library, g.library != null);
+        tests.compile.step.dependOn(g.gate);
         return tests;
     }
     fn testModuleGrouped(
@@ -92,7 +97,7 @@ const Graph = struct {
         module_value: *std.Build.Module,
         groups: []const []const []const u8,
         selected: ?usize,
-    ) *std.Build.Step.Compile {
+    ) Binary {
         if (selected) |index| return g.testModuleFiltered(step, module_value, groups[index]);
         const tests = g.compileTests(module_value, &.{});
         g.runGrouped(step, tests, groups);
@@ -101,13 +106,13 @@ const Graph = struct {
     fn runGrouped(
         g: Graph,
         step: *std.Build.Step,
-        tests: *std.Build.Step.Compile,
+        tests: Binary,
         groups: []const []const []const u8,
     ) void {
         const run = nodeCommand(g.b);
         run.addArg("node");
         run.addFileArg2(g.b.path("tools/native/qualification_tests.mjs"), .{});
-        run.addArtifactArg(tests);
+        run.addFileArg2(tests.path, .{ .make_absolute = true });
         run.addArg(
             std.json.Stringify.valueAlloc(g.b.allocator, groups, .{}) catch @panic("out of memory"),
         );
@@ -119,13 +124,13 @@ const Graph = struct {
         g: Graph,
         name: []const u8,
         module_value: *std.Build.Module,
-    ) *std.Build.Step.Compile {
-        const executable = g.b.addExecutable(.{
+    ) Binary {
+        const executable = Binary.create(g.b, std.Build.ExecutableOptions{
             .name = name,
             .root_module = module_value,
             .use_llvm = if (linuxX86(g.b.graph.host)) g.optimize != .debug else null,
-        });
-        executable.step.dependOn(g.gate);
+        }, g.darwin, g.library, g.library != null);
+        executable.compile.step.dependOn(g.gate);
         return executable;
     }
 };
@@ -157,7 +162,7 @@ const BuildGraph = struct {
     native_target: std.Build.ResolvedTarget = undefined,
     source: ?std.Build.LazyPath = undefined,
     native_enabled: bool = undefined,
-    native_gcc: ?std.Build.LazyPath = null,
+    native_gcc: ?Gcc.Driver = null,
     gcc_identity: ?std.Build.LazyPath = null,
     default_musl: bool = undefined,
     kosmos_source: std.Build.LazyPath = undefined,
@@ -186,9 +191,12 @@ const BuildGraph = struct {
     checked_kosmos: *std.Build.Module = undefined,
     checked_environment: *std.Build.Module = undefined,
     native_suite: *std.Build.Module = undefined,
-    host_tool: *std.Build.Step.Compile = undefined,
-    workspace_peer: *std.Build.Step.Compile = undefined,
-    mobility_peer: *std.Build.Step.Compile = undefined,
+    darwin: ?Gcc = null,
+    host_tool: Binary = undefined,
+    host_hash: ?std.Build.LazyPath = null,
+    darwin_library: ?std.Build.LazyPath = null,
+    workspace_peer: Binary = undefined,
+    mobility_peer: Binary = undefined,
     source_guard: *std.Build.Step.Run = undefined,
     native_guard: *std.Build.Step.Run = undefined,
     g: Graph = undefined,
@@ -247,7 +255,18 @@ const BuildGraph = struct {
             "Authenticated immutable Horos source copy",
         );
         if (s.b.option([]const u8, "native-gcc", "Target GCC for self-hosted embedding")) |name|
-            s.native_gcc = s.b.findProgramLazy(.{ .names = &.{name} });
+            s.native_gcc = .{
+                .path = s.b.findProgramLazy(.{ .names = &.{name} }),
+                .name = std.fs.path.basename(name),
+            };
+        if (s.native_gcc) |driver| if (Gcc.isDarwin(s.b.graph.host) and Gcc.isDarwin(s.target)) {
+            s.darwin = Gcc.init(s.b, s.b.graph.host, driver);
+            const rt = s.darwin.?.runtime(s.b, s.b.graph.host);
+            s.darwin.?.host_runtime = rt;
+            s.b.addNamedLazyPath("darwin-gcc-rt", rt);
+            s.b.addNamedLazyPath("darwin-gcc", driver.path);
+            s.b.addNamedLazyPath("darwin-gcc-identity", s.darwin.?.identity);
+        };
         s.native_enabled = s.b.option(
             bool,
             "native",
@@ -306,7 +325,13 @@ const BuildGraph = struct {
     }
 
     fn hostTool(s: *BuildGraph) void {
-        s.host_tool = s.b.addExecutable(.{
+        const hash = s.b.createModule(.{
+            .root_source_file = s.b.path("runtime/native/hash.zig"),
+            .target = s.b.graph.host,
+            .optimize = .safe,
+        });
+        if (s.darwin) |gcc| s.host_hash = gcc.zigObject(s.b, "protean-build-hash", hash);
+        s.host_tool = Binary.create(s.b, std.Build.ExecutableOptions{
             .name = "protean-native-build",
             .root_module = s.b.createModule(.{
                 .root_source_file = s.b.path("tools/native/build_entry.zig"),
@@ -322,22 +347,17 @@ const BuildGraph = struct {
                 }},
             }),
             .use_llvm = if (s.native_gcc != null or linuxX86(s.b.graph.host)) false else null,
-        });
-        const build_hash = s.b.addLibrary(.{
+        }, s.darwin, s.host_hash, false);
+        if (s.darwin == null) s.host_tool.compile.root_module.linkLibrary(s.b.addLibrary(.{
             .name = "protean-build-hash",
             .linkage = .static,
-            .root_module = s.b.createModule(.{
-                .root_source_file = s.b.path("runtime/native/hash.zig"),
-                .target = s.b.graph.host,
-                .optimize = .safe,
-            }),
+            .root_module = hash,
             .use_llvm = s.native_gcc == null,
-        });
-        s.host_tool.root_module.linkLibrary(build_hash);
+        }));
     }
 
     fn admitSource(s: *BuildGraph) void {
-        s.source_guard = s.b.addRunArtifact(s.host_tool);
+        s.source_guard = s.host_tool.run(s.b);
         s.source_guard.addArg("verify-horos");
         s.source_guard.addFileArg2(s.b.path("conformance/protean/dependencies.lock.json"), .{});
         if (s.source) |path| {
@@ -482,6 +502,7 @@ const BuildGraph = struct {
             .data = s.data,
             .contracts = s.contracts,
             .gate = &s.source_guard.step,
+            .darwin = s.darwin,
         };
     }
 
@@ -500,8 +521,9 @@ const BuildGraph = struct {
         const adaptive_emitter = s.g.emitter("protean-assets", emitter_module);
         // Match the public builder's backend for this build-time authoring tool.
         // The emitted image is independently compared with the installed product.
-        if (s.native_gcc != null or linuxX86(s.b.graph.host)) adaptive_emitter.use_llvm = false;
-        const adaptive_assets = s.b.addRunArtifact(adaptive_emitter);
+        if (s.native_gcc != null or linuxX86(s.b.graph.host))
+            adaptive_emitter.compile.use_llvm = false;
+        const adaptive_assets = adaptive_emitter.run(s.b);
         s.adaptive_image = adaptive_assets.addOutputFileArg2("program.bpi3", .{});
         s.adaptive_application = adaptive_assets.addOutputFileArg2("application.json", .{});
         s.check.dependOn(&adaptive_assets.step);
@@ -570,7 +592,7 @@ const BuildGraph = struct {
         admitted.addImport("admission", s.g.helper("admission"));
         const dialogue = s.g.module("test/protean/dialogue_probe.zig");
         dialogue.addImport("interaction", s.g.helper("interaction"));
-        const authoring_tests = [_]*std.Build.Step.Compile{
+        const authoring_tests = [_]Binary{
             s.g.testModule(s.check, s.g.module("test/authoring_tests.zig")),
             s.g.testModule(s.check, s.g.module("src/test_root.zig")),
             s.g.testModule(
@@ -581,7 +603,7 @@ const BuildGraph = struct {
             s.g.testModule(s.check, dialogue),
         };
         if (linuxX86(s.b.graph.host)) {
-            for (authoring_tests) |tests| tests.use_llvm = false;
+            for (authoring_tests) |tests| tests.compile.use_llvm = false;
         }
     }
 
@@ -619,8 +641,10 @@ const BuildGraph = struct {
             rejected.step.dependOn(s.g.gate);
             s.check.dependOn(&rejected.step);
         }
-        const helper_tests = s.b.addTest(.{ .root_module = s.host_tool.root_module });
-        const helper_tests_run = s.b.addRunArtifact(helper_tests);
+        const helper_tests = Binary.create(s.b, std.Build.TestOptions{
+            .root_module = s.host_tool.compile.root_module,
+        }, s.darwin, s.host_hash, false);
+        const helper_tests_run = helper_tests.run(s.b);
         helper_tests_run.has_side_effects = true;
         s.check.dependOn(&helper_tests_run.step);
     }
@@ -678,7 +702,7 @@ const BuildGraph = struct {
             .optimize = s.optimize,
             .imports = &.{.{ .name = "horos_data", .module = s.data }},
         });
-        s.native_guard = s.b.addRunArtifact(s.host_tool);
+        s.native_guard = s.host_tool.run(s.b);
         s.native_guard.addArg("verify-native");
         s.native_guard.addFileArg2(s.b.path("conformance/protean/dependencies.lock.json"), .{});
         s.native_guard.addDirectoryArg2(s.kosmos_source, .{ .make_absolute = true });
@@ -699,17 +723,24 @@ const BuildGraph = struct {
             "horos_package",
             @import("build.zig.zon").dependencies.horos.hash,
         );
-        const runtime_emitter = s.b.addExecutable(
-            .{ .name = "protean-runtime-artifact", .root_module = s.b.createModule(.{
-                .root_source_file = s.kosmos_source.path(s.b, "src/semantic_packaged.zig"),
-                .target = s.b.graph.host,
-                .optimize = s.optimize,
-            }) },
+        const runtime_emitter = Binary.create(
+            s.b,
+            std.Build.ExecutableOptions{
+                .name = "protean-runtime-artifact",
+                .root_module = s.b.createModule(.{
+                    .root_source_file = s.kosmos_source.path(s.b, "src/semantic_packaged.zig"),
+                    .target = s.b.graph.host,
+                    .optimize = s.optimize,
+                }),
+            },
+            s.darwin,
+            null,
+            false,
         );
-        if (s.native_gcc != null) runtime_emitter.use_llvm = false;
-        runtime_emitter.root_module.addOptions("artifact_options", runtime_options);
-        runtime_emitter.step.dependOn(&s.native_guard.step);
-        const emit_runtime = s.b.addRunArtifact(runtime_emitter);
+        if (s.native_gcc != null) runtime_emitter.compile.use_llvm = false;
+        runtime_emitter.compile.root_module.addOptions("artifact_options", runtime_options);
+        runtime_emitter.compile.step.dependOn(&s.native_guard.step);
+        const emit_runtime = runtime_emitter.run(s.b);
         const runtime_files = s.b.addWriteFiles();
         _ = runtime_files.addCopyFile(emit_runtime.captureStdOut(.{}), "semantic-core.kar");
         s.runtime_source = runtime_files.add(
@@ -734,6 +765,11 @@ const BuildGraph = struct {
         });
     }
 
+    fn targetGcc(s: *BuildGraph, target: std.Build.ResolvedTarget) ?Gcc {
+        if (s.darwin) |gcc| return gcc;
+        return Gcc.init(s.b, target, s.native_gcc orelse return null);
+    }
+
     fn hostEnvironment(s: *BuildGraph) void {
         s.host_environment = nativeEnvironment(
             s.b,
@@ -745,7 +781,7 @@ const BuildGraph = struct {
             s.horos,
             s.protean,
             s.native_admission,
-            s.native_gcc,
+            s.targetGcc(s.b.graph.host),
             s.sqlite_source,
             &s.native_guard.step,
         );
@@ -823,12 +859,14 @@ const BuildGraph = struct {
             s.native_horos,
             s.native_protean,
             s.native_admission,
-            s.native_gcc,
+            s.targetGcc(s.native_target),
             s.sqlite_source,
             &s.native_guard.step,
         );
         s.public_environment = public.module;
         s.gcc_identity = public.gcc_identity;
+        s.darwin_library = public.darwin_library;
+        s.native_graph.library = public.darwin_library;
         // Executed native checks use the delivered ABI when it runs on this
         // host. This also shares its C library instead of compiling a GNU-only
         // SQLite copy solely for tests of a musl product.
@@ -893,9 +931,9 @@ const BuildGraph = struct {
             .history => workspace_execution_groups[4..5],
         } else &workspace_execution_groups;
         s.native_graph.runGrouped(s.workspace_general, workspace_general_tests, groups);
-        if (linuxX86(s.b.graph.host)) workspace_general_tests.use_llvm = false;
+        if (linuxX86(s.b.graph.host)) workspace_general_tests.compile.use_llvm = false;
         s.b.step("build-workspace-general-check", "Build the retained workspace test executable")
-            .dependOn(&s.b.addInstallArtifact(workspace_general_tests, .{
+            .dependOn(&workspace_general_tests.install(s.b, .{
             .dest_dir = .{ .override = .{ .custom = "verification" } },
             .dest_sub_path = "workspace-general",
         }).step);
@@ -936,7 +974,7 @@ const BuildGraph = struct {
             "build-workspace-runtime-check",
             "Build the retained runtime workspace test executable",
         )
-            .dependOn(&s.b.addInstallArtifact(workspace_runtime_tests, .{
+            .dependOn(&workspace_runtime_tests.install(s.b, .{
             .dest_dir = .{ .override = .{ .custom = "verification" } },
             .dest_sub_path = "workspace-runtime",
         }).step);
@@ -957,7 +995,7 @@ const BuildGraph = struct {
         );
         s.b.step("build-workspace-peer", "Build the verification-only source and capsule byte peer")
             .dependOn(
-            &s.b.addInstallArtifact(s.workspace_peer, .{ .dest_dir = .{ .override = .{
+            &s.workspace_peer.install(s.b, .{ .dest_dir = .{ .override = .{
                 .custom = "verification",
             } } }).step,
         );
@@ -973,7 +1011,7 @@ const BuildGraph = struct {
             "Build the source-emission and read-only mobility fixture peer",
         )
             .dependOn(
-            &s.b.addInstallArtifact(s.mobility_peer, .{ .dest_dir = .{ .override = .{
+            &s.mobility_peer.install(s.b, .{ .dest_dir = .{ .override = .{
                 .custom = "verification",
             } } }).step,
         );
@@ -983,7 +1021,7 @@ const BuildGraph = struct {
         const workspace_semantics_run = nativeCheckCommand(s.b);
         workspace_semantics_run.addArg("node");
         workspace_semantics_run.addFileArg2(s.b.path("test/protean/workspace_semantics.mjs"), .{});
-        workspace_semantics_run.addArtifactArg(s.workspace_peer);
+        workspace_semantics_run.addFileArg2(s.workspace_peer.path, .{ .make_absolute = true });
         workspace_semantics_run.addFileArg2((s.source orelse s.b.dependency("horos", .{
             .target = s.b.graph.host,
             .optimize = s.optimize,
@@ -1014,7 +1052,9 @@ const BuildGraph = struct {
     fn publishNative(s: *BuildGraph) void {
         s.b.addNamedLazyPath("native-sqlite-source", s.sqlite_source);
         if (s.gcc_identity) |identity| s.b.addNamedLazyPath("native-gcc-identity", identity);
-        s.b.installArtifact(s.host_tool);
+        if (s.darwin_library) |lib| s.b.addNamedLazyPath("darwin-native-library", lib);
+        s.b.addNamedLazyPath("native-build-tool", s.host_tool.path);
+        s.b.getInstallStep().dependOn(&s.host_tool.install(s.b, .{}).step);
         s.b.modules.put(
             s.b.allocator,
             s.b.dupe("protean_native"),
@@ -1049,7 +1089,9 @@ const BuildGraph = struct {
             .native_contracts = s.native_contracts,
             .native_protean = s.native_protean,
             .sqlite_source = s.sqlite_source,
-            .host_tool = s.host_tool,
+            .host_tool = s.host_tool.path,
+            .darwin = s.darwin,
+            .library = s.darwin_library,
             .gcc_identity = s.gcc_identity,
         };
         s.adaptive_product = @import(
@@ -1076,7 +1118,7 @@ const BuildGraph = struct {
         const root = s.b.allocator.create(std.Build.Module) catch @panic("out of memory");
         root.init(s.b, .{ .existing = s.adaptive_product.executable.root_module });
         root.root_source_file = s.b.path("tools/evaluation/recurrence_entry.zig");
-        const executable = s.b.addTest(.{
+        const executable = Binary.create(s.b, std.Build.TestOptions{
             .name = "protean-recurrence-driver",
             .root_module = root,
             .test_runner = .{
@@ -1084,8 +1126,8 @@ const BuildGraph = struct {
                 .mode = .simple,
             },
             .use_llvm = if (linuxX86(s.native_target)) true else null,
-        });
-        const install = s.b.addInstallArtifact(executable, .{});
+        }, s.darwin, s.darwin_library, true);
+        const install = executable.install(s.b, .{});
         const driver = s.b.step(
             "recurrence-driver",
             "Build the private recurrence evaluation driver",
@@ -1094,7 +1136,7 @@ const BuildGraph = struct {
         driver.dependOn(s.adaptive_image_step);
         const check = nativeCheckCommand(s.b);
         check.addArgs(&.{ "node", "test/protean/recurrence_driver.mjs" });
-        check.addFileArg2(executable.getEmittedBin(), .{ .make_absolute = true });
+        check.addFileArg2(executable.path, .{ .make_absolute = true });
         check.addFileArg2(s.adaptive_application, .{ .make_absolute = true });
         s.b.step("check-recurrence-driver", "Check sealed capture and external crash recovery")
             .dependOn(&check.step);
@@ -1114,7 +1156,7 @@ const BuildGraph = struct {
     fn nativeSmoke(s: *BuildGraph) void {
         const adaptive_peer = nativeCheckCommand(s.b);
         adaptive_peer.addArgs(&.{ "node", "test/protean/native_adaptive.mjs" });
-        adaptive_peer.addFileArg2(s.adaptive_product.executable.getEmittedBin(), .{
+        adaptive_peer.addFileArg2(s.adaptive_product.binary, .{
             .make_absolute = true,
         });
         adaptive_peer.addFileArg2(s.adaptive_application, .{ .make_absolute = true });
@@ -1123,7 +1165,7 @@ const BuildGraph = struct {
         s.native_executable.dependOn(&adaptive_peer.step);
         const placement_peer = nativeCheckCommand(s.b);
         placement_peer.addArgs(&.{ "node", "test/protean/native_placement.mjs" });
-        placement_peer.addFileArg2(s.adaptive_product.executable.getEmittedBin(), .{
+        placement_peer.addFileArg2(s.adaptive_product.binary, .{
             .make_absolute = true,
         });
         placement_peer.step.dependOn(&adaptive_peer.step);
@@ -1139,12 +1181,12 @@ const BuildGraph = struct {
     fn runtimeDiagnostics(s: *BuildGraph) void {
         const runtime_peer = nativeCheckCommand(s.b);
         runtime_peer.addArgs(&.{ "node", "test/protean/native_runtime.mjs" });
-        runtime_peer.addFileArg2(s.adaptive_product.executable.getEmittedBin(), .{
+        runtime_peer.addFileArg2(s.adaptive_product.binary, .{
             .make_absolute = true,
         });
         runtime_peer.addFileArg2(s.adaptive_application, .{ .make_absolute = true });
         runtime_peer.addArg("");
-        runtime_peer.addArtifactArg(s.mobility_peer);
+        runtime_peer.addFileArg2(s.mobility_peer.path, .{ .make_absolute = true });
         s.b.step(
             "check-native-runtime",
             "Qualify scripted optional runtime choices through " ++
@@ -1167,7 +1209,7 @@ const BuildGraph = struct {
                 "test/protean/workspace_runtime_retention.mjs",
             });
             retention_run.addFileArg2(previous, .{ .make_absolute = true });
-            retention_run.addArtifactArg(s.adaptive_product.executable);
+            retention_run.addFileArg2(s.adaptive_product.binary, .{ .make_absolute = true });
             retention_check.dependOn(&retention_run.step);
         } else retention_check.dependOn(
             &s.b.addFail(
@@ -1189,15 +1231,15 @@ const BuildGraph = struct {
                 .{ .name = "protean_contracts", .module = s.native_graph.contracts },
             },
         });
-        const consumer = s.b.addExecutable(.{
+        const consumer = Binary.create(s.b, std.Build.ExecutableOptions{
             .name = "protean-https-probe",
             .root_module = consumer_module,
             .use_llvm = if (linuxX86(s.native_target)) false else null,
-        });
-        consumer.step.dependOn(&s.native_guard.step);
+        }, s.darwin, s.darwin_library, true);
+        consumer.compile.step.dependOn(&s.native_guard.step);
         const https_peer = nodeCommand(s.b);
         https_peer.addArgs(&.{ "node", "test/protean/native_https.mjs" });
-        https_peer.addFileArg2(consumer.getEmittedBin(), .{ .make_absolute = true });
+        https_peer.addFileArg2(consumer.path, .{ .make_absolute = true });
         s.native_consumer.dependOn(&https_peer.step);
     }
 
@@ -1271,14 +1313,14 @@ const BuildGraph = struct {
                 s.native_graph.testModuleGrouped(checks, suite, &adaptive_owner_groups, null)
             else
                 s.native_graph.testModuleGrouped(checks, suite, &.{&.{".test"}}, null);
-            if (linuxX86(s.b.graph.host)) tests.use_llvm = false;
+            if (linuxX86(s.b.graph.host)) tests.compile.use_llvm = false;
             if (comptime std.mem.eql(u8, group[0], "tasks"))
                 s.nativeEmbeddingDiagnostic(suite);
             s.b.step(
                 "build-native-owner-" ++ group[0] ++ "-check",
                 "Build the retained native " ++ group[0] ++ " test executable",
             )
-                .dependOn(&s.b.addInstallArtifact(tests, .{
+                .dependOn(&tests.install(s.b, .{
                 .dest_dir = .{ .override = .{ .custom = "verification" } },
                 .dest_sub_path = "native-owner-" ++ group[0],
             }).step);
@@ -1300,22 +1342,22 @@ const BuildGraph = struct {
             "retained attempt views",
             "read-only namespace task audit",
         });
-        if (linuxX86(s.b.graph.host)) tests.use_llvm = false;
+        if (linuxX86(s.b.graph.host)) tests.compile.use_llvm = false;
         const audit = s.native_graph.testModuleFiltered(check, s.checked_environment, &.{
             "namespace read-only audit",
             "non-transmission evidence",
         });
-        if (linuxX86(s.b.graph.host)) audit.use_llvm = false;
+        if (linuxX86(s.b.graph.host)) audit.compile.use_llvm = false;
     }
 
     fn workspaceRecovery(s: *BuildGraph) void {
-        const workspace_recovery_tests = s.b.addTest(.{
+        const workspace_recovery_tests = Binary.create(s.b, std.Build.TestOptions{
             .root_module = s.native_suite,
             .filters = &.{"adaptive workspace"},
             .use_llvm = if (linuxX86(s.b.graph.host)) s.optimize != .debug else null,
-        });
-        workspace_recovery_tests.step.dependOn(s.native_graph.gate);
-        const workspace_recovery_run = s.b.addRunArtifact(workspace_recovery_tests);
+        }, s.darwin, s.darwin_library, true);
+        workspace_recovery_tests.compile.step.dependOn(s.native_graph.gate);
+        const workspace_recovery_run = workspace_recovery_tests.run(s.b);
         workspace_recovery_run.has_side_effects = true;
         s.b.step(
             "check-workspace-recovery",
@@ -1336,12 +1378,12 @@ const BuildGraph = struct {
         scheduler_module.init(s.b, .{ .existing = s.native_suite });
         scheduler_module.root_source_file = s.b.path("test/protean/native_scheduler_benchmark.zig");
         scheduler_module.optimize = s.optimize;
-        const scheduler_tests = s.b.addTest(.{
+        const scheduler_tests = Binary.create(s.b, std.Build.TestOptions{
             .root_module = scheduler_module,
             .filters = &.{"native scheduler backlog benchmark"},
-        });
-        scheduler_tests.step.dependOn(&s.native_guard.step);
-        const scheduler_run = s.b.addRunArtifact(scheduler_tests);
+        }, s.darwin, s.darwin_library, true);
+        scheduler_tests.compile.step.dependOn(&s.native_guard.step);
+        const scheduler_run = scheduler_tests.run(s.b);
         scheduler_run.has_side_effects = true;
         s.scheduler_benchmark.dependOn(&scheduler_run.step);
     }
@@ -1354,12 +1396,12 @@ const BuildGraph = struct {
         );
         adaptive_response_suite.strip = s.optimize != .debug;
         adaptive_response_suite.addImport("protean_native", s.checked_environment);
-        const adaptive_response_tests = s.b.addTest(.{
+        const adaptive_response_tests = Binary.create(s.b, std.Build.TestOptions{
             .root_module = adaptive_response_suite,
             .use_llvm = if (linuxX86(s.b.graph.host)) s.optimize != .debug else null,
-        });
-        adaptive_response_tests.step.dependOn(s.native_graph.gate);
-        const adaptive_response_run = s.b.addRunArtifact(adaptive_response_tests);
+        }, s.darwin, s.darwin_library, true);
+        adaptive_response_tests.compile.step.dependOn(s.native_graph.gate);
+        const adaptive_response_run = adaptive_response_tests.run(s.b);
         adaptive_response_run.has_side_effects = true;
         s.native_owner_support.dependOn(&adaptive_response_run.step);
         s.b.step(
@@ -1388,16 +1430,16 @@ const BuildGraph = struct {
         crash_module.addImport("protean_native", s.checked_environment);
         // Private history/Worker access stays in the test graph. The Node
         // controller owns process death and independent reopen.
-        const crash_probe = s.b.addTest(.{
+        const crash_probe = Binary.create(s.b, std.Build.TestOptions{
             .name = "protean-recovery-crash",
             .root_module = crash_module,
             .filters = &.{"process-crash-controller-only"},
             .use_llvm = if (linuxX86(s.b.graph.host)) s.optimize != .debug else null,
-        });
-        crash_probe.step.dependOn(&s.native_guard.step);
+        }, s.darwin, s.darwin_library, true);
+        crash_probe.compile.step.dependOn(&s.native_guard.step);
         const crash_check = nativeCheckCommand(s.b);
         crash_check.addArgs(&.{ "node", "test/protean/native_recovery_crash.mjs" });
-        crash_check.addFileArg2(crash_probe.getEmittedBin(), .{ .make_absolute = true });
+        crash_check.addFileArg2(crash_probe.path, .{ .make_absolute = true });
         s.b.step(
             "check-native-recovery-crash",
             "Kill and reopen native occurrence/recovery owners at durable boundaries",
@@ -1438,6 +1480,7 @@ const BuildGraph = struct {
 
 const NativeEnvironment = struct {
     module: *std.Build.Module,
+    darwin_library: ?std.Build.LazyPath,
     gcc_identity: ?std.Build.LazyPath,
 };
 
@@ -1451,7 +1494,7 @@ fn nativeEnvironment(
     horos: *std.Build.Module,
     protean: *std.Build.Module,
     admission: *std.Build.Module,
-    gcc: ?std.Build.LazyPath,
+    gcc: ?Gcc,
     sqlite_source: std.Build.LazyPath,
     gate: *std.Build.Step,
 ) NativeEnvironment {
@@ -1470,6 +1513,9 @@ fn nativeEnvironment(
         .target = target,
         .optimize = optimize,
     });
+    if (gcc != null and Gcc.isDarwin(target)) for (backend.posix_symbols) |symbol| {
+        translated.defineCMacro(symbol, b.fmt("protean_posix_{s}", .{symbol}));
+    };
     translated.addIncludePath(sqlite_source);
     translated.step.dependOn(gate);
     // C has a stable ABI here. Compile the large SQLite translation unit once
@@ -1492,11 +1538,12 @@ fn nativeEnvironment(
         },
     });
     module.addOptions("native_options", options);
-    const toolchain = if (gcc) |driver| Gcc.init(b, target, driver) else null;
-    module.linkLibrary(nativeLibrary(b, target, optimize, sqlite_source, gate, toolchain));
+    const lib = nativeLibrary(b, target, optimize, sqlite_source, gate, gcc);
+    module.linkLibrary(lib);
     return .{
         .module = module,
-        .gcc_identity = if (toolchain) |selected| selected.identity else null,
+        .darwin_library = if (gcc != null and Gcc.isDarwin(target)) lib.getEmittedBin() else null,
+        .gcc_identity = if (gcc) |selected| selected.identity else null,
     };
 }
 
@@ -1555,6 +1602,11 @@ fn nativeLibrary(
     const sqlite = sqlite_source.path(b, "sqlite3.c");
     const shim = b.path("runtime/native/native_c.c");
     if (gcc) |selected| {
+        if (Gcc.isDarwin(target)) {
+            const hash = selected.zigObject(b, "protean-native-hash", c_module);
+            c_module.root_source_file = null;
+            c_module.addObjectFile(hash);
+        }
         const flags = native.gccFlags(b, target, optimize);
         const sql = selected.object(b, sqlite, sqlite_source, flags.sqlite, gate, "sqlite3.o");
         c_module.addObjectFile(sql);
@@ -1573,43 +1625,3 @@ fn nativeLibrary(
     c_library.step.dependOn(gate);
     return c_library;
 }
-
-const Gcc = struct {
-    driver: std.Build.LazyPath,
-    identity: std.Build.LazyPath,
-
-    fn init(b: *std.Build, target: std.Build.ResolvedTarget, driver: std.Build.LazyPath) Gcc {
-        const probe = b.addSystemCommand(&.{"bash"});
-        probe.addFileArg2(b.path("tools/native/gcc-identity.sh"), .{});
-        probe.addFileArg2(driver, .{ .make_absolute = true });
-        probe.addArg(target.result.zigTriple(b.allocator) catch @panic("out of memory"));
-        probe.has_side_effects = true;
-        return .{
-            .driver = driver,
-            .identity = probe.captureStdOut(.{ .basename = "gcc-identity.json" }),
-        };
-    }
-
-    fn object(
-        gcc: Gcc,
-        b: *std.Build,
-        source: std.Build.LazyPath,
-        includes: std.Build.LazyPath,
-        flags: []const []const u8,
-        gate: *std.Build.Step,
-        name: []const u8,
-    ) std.Build.LazyPath {
-        const run = std.Build.Step.Run.create(b, "compile native C with GCC");
-        run.addFileArg2(gcc.driver, .{ .make_absolute = true });
-        run.addFileInput(gcc.identity);
-        run.addArgs(flags);
-        run.addDirectoryArg2(includes, .{ .prefix = "-I" });
-        run.addArgs(&.{ "-MD", "-MF" });
-        _ = run.addDepFileOutputArg2("headers.d", .{});
-        run.addArg("-c");
-        run.addFileArg2(source, .{});
-        run.addArg("-o");
-        run.step.dependOn(gate);
-        return run.addOutputFileArg2(name, .{});
-    }
-};
