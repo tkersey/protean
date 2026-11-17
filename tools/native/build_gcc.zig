@@ -10,6 +10,7 @@ pub const posix_symbols = [_][]const u8{
 pub const Gcc = struct {
     driver: LazyPath,
     identity: LazyPath,
+    header: LazyPath,
     host_runtime: ?LazyPath = null,
 
     pub const Driver = struct { path: LazyPath, name: []const u8 };
@@ -21,16 +22,26 @@ pub const Gcc = struct {
         probe.addArg(driver.name);
         probe.addArg(target.result.zigTriple(b.allocator) catch @panic("out of memory"));
         probe.has_side_effects = true;
+        const original = b.graph.path(.zig_lib, "zig.h");
         return .{
+            .header = if (isDarwin(target)) portableHeader(b, original) else original,
             .driver = driver.path,
             .identity = probe.addOutputFileArg2("gcc-identity.json", .{}),
         };
+    }
+
+    fn portableHeader(b: *Build, original: LazyPath) LazyPath {
+        const fix = b.addSystemCommand(&.{ "awk", "-f" });
+        fix.addFileArg2(b.path("tools/native/zig-0.17.1-header.awk"), .{});
+        fix.addFileArg2(original, .{});
+        return fix.captureStdOut(.{ .basename = "zig.h" });
     }
 
     pub fn fromDependency(dep: *Build.Dependency) ?Gcc {
         return .{
             .driver = dep.builder.named_lazy_paths.get("darwin-gcc") orelse return null,
             .identity = dep.namedLazyPath("darwin-gcc-identity"),
+            .header = dep.namedLazyPath("darwin-zig-header"),
             .host_runtime = dep.namedLazyPath("darwin-gcc-rt"),
         };
     }
@@ -111,7 +122,7 @@ pub const Gcc = struct {
         const strip = root.strip orelse (mode != .debug);
         const flags = generatedFlags(b, root.resolved_target.?, mode, strip);
         const name = b.fmt("{s}.o", .{compile.name});
-        return gcc.object(b, compile.getEmittedBin(), .zig_lib, flags, null, name);
+        return gcc.object(b, compile.getEmittedBin(), gcc.header.dirname(), flags, null, name);
     }
 
     pub fn zigObject(gcc: Gcc, b: *Build, name: []const u8, root: *Build.Module) LazyPath {

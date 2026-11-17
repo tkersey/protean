@@ -175,6 +175,7 @@ test/protean/catalogs.zig
 test/protean/compiled_tool.zig
 test/protean/composed_owners.zig
 test/protean/dialogue_probe.zig
+test/protean/gcc_widening.zig
 test/protean/https_probe.zig
 test/protean/model_admission.zig
 test/protean/model_custody.zig

@@ -264,6 +264,7 @@ const BuildGraph = struct {
             const rt = s.darwin.?.runtime(s.b, s.b.graph.host);
             s.darwin.?.host_runtime = rt;
             s.b.addNamedLazyPath("darwin-gcc-rt", rt);
+            s.b.addNamedLazyPath("darwin-zig-header", s.darwin.?.header);
             s.b.addNamedLazyPath("darwin-gcc", driver.path);
             s.b.addNamedLazyPath("darwin-gcc-identity", s.darwin.?.identity);
         };
@@ -592,6 +593,8 @@ const BuildGraph = struct {
         admitted.addImport("admission", s.g.helper("admission"));
         const dialogue = s.g.module("test/protean/dialogue_probe.zig");
         dialogue.addImport("interaction", s.g.helper("interaction"));
+        if (s.darwin != null)
+            _ = s.g.testModule(s.check, s.g.module("test/protean/gcc_widening.zig"));
         const authoring_tests = [_]Binary{
             s.g.testModule(s.check, s.g.module("test/authoring_tests.zig")),
             s.g.testModule(s.check, s.g.module("src/test_root.zig")),

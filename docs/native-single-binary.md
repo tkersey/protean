@@ -51,7 +51,10 @@ POSIX shim with GNU GCC. On Apple Silicon macOS, select Homebrew GNU GCC with
 `.@"native-gcc" = "gcc-16"`. Zig emits C for the host tools, hash code,
 application and compiler runtime. GCC compiles that C with `-std=gnu17`
 and links the native executable. The product manifest records the compiler
-identity and flags, including the macOS deployment minimum.
+identity and flags, including the macOS deployment minimum. It also records
+`compiler.c_header_sha256` for the effective `zig.h`. The build corrects
+Zig 0.17.1’s sign extension from signed 8-, 16- and 32-bit integers to
+128 bits in its generated C, including the compiler runtime.
 
 An embedding build can use `NativeBinary.addExecutable(b, dependency, options,
 link_native)` and `NativeBinary.addTest(b, dependency, options, link_native)`.

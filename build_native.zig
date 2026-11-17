@@ -248,10 +248,11 @@ fn createManifest(
             .{},
         ) catch @panic("out of memory"));
     }
-    if (modules.darwin != null) {
+    if (modules.darwin) |gcc| {
         const flags = backend.Gcc.generatedFlags(b, target, optimize, strip);
         manifest.addArg(std.json.Stringify.valueAlloc(b.allocator, flags, .{}) catch
             @panic("out of memory"));
+        manifest.addFileArg2(gcc.header, .{});
     }
     return manifest_file;
 }
