@@ -701,6 +701,16 @@ pub fn main(init: std.process.Init) !void {
     const operation = iterator.next() orelse return error.ExpectedCommand;
     var args: std.ArrayList([]const u8) = .empty;
     while (iterator.next()) |arg| try args.append(c.a, arg);
+    if (std.mem.eql(u8, operation, "compile-c")) {
+        if (args.items.len < 2) return error.ExpectedCompilerArguments;
+        try equal(args.items[1], "build-obj");
+        _ = init.environ_map.swapRemove("CPATH");
+        _ = init.environ_map.swapRemove("C_INCLUDE_PATH");
+        return std.process.replace(init.io, .{
+            .argv = args.items,
+            .environ_map = init.environ_map,
+        });
+    }
     if (std.mem.eql(u8, operation, "setup")) return setup(c, args.items);
     if (std.mem.eql(u8, operation, "manifest")) return manifest(c, args.items);
     if (std.mem.eql(u8, operation, "verify-horos")) {

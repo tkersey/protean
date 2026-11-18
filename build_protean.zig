@@ -744,7 +744,7 @@ const BuildGraph = struct {
 
     fn hostEnvironment(s: *BuildGraph) void {
         s.host_environment = nativeEnvironment(
-            s.b,
+            s.host_tool,
             s.b.graph.host,
             s.optimize,
             s.kosmos,
@@ -822,7 +822,7 @@ const BuildGraph = struct {
             );
         }
         const public = if (host_target) s.host_environment else nativeEnvironment(
-            s.b,
+            s.host_tool,
             s.native_target,
             s.optimize,
             s.native_kosmos,
@@ -1452,7 +1452,7 @@ const NativeEnvironment = struct {
 };
 
 fn nativeEnvironment(
-    b: *std.Build,
+    host_tool: *std.Build.Step.Compile,
     target: std.Build.ResolvedTarget,
     optimize: std.lang.Optimize,
     kosmos: *std.Build.Module,
@@ -1465,6 +1465,7 @@ fn nativeEnvironment(
     sqlite_source: std.Build.LazyPath,
     gate: *std.Build.Step,
 ) NativeEnvironment {
+    const b = host_tool.step.owner;
     const options = b.addOptions();
     options.addOption(
         []const u8,
@@ -1502,7 +1503,7 @@ fn nativeEnvironment(
         },
     });
     module.addOptions("native_options", options);
-    const library = nativeLibrary(b, target, optimize, sqlite_source, gate, direct);
+    const library = nativeLibrary(host_tool, target, optimize, sqlite_source, gate, direct);
     module.linkLibrary(library.library);
     return .{ .module = module, .clang_inputs = library.clang_inputs };
 }
@@ -1544,13 +1545,14 @@ fn linuxX86(target: std.Build.ResolvedTarget) bool {
 }
 
 fn nativeLibrary(
-    b: *std.Build,
+    host_tool: *std.Build.Step.Compile,
     target: std.Build.ResolvedTarget,
     optimize: std.lang.Optimize,
     sqlite_source: std.Build.LazyPath,
     gate: *std.Build.Step,
     direct: bool,
 ) struct { library: *std.Build.Step.Compile, clang_inputs: std.Build.LazyPath } {
+    const b = host_tool.step.owner;
     const native = @import("build_native.zig");
     const sources = b.addWriteFiles();
     const sqlite = sources.addCopyFile(sqlite_source.path(b, "sqlite3.c"), "sqlite3.c");
@@ -1562,8 +1564,8 @@ fn nativeLibrary(
     _ = inputs.addCopyFile(shim, "native_c.c");
     _ = inputs.addCopyFile(header, "native_c.h");
     const sql_flags = native.sqliteFlags(optimize);
-    const sql_obj = clangObject(b, target, optimize, sqlite, sql_flags, "sqlite3");
-    const shim_obj = clangObject(b, target, optimize, shim, native.shim_flags, "native_c");
+    const sql_obj = clangObject(host_tool, target, optimize, sqlite, sql_flags, "sqlite3");
+    const shim_obj = clangObject(host_tool, target, optimize, shim, native.shim_flags, "native_c");
     const module = b.createModule(.{
         .root_source_file = b.path("runtime/native/hash.zig"),
         .target = target,
@@ -1583,14 +1585,17 @@ fn nativeLibrary(
 }
 
 fn clangObject(
-    b: *std.Build,
+    host_tool: *std.Build.Step.Compile,
     target: std.Build.ResolvedTarget,
     optimize: std.lang.Optimize,
     source: std.Build.LazyPath,
     flags: []const []const u8,
     name: []const u8,
 ) std.Build.LazyPath {
-    const run = std.Build.Step.Run.create(b, b.fmt("compile {s} with Clang", .{name}));
+    const b = host_tool.step.owner;
+    const run = b.addRunArtifact(host_tool);
+    run.setName(b.fmt("compile {s} with Clang", .{name}));
+    run.addArg("compile-c");
     run.setCwd(source.dirname());
     run.addFileArg2(.zig_exe, .{ .make_absolute = true });
     run.addArgs(&.{ "build-obj", "-fllvm", "-cflags" });
@@ -1606,7 +1611,7 @@ fn clangObject(
         run.addArg(target.query.serializeCpuAlloc(b.allocator) catch @panic("out of memory"));
     }
     run.addArgs(&.{ "-I", ".", "-Mroot", "-lc", "--name", name, "--cache-dir" });
-    run.addDirectoryArg2(.cache_root, .{ .make_absolute = true });
+    run.addDirectoryArg2(b.graph.path(.local_cache, "native-clang"), .{ .make_absolute = true });
     run.addArg("--global-cache-dir");
     run.addDirectoryArg2(b.graph.path(.global_cache, ""), .{ .make_absolute = true });
     run.addArg("--zig-lib-dir");
