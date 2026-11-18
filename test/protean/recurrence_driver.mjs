@@ -22,7 +22,7 @@ function launch(task, state = 'state', options = []) {
   child.exited = once(child, 'exit');
   let sequence = 0, stderr = '';
   const pending = new Map();
-  child.stderr.setEncoding('utf8').on('data', bytes => stderr += bytes);
+  child.stderr.setEncoding('utf8').on('data', bytes => { stderr += bytes; if (bytes.includes('checkpoint')) process.stderr.write(bytes); });
   createInterface({input: child.stdout}).on('line', line => {
     const reply = JSON.parse(line), call = pending.get(reply.id);
     assert(call, `unmatched reply ${line}`);
@@ -39,6 +39,7 @@ function launch(task, state = 'state', options = []) {
   });
   child.call = (method, params = {}) => new Promise((resolve, reject) => {
     const id = ++sequence;
+    if (method === 'evaluation.export') console.log('export', params.path, 'request', id);
     const timer = setTimeout(() => { reject(new Error(`timeout: ${method}: ${stderr}`)); child.kill('SIGKILL'); }, 30_000);
     pending.set(id, {resolve, reject, timer});
     child.stdin.write(JSON.stringify({id, method, params}) + '\n');

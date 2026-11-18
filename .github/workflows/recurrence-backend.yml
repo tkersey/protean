@@ -30,7 +30,7 @@ jobs:
       - name: Execute the selected driver and verify its compiler and embedded manifest
         run: |
           set -euo pipefail
-          zig build check-recurrence-driver recurrence-driver -Dtarget=x86_64-linux-musl \
+          zig build recurrence-driver -Dtarget=x86_64-linux-musl \
             -Dnative-gcc=musl-gcc -Doptimize=safe -j2 --verbose --summary all 2>&1 | tee build.log
           awk '/zig test / && /--name protean-recurrence-driver/ && /-fno-llvm/ { seen=1 } END { exit !seen }' build.log
           mapfile -t manifests < <(find .zig-cache -type f -name protean-manifest.json)
@@ -44,3 +44,6 @@ jobs:
           assert(driver.includes(manifest));
           console.log('Executed driver contains the selected self-hosted product manifest.');
           JS
+      - name: Exercise complete recovery with export phase timings
+        run: |
+          zig build check-recurrence-driver -Dtarget=x86_64-linux-musl -Dnative-gcc=musl-gcc -Doptimize=safe -j2 --summary all
