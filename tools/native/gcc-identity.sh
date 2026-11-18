@@ -17,9 +17,6 @@ case "$target" in
     link=$("$driver" -### -x c - -o /dev/null </dev/null 2>&1)
     grep -Fq '/ld-musl-x86_64.so.1' <<<"$link" || fail "native-gcc must target musl"
     ;;
-  aarch64-macos*)
-    if ! has_macro __APPLE__ || ! has_macro __aarch64__; then fail "expected aarch64-macos GCC"; fi
-    ;;
   *) fail "unsupported native-gcc target $target" ;;
 esac
 version=$("$driver" -dumpfullversion)

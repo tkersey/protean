@@ -21,16 +21,9 @@ pub const shim_flags: []const []const u8 = &.{ "-std=c99", "-D_POSIX_C_SOURCE=20
 
 pub fn gccFlags(
     b: *std.Build,
-    target: std.Build.ResolvedTarget,
     optimize: std.lang.Optimize,
 ) struct { sqlite: []const []const u8, shim: []const []const u8 } {
-    const arch: []const []const u8 = switch (target.result.os.tag) {
-        .linux => &.{ "-march=x86-64", "-mtune=generic" },
-        .macos => &.{ "-march=armv8-a", b.fmt("-mmacosx-version-min={f}", .{
-            target.result.os.version_range.semver.min,
-        }) },
-        else => &.{},
-    };
+    const arch: []const []const u8 = &.{ "-march=x86-64", "-mtune=generic" };
     const safety: []const []const u8 = switch (optimize) {
         .safe, .debug => &.{
             "-fno-omit-frame-pointer",            "-fstack-protector-strong",
@@ -206,7 +199,7 @@ fn createManifest(
     ), .{});
     manifest.addDirectoryArg2(modules.sqlite_source, .{ .make_absolute = true });
     manifest.addArg("system");
-    const gcc_flags = if (modules.gcc_identity != null) gccFlags(b, target, optimize) else null;
+    const gcc_flags = if (modules.gcc_identity != null) gccFlags(b, optimize) else null;
     const sqlite_flags_used = if (gcc_flags) |flags| flags.sqlite else sqliteFlags(optimize);
     manifest.addArg(std.json.Stringify.valueAlloc(b.allocator, sqlite_flags_used, .{}) catch
         @panic("out of memory"));
@@ -276,7 +269,7 @@ fn generate(b: *std.Build, modules: Modules, source: Source) Assets {
     });
     const emitter = b.addExecutable(.{
         .name = "protean-native-assets",
-        .use_llvm = if (modules.gcc_identity != null or linuxX86(b.graph.host)) false else null,
+        .use_llvm = if (linuxX86(b.graph.host)) false else null,
         .root_module = b.createModule(.{
             .root_source_file = modules.root.path(b, "tools/native/emit.zig"),
             .target = b.graph.host,

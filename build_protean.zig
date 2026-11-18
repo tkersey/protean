@@ -246,8 +246,12 @@ const BuildGraph = struct {
             "horos-source",
             "Authenticated immutable Horos source copy",
         );
-        if (s.b.option([]const u8, "native-gcc", "Target GCC for self-hosted embedding")) |name|
+        if (s.b.option([]const u8, "native-gcc", "GCC for Linux musl C inputs")) |name| {
+            const musl = s.target.query.isNative() or s.target.result.abi == .musl;
+            if (!linuxX86(s.target) or !musl)
+                @panic("native-gcc requires the x86_64-linux-musl product target");
             s.native_gcc = s.b.findProgramLazy(.{ .names = &.{name} });
+        }
         s.native_enabled = s.b.option(
             bool,
             "native",
@@ -321,7 +325,7 @@ const BuildGraph = struct {
                     }),
                 }},
             }),
-            .use_llvm = if (s.native_gcc != null or linuxX86(s.b.graph.host)) false else null,
+            .use_llvm = if (linuxX86(s.b.graph.host)) false else null,
         });
         const build_hash = s.b.addLibrary(.{
             .name = "protean-build-hash",
@@ -331,7 +335,7 @@ const BuildGraph = struct {
                 .target = s.b.graph.host,
                 .optimize = .safe,
             }),
-            .use_llvm = s.native_gcc == null,
+            .use_llvm = s.native_gcc == null or !linuxX86(s.b.graph.host),
         });
         s.host_tool.root_module.linkLibrary(build_hash);
     }
@@ -500,7 +504,7 @@ const BuildGraph = struct {
         const adaptive_emitter = s.g.emitter("protean-assets", emitter_module);
         // Match the public builder's backend for this build-time authoring tool.
         // The emitted image is independently compared with the installed product.
-        if (s.native_gcc != null or linuxX86(s.b.graph.host)) adaptive_emitter.use_llvm = false;
+        if (linuxX86(s.b.graph.host)) adaptive_emitter.use_llvm = false;
         const adaptive_assets = s.b.addRunArtifact(adaptive_emitter);
         s.adaptive_image = adaptive_assets.addOutputFileArg2("program.bpi3", .{});
         s.adaptive_application = adaptive_assets.addOutputFileArg2("application.json", .{});
@@ -706,7 +710,7 @@ const BuildGraph = struct {
                 .optimize = s.optimize,
             }) },
         );
-        if (s.native_gcc != null) runtime_emitter.use_llvm = false;
+        if (s.native_gcc != null and linuxX86(s.b.graph.host)) runtime_emitter.use_llvm = false;
         runtime_emitter.root_module.addOptions("artifact_options", runtime_options);
         runtime_emitter.step.dependOn(&s.native_guard.step);
         const emit_runtime = s.b.addRunArtifact(runtime_emitter);
@@ -745,7 +749,7 @@ const BuildGraph = struct {
             s.horos,
             s.protean,
             s.native_admission,
-            s.native_gcc,
+            if (s.b.graph.host.result.abi == .musl) s.native_gcc else null,
             s.sqlite_source,
             &s.native_guard.step,
         );
@@ -1083,7 +1087,7 @@ const BuildGraph = struct {
                 .path = s.b.path("tools/evaluation/recurrence_driver.zig"),
                 .mode = .simple,
             },
-            .use_llvm = if (linuxX86(s.native_target)) true else null,
+            .use_llvm = s.adaptive_product.executable.use_llvm,
         });
         const install = s.b.addInstallArtifact(executable, .{});
         const driver = s.b.step(
@@ -1555,7 +1559,7 @@ fn nativeLibrary(
     const sqlite = sqlite_source.path(b, "sqlite3.c");
     const shim = b.path("runtime/native/native_c.c");
     if (gcc) |selected| {
-        const flags = native.gccFlags(b, target, optimize);
+        const flags = native.gccFlags(b, optimize);
         const sql = selected.object(b, sqlite, sqlite_source, flags.sqlite, gate, "sqlite3.o");
         c_module.addObjectFile(sql);
         c_module.addObjectFile(selected.object(b, shim, sqlite_source, flags.shim, gate, "shim.o"));
