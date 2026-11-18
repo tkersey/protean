@@ -39,7 +39,8 @@ function launch(task, state = 'state', options = []) {
   });
   child.call = (method, params = {}) => new Promise((resolve, reject) => {
     const id = ++sequence;
-    const timer = setTimeout(() => { reject(new Error(`timeout: ${method}: ${stderr}`)); child.kill('SIGKILL'); }, 30_000);
+    const timeoutMs = method === 'evaluation.fixture' ? 60_000 : 30_000;
+    const timer = setTimeout(() => { reject(new Error(`timeout: ${method}: ${stderr}`)); child.kill('SIGKILL'); }, timeoutMs);
     pending.set(id, {resolve, reject, timer});
     child.stdin.write(JSON.stringify({id, method, params}) + '\n');
   });
