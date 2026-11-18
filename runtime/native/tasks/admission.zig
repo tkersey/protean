@@ -34,7 +34,10 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             if (!same(value.application_id.bytes, Types.application_id))
                 return error.IncompatibleProfile;
             const cached = if (self.compiler_facts) |facts| facts.export_image_digest else null;
+            const started = std.Io.Clock.awake.now(self.io).toMilliseconds();
             const image = cached orelse storage.digest(self.assets.image);
+            const elapsed = std.Io.Clock.awake.now(self.io).toMilliseconds() - started;
+            if (elapsed >= 5) std.debug.print("CHECK image {d}ms\n", .{elapsed});
             if (!same(&value.image.digest, &image)) return error.IncompatibleProfile;
             if ((self.application.controller != null) != (value.controller != null))
                 return error.IncompatibleProfile;

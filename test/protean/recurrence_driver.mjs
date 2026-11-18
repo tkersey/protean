@@ -22,7 +22,8 @@ function launch(task, state = 'state', options = []) {
   child.exited = once(child, 'exit');
   let sequence = 0, stderr = '';
   const pending = new Map();
-  child.stderr.setEncoding('utf8').on('data', bytes => stderr += bytes);
+  let measuring = false;
+  child.stderr.setEncoding('utf8').on('data', bytes => { if (measuring) process.stderr.write(bytes); else stderr += bytes; });
   createInterface({input: child.stdout}).on('line', line => {
     const reply = JSON.parse(line), call = pending.get(reply.id);
     assert(call, `unmatched reply ${line}`);
@@ -38,6 +39,7 @@ function launch(task, state = 'state', options = []) {
     pending.clear();
   });
   child.call = (method, params = {}) => new Promise((resolve, reject) => {
+    if (method === 'evaluation.fixture') { measuring = true; process.stderr.write('FIXTURE RPC ' + JSON.stringify(params) + '\n'); }
     const id = ++sequence;
     const timer = setTimeout(() => { reject(new Error(`timeout: ${method}: ${stderr}`)); child.kill('SIGKILL'); }, 30_000);
     pending.set(id, {resolve, reject, timer});

@@ -116,6 +116,11 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             return pumpRunnable(self, a);
         }
         fn pumpRunnable(self: *Self, a: std.mem.Allocator) !Step {
+            const trace_started = std.Io.Clock.awake.now(self.io).toMilliseconds();
+            defer {
+                const elapsed = std.Io.Clock.awake.now(self.io).toMilliseconds() - trace_started;
+                if (elapsed >= 30) std.debug.print("CHECK pumpRunnable {d}ms\n", .{elapsed});
+            }
             // Scan one round, without charging or preparing blocked leaves.
             // Each actual transition yields back to the host control channel.
             const count = self.runnable.items.len;
@@ -162,6 +167,11 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             self.resident_turns = 0;
         }
         fn pumpOwnedCleanup(self: *Self, a: std.mem.Allocator, count: usize) !bool {
+            const trace_started = std.Io.Clock.awake.now(self.io).toMilliseconds();
+            defer {
+                const elapsed = std.Io.Clock.awake.now(self.io).toMilliseconds() - trace_started;
+                if (elapsed >= 30) std.debug.print("CHECK pumpOwnedCleanup {d}ms\n", .{elapsed});
+            }
             // Cancellation is a retained obligation, independent of root runnable
             // membership. Custody changes need no producer-specific wake-up.
             for (0..count) |_| {

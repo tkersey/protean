@@ -70,6 +70,11 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
         const equal = std.meta.eql;
         const freezeWorkspaceWork = Access.freezeWorkspaceWork;
         pub fn pumpRoot(self: *Self, a: std.mem.Allocator, initial: state.Task) anyerror!Step {
+            const trace_started = std.Io.Clock.awake.now(self.io).toMilliseconds();
+            defer {
+                const elapsed = std.Io.Clock.awake.now(self.io).toMilliseconds() - trace_started;
+                if (elapsed >= 30) std.debug.print("CHECK pumpRoot {d}ms\n", .{elapsed});
+            }
             if (initial.cancellation == null) try Observations.requireRuntimePolicy(
                 self,
                 a,

@@ -13,6 +13,12 @@ pub const Options = struct {
 };
 const Question = struct { expected: wc.Expected, port: wc.Ref, generation: u64 };
 
+fn mark(service: *Service, name: []const u8) i64 {
+    const now = std.Io.Clock.awake.now(service.io).toMilliseconds();
+    std.debug.print("FIXTURE {d} {s}\n", .{ now, name });
+    return @intCast(now);
+}
+
 fn command(
     service: anytype,
     a: std.mem.Allocator,
@@ -20,7 +26,9 @@ fn command(
     name: []const u8,
     operation: wc.Command,
 ) !Json.Value {
+    _ = mark(service, name);
     const reply = try service.workspaceCommand(a, name, task, operation);
+    _ = mark(service, "command-finished");
     if (reply.disposition == .rejected) {
         std.debug.print("{s}: {s}\n", .{ name, reply.observation_json.bytes });
         return error.RecurrenceFixtureRejected;
@@ -39,6 +47,7 @@ fn reference(a: std.mem.Allocator, observed: Json.Value, name: []const u8) !wc.R
 fn complete(service: anytype, a: std.mem.Allocator, task: [16]u8, work: wc.Ref) !wc.Ref {
     const id = try native.client.identifier(32, Json.string(work.id.bytes));
     for (0..128) |turn| {
+        _ = mark(service, "workspaceWork");
         var current = try service.workspaceWork(a, task, id);
         defer current.deinit();
         if (current.value.outcome_kind == .completed) return .{
@@ -50,6 +59,7 @@ fn complete(service: anytype, a: std.mem.Allocator, task: [16]u8, work: wc.Ref) 
         };
         if (current.value.terminal()) return error.RecurrenceFixtureWorkFailed;
         const operation = try std.fmt.allocPrint(a, "recurrence-fixture-pump-{d}", .{turn});
+        _ = mark(service, operation);
         _ = try service.workspacePump(a, operation, task, .{
             .expected = .{
                 .work = work,
@@ -67,9 +77,13 @@ fn next(
     a: std.mem.Allocator,
 ) !native.tasks.Work {
     for (0..16384) |_| {
+        const started = std.Io.Clock.awake.now(service.io).toMilliseconds();
         const step = try service.pump(a);
+        const spent = std.Io.Clock.awake.now(service.io).toMilliseconds() - started;
+        if (spent >= 10) std.debug.print("FIXTURE pump {s} {d}ms\n", .{ @tagName(step), spent });
         if (step != .work) continue;
         if (step.work.entry.declaration.inference) return step.work;
+        _ = mark(service, step.work.entry.declaration.identity);
         try worker.start(step.work, service.profile.authority, service.profile.environment);
         for (0..30_000) |_| {
             if (worker.finished()) break;
@@ -80,7 +94,9 @@ fn next(
         try worker.join();
         defer worker.release() catch |err| std.debug.panic("fixture worker: {t}", .{err});
         if (timed_out) return error.RecurrenceFixtureWorkerTimeout;
+        _ = mark(service, "completeWork");
         try service.completeWork(a, step.work, worker.result.?);
+        _ = mark(service, "completeWork-finished");
     }
     return error.RecurrenceFixtureInferenceMissing;
 }
@@ -92,6 +108,7 @@ fn acquire(
     name: []const u8,
     arguments: []const u8,
 ) !void {
+    _ = mark(service, name);
     const body = try std.json.Stringify.valueAlloc(a, .{
         .status = "completed",
         .@"error" = @as(?u8, null),
@@ -111,6 +128,7 @@ fn acquire(
         .body = .{ .bytes = body },
     });
     try service.acquire(a, pending, raw);
+    _ = mark(service, "acquire-finished");
 }
 
 fn context(
@@ -120,6 +138,7 @@ fn context(
     pending: *native.tasks.Work,
     operation: wc.Context,
 ) !Json.Value {
+    _ = mark(service, @tagName(operation));
     const arguments = try native.values.toJson(@FieldType(types.Action, "context"), a, .{
         .command = operation,
     });
@@ -185,6 +204,7 @@ fn question(service: *Service, a: std.mem.Allocator, task: [16]u8) !Question {
     const work = try reference(a, started, "work");
     const id = try native.client.identifier(32, Json.string(work.id.bytes));
     for (0..128) |turn| {
+        _ = mark(service, "workspaceWork");
         var current = try service.workspaceWork(a, task, id);
         defer current.deinit();
         const expected: wc.Expected = .{
@@ -208,6 +228,7 @@ fn question(service: *Service, a: std.mem.Allocator, task: [16]u8) !Question {
             };
         }
         const operation = try std.fmt.allocPrint(a, "{s}-pump-{d}", .{ prefix, turn });
+        _ = mark(service, operation);
         _ = try service.workspacePump(a, operation, task, .{ .expected = expected });
     }
     return error.RecurrenceFixturePortMissing;
@@ -259,6 +280,7 @@ fn delegated(
     value: wc.Ref,
     packet: []const u8,
 ) !Json.Value {
+    _ = mark(service, "delegated");
     const target = try question(service, a, task);
     try acquire(service, a, pending, "work", try delegationArguments(a, target, value, packet));
     for (0..128) |_| {
@@ -315,6 +337,8 @@ pub fn run(
     task: [16]u8,
     options: Options,
 ) !Json.Value {
+    _ = mark(service, if (options.delegated) "begin-delegated" else "begin-selected");
+    defer _ = mark(service, "fixture-finished");
     if (options.value) |value| return delegated(
         service,
         worker,

@@ -67,6 +67,11 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             if (binding.predecessor == null) {
                 const seed = self.application.controller orelse return error.InvalidArchive;
                 const cached = if (self.compiler_facts) |facts| facts.export_seed_digest else null;
+                const started = std.Io.Clock.awake.now(self.io).toMilliseconds();
+                defer {
+                    const elapsed = std.Io.Clock.awake.now(self.io).toMilliseconds() - started;
+                    if (elapsed >= 5) std.debug.print("CHECK seed {d}ms\n", .{elapsed});
+                }
                 if (binding.epoch != 0 or binding.activated_at != 1 or
                     !std.meta.eql(binding.image, value.image) or
                     !std.meta.eql(binding.program_identity, self.application.image_identity) or

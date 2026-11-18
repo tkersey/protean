@@ -115,6 +115,11 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             admitted: *const kosmos.RuntimeArtifact,
             source: anytype,
         ) !void {
+            const trace_started = std.Io.Clock.awake.now(self.io).toMilliseconds();
+            defer {
+                const elapsed = std.Io.Clock.awake.now(self.io).toMilliseconds() - trace_started;
+                if (elapsed >= 30) std.debug.print("CHECK validateRuntimeCompiler {d}ms\n", .{elapsed});
+            }
             const fact = try runtimeCompilerFact(a, reference, validation);
             if (try compilerFact(self, fact)) return;
             if (admitted.content.value.lineage != null) {
@@ -428,6 +433,11 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             task_id: state.TaskId,
             program_id: state.Digest,
         ) !contracts.Decoded(workspace.Program) {
+            const trace_started = std.Io.Clock.awake.now(self.io).toMilliseconds();
+            defer {
+                const elapsed = std.Io.Clock.awake.now(self.io).toMilliseconds() - trace_started;
+                if (elapsed >= 30) std.debug.print("CHECK workspaceProgram {d}ms\n", .{elapsed});
+            }
             var parent = try self.task(a, task_id);
             defer parent.deinit();
             try compatible(self, parent.value);
@@ -485,6 +495,11 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             saved: workspace.Program,
             objects: anytype,
         ) !void {
+            const trace_started = std.Io.Clock.awake.now(self.io).toMilliseconds();
+            defer {
+                const elapsed = std.Io.Clock.awake.now(self.io).toMilliseconds() - trace_started;
+                if (elapsed >= 30) std.debug.print("CHECK validateProgramCompiler {d}ms\n", .{elapsed});
+            }
             const artifact = saved.description;
             try validateCompilerArtifact(a, saved, artifact);
             if (try validateSeedProgram(self, a, artifact)) return;
