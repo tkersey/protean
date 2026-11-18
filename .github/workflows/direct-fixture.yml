@@ -8,6 +8,9 @@ jobs:
   recurrence:
     runs-on: ubuntu-22.04
     timeout-minutes: 10
+    env:
+      ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache
+      ZIG_LOCAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -21,11 +24,21 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         with:
           node-version: '26.9.0'
+      - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
+        with:
+          path: .zig-cache-upload
+          key: fixture-timing-${{ github.sha }}
+          restore-keys: |
+            zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.1-recurrence-driver-direct-
+            zig-adaptive-v3-${{ runner.os }}-${{ runner.arch }}-0.17.1-
       - run: |
+          if [ -d .zig-cache-upload ]; then mv .zig-cache-upload .zig-cache; fi
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends musl-tools
           zig run -fno-llvm tools/native/dependencies.zig -- setup \
             conformance/protean/dependencies.lock.json conformance/protean/native-dependencies.lock.json \
             .protean-native/inputs "$(command -v zig)"
       - name: Run the complete recovery witness with original limits
-        run: zig build check-recurrence-driver -Dtarget=x86_64-linux-musl -Dnative-gcc=musl-gcc -Doptimize=safe --summary all
+        run: |
+          zig build recurrence-driver -Dtarget=x86_64-linux-musl -Dnative-gcc=musl-gcc -Doptimize=safe --summary all
+          node test/protean/recurrence_driver.mjs zig-out/bin/protean-recurrence-driver zig-out/protean/adaptive/application.json

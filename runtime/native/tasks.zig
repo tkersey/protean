@@ -78,6 +78,7 @@ pub fn Service(comptime Types: type) type {
         checked_workspace_runtimes: std.AutoHashMapUnmanaged(CompilerFact, u64) = .empty,
         runtime_cache: ?RuntimeCache = null,
         compiler_facts: ?*CompilerFacts = null,
+        asset_digests: ?AssetDigests = null,
         // Import may use ordinary mutation projections only through an existing
         // matching receipt. Missing receipts must never execute a new mutation.
         workspace_replay: ?struct {
@@ -85,6 +86,14 @@ pub fn Service(comptime Types: type) type {
             records: []const state.ArchiveRecord,
             checked: *SnapshotValidation,
         } = null,
+        const AssetDigests = struct { image: state.Digest, seed: ?state.Digest };
+        pub fn currentAssetDigests(self: *const Self) AssetDigests {
+            const digest = @import("store.zig").digest;
+            return .{
+                .image = digest(self.assets.image),
+                .seed = if (self.application.controller) |seed| digest(seed.source) else null,
+            };
+        }
         pub const CompilerFacts = @import("tasks/compiler_preparation.zig").Operations(
             Types,
             Self,

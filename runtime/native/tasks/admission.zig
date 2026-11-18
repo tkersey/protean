@@ -33,7 +33,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
         pub fn compatibleApplication(self: *Self, value: state.Task) !void {
             if (!same(value.application_id.bytes, Types.application_id))
                 return error.IncompatibleProfile;
-            const cached = if (self.compiler_facts) |facts| facts.export_image_digest else null;
+            const cached = if (self.asset_digests) |assets| assets.image else null;
             const started = std.Io.Clock.awake.now(self.io).toMilliseconds();
             const image = cached orelse storage.digest(self.assets.image);
             const elapsed = std.Io.Clock.awake.now(self.io).toMilliseconds() - started;
