@@ -22,7 +22,7 @@ function launch(task, state = 'state', options = []) {
   child.exited = once(child, 'exit');
   let sequence = 0, stderr = '';
   const pending = new Map();
-  child.stderr.setEncoding('utf8').on('data', bytes => { stderr += bytes; if (bytes.includes('checkpoint')) process.stderr.write(bytes); });
+  child.stderr.setEncoding('utf8').on('data', bytes => { stderr += bytes; if (bytes.includes('checkpoint') || bytes.includes('archive ')) process.stderr.write(bytes); });
   createInterface({input: child.stdout}).on('line', line => {
     const reply = JSON.parse(line), call = pending.get(reply.id);
     assert(call, `unmatched reply ${line}`);
