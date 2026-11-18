@@ -321,17 +321,7 @@ const BuildGraph = struct {
         });
         // Keep the driver on its existing backend and reuse the optimized primitive
         // without linking SQLite or any dependency that this driver must first admit.
-        const build_hash = s.b.addLibrary(.{
-            .name = "protean-build-hash",
-            .linkage = .static,
-            .root_module = s.b.createModule(.{
-                .root_source_file = s.b.path("runtime/native/hash.zig"),
-                .target = s.b.graph.host,
-                .optimize = .safe,
-            }),
-            .use_llvm = true,
-        });
-        s.host_tool.root_module.linkLibrary(build_hash);
+        s.host_tool.root_module.addObject(nativeHash(s.b, s.b.graph.host, .safe, null));
     }
 
     fn admitSource(s: *BuildGraph) void {
@@ -1515,6 +1505,24 @@ fn linuxX86(target: std.Build.ResolvedTarget) bool {
     return target.result.os.tag == .linux and target.result.cpu.arch == .x86_64;
 }
 
+fn nativeHash(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    strip: ?bool,
+) *std.Build.Step.Compile {
+    return b.addObject(.{
+        .name = "protean-native-hash",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("runtime/native/hash.zig"),
+            .target = target,
+            .optimize = optimize,
+            .strip = strip,
+        }),
+        .use_llvm = !linuxX86(target),
+    });
+}
+
 fn nativeLibrary(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -1523,12 +1531,12 @@ fn nativeLibrary(
     gate: *std.Build.Step,
 ) *std.Build.Step.Compile {
     const c_module = b.createModule(.{
-        .root_source_file = b.path("runtime/native/hash.zig"),
         .target = target,
         .optimize = optimize,
         .strip = optimize != .debug,
         .link_libc = true,
     });
+    c_module.addObject(nativeHash(b, target, optimize, optimize != .debug));
     c_module.addIncludePath(sqlite_source);
     c_module.addCSourceFile(.{
         .file = sqlite_source.path(b, "sqlite3.c"),
