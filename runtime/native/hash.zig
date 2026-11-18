@@ -16,29 +16,48 @@ extern fn protean_x86_sha256_final(storage: *abi.State, output: *[32]u8) void;
 fn hasSha() bool {
     const known = features.load(.monotonic);
     if (known != .unknown) return known == .sha;
-    const native = std.zig.system.resolveTargetQuery(std.Io.failing, .{
-        .cpu_arch = .x86_64,
-        .cpu_model = .native,
-        .os_tag = .linux,
-        .abi = builtin.abi,
-    }) catch return false;
-    const supported = native.cpu.hasAll(.x86, &.{ .sha, .avx2 });
+    const supported = shaInstructionsAvailable();
+    std.debug.print("STARTUP SHA path {s}\n", .{if (supported) "accelerated" else "baseline"});
     features.store(if (supported) .sha else .baseline, .monotonic);
     return supported;
 }
 
-comptime {
-    std.debug.assert(@sizeOf(Sha256) <= @sizeOf(abi.State));
-    std.debug.assert(@alignOf(Sha256) <= @alignOf(abi.State));
+fn shaInstructionsAvailable() bool {
+    if (cpuid(0).eax < 7) return false;
+    const legacy = cpuid(1).ecx;
+    const required = (1 << 9) | (1 << 19) | (1 << 26) | (1 << 27) | (1 << 28);
+    if (legacy & required != required) return false;
+    const extended = cpuid(7).ebx;
+    const sha_avx2 = (1 << 29) | (1 << 5);
+    if (extended & sha_avx2 != sha_avx2) return false;
+    const registers = asm volatile ("xgetbv"
+        : [_] "={eax}" (-> u32),
+        : [_] "{ecx}" (@as(u32, 0)),
+        : .{ .edx = true });
+    return registers & 6 == 6;
 }
 
-fn hasher(storage: *abi.State) *Sha256 {
-    return @ptrCast(@alignCast(storage));
+const CpuRegisters = struct { eax: u32, ebx: u32, ecx: u32, edx: u32 };
+
+fn cpuid(leaf: u32) CpuRegisters {
+    var eax: u32 = undefined;
+    var ebx: u32 = undefined;
+    var ecx: u32 = undefined;
+    var edx: u32 = undefined;
+    asm volatile ("cpuid"
+        : [_] "={eax}" (eax),
+          [_] "={ebx}" (ebx),
+          [_] "={ecx}" (ecx),
+          [_] "={edx}" (edx),
+        : [_] "{eax}" (leaf),
+          [_] "{ecx}" (@as(u32, 0)),
+    );
+    return .{ .eax = eax, .ebx = ebx, .ecx = ecx, .edx = edx };
 }
 
 export fn protean_native_sha256_init(storage: *abi.State) void {
     if (linux_x86 and hasSha()) return protean_x86_sha256_init(storage);
-    hasher(storage).* = Sha256.init(.{});
+    storage.hasher().* = Sha256.init(.{});
 }
 
 export fn protean_native_sha256_update(
@@ -47,14 +66,18 @@ export fn protean_native_sha256_update(
     length: usize,
 ) void {
     if (linux_x86 and hasSha()) return protean_x86_sha256_update(storage, bytes, length);
-    hasher(storage).update(bytes[0..length]);
+    storage.hasher().update(bytes[0..length]);
 }
 
 export fn protean_native_sha256_final(storage: *abi.State, output: *[32]u8) void {
     if (linux_x86 and hasSha()) return protean_x86_sha256_final(storage, output);
-    hasher(storage).final(output);
+    storage.hasher().final(output);
 }
 
 export fn protean_native_sha3_256(bytes: [*]const u8, length: usize, output: *[32]u8) void {
     std.crypto.hash.sha3.Sha3_256.hash(bytes[0..length], output, .{});
+}
+
+export fn protean_probe_cpu() u8 {
+    return @intFromBool(hasSha());
 }

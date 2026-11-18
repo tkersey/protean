@@ -2,17 +2,8 @@ const std = @import("std");
 const abi = @import("hash_abi.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
-comptime {
-    std.debug.assert(@sizeOf(Sha256) <= @sizeOf(abi.State));
-    std.debug.assert(@alignOf(Sha256) <= @alignOf(abi.State));
-}
-
-fn hasher(storage: *abi.State) *Sha256 {
-    return @ptrCast(@alignCast(storage));
-}
-
 export fn protean_x86_sha256_init(storage: *abi.State) void {
-    hasher(storage).* = Sha256.init(.{});
+    storage.hasher().* = Sha256.init(.{});
 }
 
 export fn protean_x86_sha256_update(
@@ -20,7 +11,7 @@ export fn protean_x86_sha256_update(
     bytes: [*]const u8,
     length: usize,
 ) void {
-    const hash = hasher(storage);
+    const hash = storage.hasher();
     var input = bytes[0..length];
     if (hash.buf_len != 0) {
         const count = @min(input.len, 64 - @as(usize, hash.buf_len));
@@ -36,7 +27,7 @@ export fn protean_x86_sha256_update(
 }
 
 export fn protean_x86_sha256_final(storage: *abi.State, output: *[32]u8) void {
-    hasher(storage).final(output);
+    storage.hasher().final(output);
 }
 
 const Vector = @Vector(4, u32);
@@ -59,7 +50,8 @@ fn blocks(state: *[8]u32, input: []const u8) void {
     for (0..input.len / 64) |index| {
         const previous_x = x;
         const previous_y = y;
-        asm volatile (loadVector("rdi", 0, 3) ++ loadVector("rdi", 16, 4) ++ loadVector("rdi", 32, 5) ++
+        asm volatile (loadVector("rdi", 0, 3) ++ loadVector("rdi", 16, 4) ++
+                loadVector("rdi", 32, 5) ++
                 loadVector("rdi", 48, 6) ++ loadVector("rsi", 0, 7) ++
                 \\vpshufb %%xmm7, %%xmm3, %%xmm3
                 \\vpshufb %%xmm7, %%xmm4, %%xmm4
@@ -74,7 +66,16 @@ fn blocks(state: *[8]u32, input: []const u8) void {
               [block] "{rdi}" (input[index * 64 ..].ptr),
               [reverse] "{rsi}" (&reverse),
               [constants] "{rdx}" (&constants),
-            : .{ .rax = true, .xmm0 = true, .xmm3 = true, .xmm4 = true, .xmm5 = true, .xmm6 = true, .xmm7 = true, .memory = true });
+            : .{
+              .rax = true,
+              .xmm0 = true,
+              .xmm3 = true,
+              .xmm4 = true,
+              .xmm5 = true,
+              .xmm6 = true,
+              .xmm7 = true,
+              .memory = true,
+            });
         x +%= previous_x;
         y +%= previous_y;
     }

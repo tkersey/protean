@@ -54,5 +54,9 @@ jobs:
       - name: Run the complete recovery witness with original limits
         run: |
           lscpu | grep -E "^(Model name|Flags):"
+          zig build-obj runtime/native/hash.zig -target x86_64-linux-musl -fno-llvm -O safe -fstrip -femit-bin="$RUNNER_TEMP/hash.o"
+          zig build-obj runtime/native/hash_x86.zig -target x86_64-linux-musl -mcpu baseline+sha+avx2 -fno-llvm -O safe -fstrip -femit-bin="$RUNNER_TEMP/sha.o"
+          zig build-exe "$RUNNER_TEMP/hash.o" "$RUNNER_TEMP/sha.o" -lc -target x86_64-linux-musl -fno-llvm -O safe -fstrip --dep hash_abi -Mroot=tools/native/sha_probe.zig -Mhash_abi=runtime/native/hash_abi.zig -femit-bin="$RUNNER_TEMP/sha-check"
+          "$RUNNER_TEMP/sha-check"
           zig build recurrence-driver -Dtarget=x86_64-linux-musl -Dnative-gcc=musl-gcc -Doptimize=safe --summary all
           node test/protean/recurrence_driver.mjs zig-out/bin/protean-recurrence-driver zig-out/protean/adaptive/application.json
