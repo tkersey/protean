@@ -382,7 +382,7 @@ fn manifest(c: Context, args: []const []const u8) !void {
     const library_path = try Dir.cwd().realPathFileAlloc(c.io, args[16], c.a);
     const library = try Inventory.load(c, library_path, 100000);
     const licenses = try dependencyLicenses(c, args, library_path);
-    var compiler = try c.value(.{
+    const compiler = try c.value(.{
         .version = @import("builtin").zig_version_string,
         .executable_sha256 = compiler_digest,
         .library_inventory_sha256 = try library.libraryIdentity(c),
@@ -390,7 +390,6 @@ fn manifest(c: Context, args: []const []const u8) !void {
         .library_bytes = library.bytes,
     });
     if (args.len == 19) {
-        try c.put(&compiler, "backend", "self-hosted");
         try sqlite.object.put(c.a, "compiler", try c.json(args[17]));
         try sqlite.object.put(c.a, "posix_shim_compile_flags", try compileFlags(c, args[18]));
     }

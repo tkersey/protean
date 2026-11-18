@@ -59,7 +59,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'authoring' && '[{"lane":"authoring"}]' || github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'owners' && '[{"lane":"owners","compiled_profile":"owners"}]' || github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'downstream' && '[{"lane":"downstream"}]' || '[{"lane":"authoring"},{"lane":"owners","compiled_profile":"owners"},{"lane":"owner-adaptive-control","compiled_profile":"owner-adaptive-control","adaptive_groups":"[0,2,5,6]","adaptive_tests":19,"adaptive_group_count":4},{"lane":"owner-projection-repair","compiled_profile":"owner-adaptive-control","adaptive_groups":"[1]","adaptive_tests":1,"adaptive_group_count":1},{"lane":"owner-projection-boundaries","compiled_profile":"owner-adaptive-control","adaptive_groups":"[3,4,7,8]","adaptive_tests":8,"adaptive_group_count":4},{"lane":"owner-support"},{"lane":"workspace","compiled_profile":"workspace"},{"lane":"workspace-retention","compiled_profile":"workspace-retention"},{"lane":"workspace-history","compiled_profile":"workspace-history"},{"lane":"correspondence"},{"lane":"recurrence-driver"},{"lane":"native","compiled_profile":"product"},{"lane":"native-placement","product_consumer":true},{"lane":"downstream"}]') }}
+        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'authoring' && '[{"lane":"authoring"}]' || github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'owners' && '[{"lane":"owners","compiled_profile":"owners"}]' || github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'downstream' && '[{"lane":"downstream"}]' || '[{"lane":"authoring"},{"lane":"owners","compiled_profile":"owners"},{"lane":"owner-adaptive-control","compiled_profile":"owner-adaptive-control","adaptive_groups":"[0,2,5,6]","adaptive_tests":19,"adaptive_group_count":4},{"lane":"owner-projection-repair","compiled_profile":"owner-adaptive-control","adaptive_groups":"[1]","adaptive_tests":1,"adaptive_group_count":1},{"lane":"owner-projection-boundaries","compiled_profile":"owner-adaptive-control","adaptive_groups":"[3,4,7,8]","adaptive_tests":8,"adaptive_group_count":4},{"lane":"owner-support"},{"lane":"workspace","compiled_profile":"workspace"},{"lane":"workspace-retention","compiled_profile":"workspace-retention"},{"lane":"workspace-history","compiled_profile":"workspace-history"},{"lane":"correspondence"},{"lane":"recurrence-driver"},{"lane":"recurrence-driver-direct"},{"lane":"native","compiled_profile":"product"},{"lane":"native-placement","product_consumer":true},{"lane":"downstream"}]') }}
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     env:
@@ -139,8 +139,11 @@ jobs:
           mkdir -p .zig-cache/tmp
           lane="${{ matrix.lane }}"
           packages=()
-          if [[ "$lane" != recurrence-driver && ( -z "${{ matrix.compiled_profile }}" || "${{ matrix.compiled_profile }}" = product || "$lane" = authoring ) ]]; then
+          if [[ "$lane" != recurrence-driver* && ( -z "${{ matrix.compiled_profile }}" || "${{ matrix.compiled_profile }}" = product || "$lane" = authoring ) ]]; then
             command -v rg >/dev/null || packages+=(ripgrep)
+          fi
+          if [[ "$lane" == recurrence-driver-direct ]]; then
+            command -v musl-gcc >/dev/null || packages+=(musl-tools)
           fi
           if [[ "$lane" == native* ]] || [ "$lane" = downstream ]; then
             test -x /usr/bin/bwrap || packages+=(bubblewrap)
@@ -168,7 +171,7 @@ jobs:
           path: |
             .protean-native/inputs/*.tar.gz
             .protean-native/inputs/*.zip
-          key: protean-native-archives-v2-${{ (matrix.lane == 'downstream' || matrix.lane == 'recurrence-driver') && 'native' || matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}
+          key: protean-native-archives-v2-${{ (matrix.lane == 'downstream' || startsWith(matrix.lane, 'recurrence-driver')) && 'native' || matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}
       - name: Authenticate and provision selected native inputs
         if: ${{ !matrix.product_consumer && matrix.lane != 'downstream' }}
         run: |
@@ -269,6 +272,9 @@ jobs:
             zig build check-workspace-semantics -Doptimize=safe --summary all
           elif [ "${{ matrix.lane }}" = recurrence-driver ]; then
             zig build check-recurrence-driver -Doptimize=safe --summary all
+          elif [ "${{ matrix.lane }}" = recurrence-driver-direct ]; then
+            zig build check-recurrence-driver -Dtarget=x86_64-linux-musl \
+              -Dnative-gcc=musl-gcc -Doptimize=safe --summary all
           elif [ "${{ matrix.lane }}" = downstream ]; then
             # The downstream witness authenticates its own inputs and builds
             # independently, without competing with native tests on one runner.
@@ -305,7 +311,7 @@ jobs:
             assert.equal(execution.sha256, manifest.artifact_sha256);
           }
           assert.equal(createHash('sha256').update(readFileSync(binary)).digest('hex'), manifest.artifact_sha256);
-          const identity = Object.fromEntries(['program_sha256', 'application_assets_sha256', 'dependencies', 'compiler', 'target'].map(key => [key, manifest[key]]));
+          const identity = Object.fromEntries(['program_sha256', 'application_assets_sha256', 'dependencies', 'compiler', 'target', 'artifact_zig_backend'].map(key => [key, manifest[key]]));
           writeFileSync(output, JSON.stringify({identity, artifact_sha256: manifest.artifact_sha256}));
           JS
           fi
@@ -418,7 +424,7 @@ jobs:
             return JSON.parse(bytes);
           };
           const [native, placement, downstream] = await Promise.all(['native', 'native-placement', 'downstream'].map(load));
-          for (const key of ['program_sha256', 'application_assets_sha256', 'dependencies', 'compiler', 'target']) {
+          for (const key of ['program_sha256', 'application_assets_sha256', 'dependencies', 'compiler', 'target', 'artifact_zig_backend']) {
             assert.notEqual(native.identity[key], undefined, key);
             assert.deepEqual(downstream.identity[key], native.identity[key], key);
             assert.deepEqual(placement.identity[key], native.identity[key], key);

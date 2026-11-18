@@ -131,9 +131,10 @@ try {
   const executable = join(prefixDir, 'executables/protean');
   const manifest = JSON.parse(run(executable, ['describe-build']));
   assert.equal(manifest.application_id, 'adaptive-agent');
+  assert.equal(manifest.artifact_zig_backend, 'stage2_llvm');
   assert.equal(manifest.dependencies.world, lock.world.commit);
   assert.equal(manifest.dependencies.boundary, lock.boundary.commit);
-  const identity = Object.fromEntries(['program_sha256', 'application_assets_sha256', 'dependencies', 'compiler', 'target'].map(key => [key, manifest[key]]));
+  const identity = Object.fromEntries(['program_sha256', 'application_assets_sha256', 'dependencies', 'compiler', 'target', 'artifact_zig_backend'].map(key => [key, manifest[key]]));
   const reference = process.argv[3];
   if (reference) {
     const expected = JSON.parse(execFileSync(resolve(reference), ['describe-build'], {encoding: 'utf8'}));

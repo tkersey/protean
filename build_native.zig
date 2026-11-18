@@ -183,20 +183,23 @@ fn createManifest(
     const manifest = b.addRunArtifact(modules.host_tool);
     manifest.addArg("manifest");
     manifest.has_side_effects = true;
-    manifest.addFileArg2(assets.image, .{});
-    manifest.addFileArg2(assets.application, .{});
-    manifest.addFileArg2(modules.root.path(b, "conformance/protean/dependencies.lock.json"), .{});
-    manifest.addFileArg2(modules.root.path(b, "LICENSE"), .{});
+    const inputs = b.addWriteFiles();
+    manifest.setCwd(inputs.getDirectory());
+    manifest.addFileArg2(inputs.addCopyFile(assets.image, "program.bpi3"), .{});
+    manifest.addFileArg2(inputs.addCopyFile(assets.application, "application.json"), .{});
+    const locks = modules.root.path(b, "conformance/protean");
+    manifest.addFileArg2(inputs.addCopyFile(locks.path(b, "dependencies.lock.json"), "lock"), .{});
+    const protean_license = inputs.addCopyFile(modules.root.path(b, "LICENSE"), "protean-license");
+    manifest.addFileArg2(protean_license, .{});
     const kosmos = modules.native.import_table.get(
         "kosmos",
     ) orelse @panic(
         "missing admitted Kosmos module",
     );
-    manifest.addFileArg2(kosmos.root_source_file.?.dirname().dirname().path(b, "LICENSE"), .{});
-    manifest.addFileArg2(modules.native_data.root_source_file.?.dirname().dirname().dirname().path(
-        b,
-        "LICENSE",
-    ), .{});
+    const kosmos_root = kosmos.root_source_file.?.dirname().dirname();
+    const horos_root = modules.native_data.root_source_file.?.dirname().dirname().dirname();
+    manifest.addFileArg2(inputs.addCopyFile(kosmos_root.path(b, "LICENSE"), "kosmos-license"), .{});
+    manifest.addFileArg2(inputs.addCopyFile(horos_root.path(b, "LICENSE"), "horos-license"), .{});
     manifest.addDirectoryArg2(modules.sqlite_source, .{ .make_absolute = true });
     manifest.addArg("system");
     const gcc_flags = if (modules.gcc_identity != null) gccFlags(b, optimize) else null;
@@ -215,15 +218,13 @@ fn createManifest(
     const manifest_file = manifest.addOutputFileArg2(b.fmt("{s}-manifest.json", .{
         name,
     }), .{});
-    manifest.addFileArg2(modules.root.path(
-        b,
-        "conformance/protean/native-dependencies.lock.json",
-    ), .{});
+    const native_lock = locks.path(b, "native-dependencies.lock.json");
+    manifest.addFileArg2(inputs.addCopyFile(native_lock, "native-lock"), .{});
     manifest.addFileArg2(.zig_exe, .{ .make_absolute = true });
     manifest.addDirectoryArg2(.zig_lib, .{ .make_absolute = true });
 
     if (modules.gcc_identity) |identity| {
-        manifest.addFileArg2(identity, .{});
+        manifest.addFileArg2(inputs.addCopyFile(identity, "gcc-inputs.json"), .{});
         manifest.addArg(std.json.Stringify.valueAlloc(
             b.allocator,
             gcc_flags.?.shim,

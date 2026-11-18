@@ -157,7 +157,7 @@ const BuildGraph = struct {
     native_target: std.Build.ResolvedTarget = undefined,
     source: ?std.Build.LazyPath = undefined,
     native_enabled: bool = undefined,
-    native_gcc: ?std.Build.LazyPath = null,
+    native_gcc: ?Gcc.Driver = null,
     gcc_identity: ?std.Build.LazyPath = null,
     default_musl: bool = undefined,
     kosmos_source: std.Build.LazyPath = undefined,
@@ -250,7 +250,10 @@ const BuildGraph = struct {
             const musl = s.target.query.isNative() or s.target.result.abi == .musl;
             if (!linuxX86(s.target) or !musl)
                 @panic("native-gcc requires the x86_64-linux-musl product target");
-            s.native_gcc = s.b.findProgramLazy(.{ .names = &.{name} });
+            s.native_gcc = .{
+                .file = s.b.findProgramLazy(.{ .names = &.{name} }),
+                .basename = std.fs.path.basename(name),
+            };
         }
         s.native_enabled = s.b.option(
             bool,
@@ -1455,7 +1458,7 @@ fn nativeEnvironment(
     horos: *std.Build.Module,
     protean: *std.Build.Module,
     admission: *std.Build.Module,
-    gcc: ?std.Build.LazyPath,
+    gcc: ?Gcc.Driver,
     sqlite_source: std.Build.LazyPath,
     gate: *std.Build.Step,
 ) NativeEnvironment {
@@ -1497,11 +1500,9 @@ fn nativeEnvironment(
     });
     module.addOptions("native_options", options);
     const toolchain = if (gcc) |driver| Gcc.init(b, target, driver) else null;
-    module.linkLibrary(nativeLibrary(b, target, optimize, sqlite_source, gate, toolchain));
-    return .{
-        .module = module,
-        .gcc_identity = if (toolchain) |selected| selected.identity else null,
-    };
+    const library = nativeLibrary(b, target, optimize, sqlite_source, gate, toolchain);
+    module.linkLibrary(library.library);
+    return .{ .module = module, .gcc_identity = library.gcc_identity };
 }
 
 // Keep nested Node qualifiers on the build's selected toolchain and prefix.
@@ -1547,7 +1548,7 @@ fn nativeLibrary(
     sqlite_source: std.Build.LazyPath,
     gate: *std.Build.Step,
     gcc: ?Gcc,
-) *std.Build.Step.Compile {
+) struct { library: *std.Build.Step.Compile, gcc_identity: ?std.Build.LazyPath } {
     const c_module = b.createModule(.{
         .root_source_file = b.path("runtime/native/hash.zig"),
         .target = target,
@@ -1558,11 +1559,14 @@ fn nativeLibrary(
     const native = @import("build_native.zig");
     const sqlite = sqlite_source.path(b, "sqlite3.c");
     const shim = b.path("runtime/native/native_c.c");
+    var identity: ?std.Build.LazyPath = null;
     if (gcc) |selected| {
         const flags = native.gccFlags(b, optimize);
-        const sql = selected.object(b, sqlite, sqlite_source, flags.sqlite, gate, "sqlite3.o");
-        c_module.addObjectFile(sql);
-        c_module.addObjectFile(selected.object(b, shim, sqlite_source, flags.shim, gate, "shim.o"));
+        const sql = selected.object(b, sqlite, sqlite_source, flags.sqlite, gate, "sqlite3.c");
+        const posix = selected.object(b, shim, sqlite_source, flags.shim, gate, "native_c.c");
+        c_module.addObjectFile(sql.object);
+        c_module.addObjectFile(posix.object);
+        identity = selected.record(b, sql, posix);
     } else {
         c_module.addIncludePath(sqlite_source);
         c_module.addCSourceFile(.{ .file = sqlite, .flags = native.sqliteFlags(optimize) });
@@ -1575,23 +1579,49 @@ fn nativeLibrary(
         .use_llvm = gcc == null,
     });
     c_library.step.dependOn(gate);
-    return c_library;
+    return .{ .library = c_library, .gcc_identity = identity };
 }
 
 const Gcc = struct {
-    driver: std.Build.LazyPath,
+    driver: Driver,
     identity: std.Build.LazyPath,
 
-    fn init(b: *std.Build, target: std.Build.ResolvedTarget, driver: std.Build.LazyPath) Gcc {
-        const probe = b.addSystemCommand(&.{"bash"});
-        probe.addFileArg2(b.path("tools/native/gcc-identity.sh"), .{});
-        probe.addFileArg2(driver, .{ .make_absolute = true });
-        probe.addArg(target.result.zigTriple(b.allocator) catch @panic("out of memory"));
-        probe.has_side_effects = true;
-        return .{
-            .driver = driver,
-            .identity = probe.captureStdOut(.{ .basename = "gcc-identity.json" }),
-        };
+    const Driver = struct {
+        file: std.Build.LazyPath,
+        basename: []const u8,
+
+        fn addArg(driver: Driver, b: *std.Build, run: *std.Build.Step.Run) void {
+            run.addDirectoryArg2(driver.file.dirname(), .{
+                .make_absolute = true,
+                .suffix = b.fmt("/{s}", .{driver.basename}),
+            });
+            run.addFileInput(driver.file);
+        }
+    };
+
+    const Translation = struct { input: std.Build.LazyPath, object: std.Build.LazyPath };
+
+    const Capture = struct {
+        run: *std.Build.Step.Run,
+        file: std.Build.LazyPath,
+
+        fn create(b: *std.Build, name: []const u8) Capture {
+            const run = b.addSystemCommand(&.{"bash"});
+            run.addFileArg2(b.path("tools/native/gcc-identity.sh"), .{});
+            run.addArg("capture");
+            run.has_side_effects = true;
+            run.expectExitCode(0);
+            return .{ .run = run, .file = run.addOutputFileArg2(name, .{}) };
+        }
+    };
+
+    fn init(b: *std.Build, target: std.Build.ResolvedTarget, driver: Driver) Gcc {
+        const probe = Capture.create(b, "gcc-identity.json");
+        probe.run.addArg("bash");
+        probe.run.addFileArg2(b.path("tools/native/gcc-identity.sh"), .{});
+        driver.addArg(b, probe.run);
+        probe.run.addArg(target.result.zigTriple(b.allocator) catch @panic("out of memory"));
+        return .{ .driver = driver, .identity = probe.file };
     }
 
     fn object(
@@ -1602,18 +1632,40 @@ const Gcc = struct {
         flags: []const []const u8,
         gate: *std.Build.Step,
         name: []const u8,
-    ) std.Build.LazyPath {
+    ) Translation {
+        const capture = Capture.create(b, b.fmt("{s}.i", .{name}));
+        const preprocess = capture.run;
+        gcc.driver.addArg(b, preprocess);
+        preprocess.addArgs(flags);
+        preprocess.addDirectoryArg2(includes, .{ .prefix = "-I" });
+        preprocess.addArg("-E");
+        preprocess.addDirectoryArg2(source.dirname(), .{
+            .suffix = b.fmt("/{s}", .{name}),
+        });
+        preprocess.addFileInput(source);
+        preprocess.step.dependOn(gate);
+        preprocess.addFileInput(gcc.identity);
+        const input = capture.file;
+
         const run = std.Build.Step.Run.create(b, "compile native C with GCC");
-        run.addFileArg2(gcc.driver, .{ .make_absolute = true });
+        gcc.driver.addArg(b, run);
         run.addFileInput(gcc.identity);
         run.addArgs(flags);
-        run.addDirectoryArg2(includes, .{ .prefix = "-I" });
-        run.addArgs(&.{ "-MD", "-MF" });
-        _ = run.addDepFileOutputArg2("headers.d", .{});
         run.addArg("-c");
-        run.addFileArg2(source, .{});
+        run.addFileArg2(input, .{});
         run.addArg("-o");
-        run.step.dependOn(gate);
-        return run.addOutputFileArg2(name, .{});
+        return .{ .input = input, .object = run.addOutputFileArg2(b.fmt("{s}.o", .{name}), .{}) };
+    }
+
+    fn record(gcc: Gcc, b: *std.Build, sqlite: Translation, shim: Translation) std.Build.LazyPath {
+        const run = b.addSystemCommand(&.{"bash"});
+        run.addFileArg2(b.path("tools/native/gcc-identity.sh"), .{});
+        run.addArg("record");
+        run.addFileArg2(gcc.identity, .{});
+        for ([_]Translation{ sqlite, shim }) |unit| {
+            run.addFileArg2(unit.input, .{});
+            run.addFileArg2(unit.object, .{});
+        }
+        return run.captureStdOut(.{ .basename = "gcc-inputs.json" });
     }
 };

@@ -48,7 +48,9 @@ consumers can select `-Dnative=false`; they still authenticate Horos.
 On x86-64 Linux, a downstream dependency can set `.@"native-gcc" = "musl-gcc"`.
 Zig emits x86-64 machine code for the Linux build tools, hash library, asset emitter
 and product. GCC compiles the admitted SQLite amalgamation and POSIX shim. The product
-manifest records the Zig backend, GCC identity and C flags. The embedding build
+manifest records the GCC toolchain and C flags, plus digests of each preprocessed
+translation unit (excluding file and line markers) and its compiled object. Each build
+preprocesses the original C sources against the current include paths. The embedding build
 selects `.use_llvm = false` on its own tests and other compile steps.
 The option applies to the Linux musl product. Apple Silicon uses Zig’s normal macOS toolchain.
 
@@ -156,7 +158,9 @@ zig build -Doptimize=safe \
 The product targets are macOS arm64 and Linux x86-64 musl. The Linux executable
 is statically linked; macOS uses system libSystem. Native manifests contain no
 build paths and do not claim to authenticate their enclosing binary. At runtime,
-`describe-build` separately hashes the executing artifact. `licenses` exposes
+`describe-build` hashes the executing artifact and reports its compiler-provided backend
+in `artifact_zig_backend`. Custom entries can obtain the same JSON from
+`discovery.Application.describeBuild`. `licenses` exposes
 the required Protean, Horos, Kosmos, Zig, SQLite, and applicable musl notices.
 
 ## Operate a task

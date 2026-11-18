@@ -1881,37 +1881,12 @@ fn printManifest(
     var arena = std.heap.ArenaAllocator.init(init.gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    const artifact = try identity.executable(init.io);
-    var manifest = (try json.parseAsset(a, assets.manifest, assets.manifest.len)).value;
-    try json.put(
-        a,
-        &manifest,
-        "artifact_sha256",
-        json.string(try a.dupe(u8, &std.fmt.bytesToHex(artifact.sha256, .lower))),
-    );
-    try json.put(
-        a,
-        &manifest,
-        "artifact_bytes",
-        json.string(try std.fmt.allocPrint(a, "{d}", .{artifact.bytes})),
-    );
-    try json.put(
-        a,
-        &manifest,
-        "embedded_manifest_sha256",
-        json.string(try discovery.digest(a, assets.manifest)),
-    );
     var handlers = try registry.Registry.init(a, &Environment.handlers);
     defer handlers.deinit();
     var application = try discovery.Application.init(Types, a, assets, handlers);
     defer application.deinit();
-    try json.put(
-        a,
-        &manifest,
-        "protocol_schema_sha256",
-        json.string(application.protocol_schema_sha256),
-    );
-    try std.Io.File.stdout().writeStreamingAll(init.io, try json.canonical(a, manifest));
+    const report = try application.describeBuild(a, init.io);
+    try std.Io.File.stdout().writeStreamingAll(init.io, report);
     try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
 }
 const LaunchOptions = struct {
