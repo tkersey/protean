@@ -29,6 +29,7 @@ runtime/native/entry.zig
 runtime/native/guest_segment_proofs.zig
 runtime/native/hash.zig
 runtime/native/hash_abi.zig
+runtime/native/hash_x86.zig
 runtime/native/host.zig
 runtime/native/https.zig
 runtime/native/identity.zig

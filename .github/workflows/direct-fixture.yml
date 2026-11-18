@@ -53,5 +53,6 @@ jobs:
             .protean-native/inputs "$(command -v zig)"
       - name: Run the complete recovery witness with original limits
         run: |
+          lscpu | grep -E "^(Model name|Flags):"
           zig build recurrence-driver -Dtarget=x86_64-linux-musl -Dnative-gcc=musl-gcc -Doptimize=safe --summary all
           node test/protean/recurrence_driver.mjs zig-out/bin/protean-recurrence-driver zig-out/protean/adaptive/application.json

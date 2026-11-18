@@ -15,6 +15,7 @@ pub const Registry = registry.Registry;
 pub const run = @import("host.zig").run;
 pub const reportFailure = @import("host.zig").reportFailure;
 pub const discovery = @import("discovery.zig");
+pub const executableIdentity = @import("identity.zig").executable;
 pub const inbox = @import("inbox.zig");
 pub const https = @import("https.zig");
 pub const siwc = @import("siwc.zig");

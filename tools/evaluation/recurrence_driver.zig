@@ -75,25 +75,10 @@ fn digest(bytes: []const u8) [32]u8 {
     return result;
 }
 
-fn executableIdentity(a: std.mem.Allocator, io: std.Io) ![32]u8 {
+fn executableIdentity(io: std.Io) ![32]u8 {
     std.debug.print("STARTUP executable hash begin\n", .{});
     defer std.debug.print("STARTUP executable hash finished\n", .{});
-    const file = try std.process.openExecutable(io, .{});
-    defer file.close(io);
-    const before = try file.stat(io);
-    const bytes = try a.alloc(u8, std.math.cast(usize, before.size) orelse return error.Capacity);
-    defer a.free(bytes);
-    var offset: usize = 0;
-    while (offset < bytes.len) {
-        const count = try file.readStreaming(io, &.{bytes[offset..]});
-        if (count == 0) return error.NativeArtifactChanged;
-        offset += count;
-    }
-    const after = try file.stat(io);
-    if (before.inode != after.inode or before.size != after.size or
-        !std.meta.eql(before.mtime, after.mtime) or
-        !std.meta.eql(before.ctime, after.ctime)) return error.NativeArtifactChanged;
-    return digest(bytes);
+    return (try native.executableIdentity(io)).sha256;
 }
 
 fn initialProfile(
@@ -109,7 +94,7 @@ fn initialProfile(
     };
     return .{
         .id = "offline",
-        .runtime_identity = try executableIdentity(a, io),
+        .runtime_identity = try executableIdentity(io),
         .bytes = "{}",
         .authority = .{ .grants = grants, .principal = "evaluation", .tenant = "local" },
     };

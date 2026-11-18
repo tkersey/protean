@@ -340,6 +340,7 @@ const BuildGraph = struct {
             }),
             .use_llvm = s.native_gcc == null or !linuxX86(s.b.graph.host),
         });
+        linkHashExtensions(s.b, build_hash, s.b.graph.host, .safe);
         s.host_tool.root_module.linkLibrary(build_hash);
     }
 
@@ -1541,6 +1542,31 @@ fn linuxX86(target: std.Build.ResolvedTarget) bool {
     return target.result.os.tag == .linux and target.result.cpu.arch == .x86_64;
 }
 
+fn linkHashExtensions(
+    b: *std.Build,
+    library: *std.Build.Step.Compile,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+) void {
+    if (!linuxX86(target)) return;
+    var query = target.query;
+    query.cpu_arch = .x86_64;
+    query.cpu_model = .baseline;
+    query.cpu_features_add = std.Target.x86.featureSet(&.{ .sha, .avx2 });
+    query.cpu_features_sub = .empty;
+    const accelerated = b.addObject(.{
+        .name = "protean-x86-sha256",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("runtime/native/hash_x86.zig"),
+            .target = b.resolveTargetQuery(query),
+            .optimize = optimize,
+            .strip = optimize != .debug,
+        }),
+        .use_llvm = library.use_llvm,
+    });
+    library.root_module.addObject(accelerated);
+}
+
 fn nativeLibrary(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -1578,6 +1604,7 @@ fn nativeLibrary(
         .root_module = c_module,
         .use_llvm = gcc == null,
     });
+    linkHashExtensions(b, c_library, target, optimize);
     c_library.step.dependOn(gate);
     return .{ .library = c_library, .gcc_identity = identity };
 }
