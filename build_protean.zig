@@ -1128,7 +1128,7 @@ const BuildGraph = struct {
                 .path = s.b.path("tools/evaluation/recurrence_driver.zig"),
                 .mode = .simple,
             },
-            .use_llvm = if (linuxX86(s.native_target)) true else null,
+            .use_llvm = s.adaptive_product.executable.use_llvm,
         }, s.darwin, s.darwin_library, true);
         const install = executable.install(s.b, .{});
         const driver = s.b.step(
