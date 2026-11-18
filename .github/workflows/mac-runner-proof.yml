@@ -1,0 +1,32 @@
+name: Verify Mac-hosted Linux runner
+on:
+  push:
+    branches: [ci/verify-mac-backup]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: [self-hosted, Linux, X64, mac-backup]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Verify the runner and package the checked-out build definitions
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -sm)" = "Linux x86_64"
+          test "$RUNNER_NAME" = "mac-backup-${GITHUB_REPOSITORY#*/}"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          mkdir -p "$RUNNER_TEMP/runner-proof"
+          git archive --format=tar "$GITHUB_SHA" build.zig build.zig.zon > "$RUNNER_TEMP/runner-proof/build-definitions.tar"
+          cd "$RUNNER_TEMP/runner-proof"
+          sha256sum build-definitions.tar > SHA256SUMS
+          printf '%s\n' "$RUNNER_NAME" "$GITHUB_SHA" "$GITHUB_RUN_ID" > run.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: runner-proof
+          path: ${{ runner.temp }}/runner-proof
+          if-no-files-found: error
+          retention-days: 1
