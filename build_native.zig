@@ -4,6 +4,7 @@ const std = @import("std");
 pub const state_format: u32 = 22;
 pub const sqlite_flags: []const []const u8 = &.{
     "-std=c99",
+    "-ffile-compilation-dir=.",
     "-DSQLITE_THREADSAFE=1",
     "-DSQLITE_OMIT_LOAD_EXTENSION=1",
     "-DSQLITE_DQS=0",
@@ -17,37 +18,9 @@ pub fn sqliteFlags(optimize: std.lang.Optimize) []const []const u8 {
     return if (optimize == .safe) sqlite_flags ++ &[_][]const u8{"-O1"} else sqlite_flags;
 }
 
-pub const shim_flags: []const []const u8 = &.{ "-std=c99", "-D_POSIX_C_SOURCE=200809L" };
-
-pub fn gccFlags(
-    b: *std.Build,
-    optimize: std.lang.Optimize,
-) struct { sqlite: []const []const u8, shim: []const []const u8 } {
-    const arch: []const []const u8 = &.{ "-march=x86-64", "-mtune=generic" };
-    const safety: []const []const u8 = switch (optimize) {
-        .safe, .debug => &.{
-            "-fno-omit-frame-pointer",            "-fstack-protector-strong",
-            "-D_FORTIFY_SOURCE=2",                "-fsanitize=undefined",
-            "-fsanitize-undefined-trap-on-error",
-        },
-        else => &.{},
-    };
-    const mode: []const []const u8 = switch (optimize) {
-        .safe => &.{"-O2"},
-        .debug => &.{ "-Og", "-g" },
-        .fast => &.{"-O3"},
-        .small => &.{"-Os"},
-    };
-    const common = [_][]const []const u8{ arch, safety, &.{"-Werror=date-time"} };
-    const sqlite_mode: []const []const u8 = if (optimize == .safe) &.{"-O1"} else mode;
-    const sql = common ++ .{ sqlite_flags, sqlite_mode };
-    return .{
-        .sqlite = std.mem.concat(b.allocator, []const u8, &sql) catch
-            @panic("out of memory"),
-        .shim = std.mem.concat(b.allocator, []const u8, &(common ++ .{ shim_flags, mode })) catch
-            @panic("out of memory"),
-    };
-}
+pub const shim_flags: []const []const u8 = &.{
+    "-std=c99", "-ffile-compilation-dir=.", "-D_POSIX_C_SOURCE=200809L",
+};
 
 pub const Assets = struct {
     image: std.Build.LazyPath,
@@ -85,7 +58,8 @@ pub fn addNativeSystem(b: *std.Build, dependency: *std.Build.Dependency, options
         .native_data = dependency.module("protean_native_data"),
         .sqlite_source = dependency.namedLazyPath("native-sqlite-source"),
         .host_tool = dependency.artifact("protean-native-build"),
-        .gcc_identity = dependency.builder.named_lazy_paths.get("native-gcc-identity"),
+        .clang_inputs = dependency.namedLazyPath("native-clang-inputs"),
+        .native_direct = dependency.builder.named_lazy_paths.contains("native-direct"),
     }, options);
     b.getInstallStep().dependOn(&product.install.step);
     return product;
@@ -105,7 +79,8 @@ pub const Modules = struct {
     native_data: *std.Build.Module,
     sqlite_source: std.Build.LazyPath,
     host_tool: *std.Build.Step.Compile,
-    gcc_identity: ?std.Build.LazyPath = null,
+    clang_inputs: std.Build.LazyPath,
+    native_direct: bool = false,
 };
 
 pub fn addWithModules(b: *std.Build, modules: Modules, options: Options) Product {
@@ -161,7 +136,7 @@ pub fn addWithModules(b: *std.Build, modules: Modules, options: Options) Product
     const executable = b.addExecutable(.{
         .name = options.name,
         .root_module = root,
-        .use_llvm = if (modules.gcc_identity != null) false else product_backend,
+        .use_llvm = if (modules.native_direct) false else product_backend,
     });
     const install = b.addInstallArtifact(executable, .{});
     return .{
@@ -202,9 +177,7 @@ fn createManifest(
     manifest.addFileArg2(inputs.addCopyFile(horos_root.path(b, "LICENSE"), "horos-license"), .{});
     manifest.addDirectoryArg2(modules.sqlite_source, .{ .make_absolute = true });
     manifest.addArg("system");
-    const gcc_flags = if (modules.gcc_identity != null) gccFlags(b, optimize) else null;
-    const sqlite_flags_used = if (gcc_flags) |flags| flags.sqlite else sqliteFlags(optimize);
-    manifest.addArg(std.json.Stringify.valueAlloc(b.allocator, sqlite_flags_used, .{}) catch
+    manifest.addArg(std.json.Stringify.valueAlloc(b.allocator, sqliteFlags(optimize), .{}) catch
         @panic("out of memory"));
     manifest.addArg("filesystem");
     manifest.addArg(b.fmt("agent-native-state/{d}", .{state_format}));
@@ -223,14 +196,11 @@ fn createManifest(
     manifest.addFileArg2(.zig_exe, .{ .make_absolute = true });
     manifest.addDirectoryArg2(.zig_lib, .{ .make_absolute = true });
 
-    if (modules.gcc_identity) |identity| {
-        manifest.addFileArg2(inputs.addCopyFile(identity, "gcc-inputs.json"), .{});
-        manifest.addArg(std.json.Stringify.valueAlloc(
-            b.allocator,
-            gcc_flags.?.shim,
-            .{},
-        ) catch @panic("out of memory"));
+    for ([_][]const u8{ "sqlite3.o", "native_c.o", "native_c.c", "native_c.h" }) |file| {
+        manifest.addFileArg2(inputs.addCopyFile(modules.clang_inputs.path(b, file), file), .{});
     }
+    manifest.addArg(std.json.Stringify.valueAlloc(b.allocator, shim_flags, .{}) catch
+        @panic("out of memory"));
     return manifest_file;
 }
 

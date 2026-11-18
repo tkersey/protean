@@ -361,8 +361,20 @@ fn compileFlags(c: Context, encoded: []const u8) !Value {
     return flags;
 }
 
+fn clangCompiler(c: Context, args: []const []const u8, compiler_digest: []const u8) !Value {
+    return c.value(.{
+        .family = "clang",
+        .driver = "zig build-obj",
+        .zig_executable_sha256 = compiler_digest,
+        .sqlite_object_sha256 = try c.fileDigest(args[17]),
+        .posix_shim_object_sha256 = try c.fileDigest(args[18]),
+        .posix_shim_source_sha256 = try c.fileDigest(args[19]),
+        .posix_shim_header_sha256 = try c.fileDigest(args[20]),
+    });
+}
+
 fn manifest(c: Context, args: []const []const u8) !void {
-    if (args.len != 17 and args.len != 19) return error.ExpectedManifestArguments;
+    if (args.len != 22) return error.ExpectedManifestArguments;
     const compiler_digest = try c.fileDigest(args[15]);
     const image = try c.read(args[0], null);
     const application_bytes = try c.read(args[1], null);
@@ -389,10 +401,8 @@ fn manifest(c: Context, args: []const []const u8) !void {
         .library_entries = library.files.items.len,
         .library_bytes = library.bytes,
     });
-    if (args.len == 19) {
-        try sqlite.object.put(c.a, "compiler", try c.json(args[17]));
-        try sqlite.object.put(c.a, "posix_shim_compile_flags", try compileFlags(c, args[18]));
-    }
+    try sqlite.object.put(c.a, "compiler", try clangCompiler(c, args, compiler_digest));
+    try sqlite.object.put(c.a, "posix_shim_compile_flags", try compileFlags(c, args[21]));
     const result = .{
         .format = "agent-native-build/v2",
         .application_id = try text(application, "application_id"),

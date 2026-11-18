@@ -132,6 +132,12 @@ try {
   const manifest = JSON.parse(run(executable, ['describe-build']));
   assert.equal(manifest.application_id, 'adaptive-agent');
   assert.equal(manifest.artifact_zig_backend, 'stage2_llvm');
+  const cCompiler = manifest.dependencies.sqlite.compiler;
+  assert.equal(cCompiler.family, 'clang');
+  assert.equal(cCompiler.zig_executable_sha256, manifest.compiler.executable_sha256);
+  for (const field of ['sqlite_object_sha256', 'posix_shim_object_sha256']) {
+    assert.match(cCompiler[field], /^[0-9a-f]{64}$/);
+  }
   assert.equal(manifest.dependencies.world, lock.world.commit);
   assert.equal(manifest.dependencies.boundary, lock.boundary.commit);
   const identity = Object.fromEntries(['program_sha256', 'application_assets_sha256', 'dependencies', 'compiler', 'target', 'artifact_zig_backend'].map(key => [key, manifest[key]]));

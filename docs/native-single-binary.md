@@ -45,14 +45,15 @@ The default native inputs are `.protean-native/inputs/kosmos` and
 `-Dhoros-source` overrides receive the same admission checks. Pure authoring
 consumers can select `-Dnative=false`; they still authenticate Horos.
 
-On x86-64 Linux, a downstream dependency can set `.@"native-gcc" = "musl-gcc"`.
-Zig emits x86-64 machine code for the Linux build tools, hash library, asset emitter
-and product. GCC compiles the admitted SQLite amalgamation and POSIX shim. The product
-manifest records the GCC toolchain and C flags, plus digests of each preprocessed
-translation unit (excluding file and line markers) and its compiled object. Each build
-preprocesses the original C sources against the current include paths. The embedding build
-selects `.use_llvm = false` on its own tests and other compile steps.
-The option applies to the Linux musl product. Apple Silicon uses Zig’s normal macOS toolchain.
+For an x86-64 Linux musl product, a downstream dependency can set
+`.@"native-direct" = true` to select Zig’s direct x86-64 backend. The embedding
+build selects `.use_llvm = false` for its own Linux Zig tests and compile steps.
+Zig’s bundled Clang compiles the authenticated SQLite amalgamation and the
+POSIX shim for the product target. On Apple Silicon, Zig uses LLVM for the
+multithreaded macOS product and the same bundled Clang for C.
+The `describe-build` manifest identifies the Zig executable that supplied
+Clang and gives the SHA-256 digest of each compiled C object under
+`dependencies.sqlite.compiler`.
 
 `addNativeSystem(b, dependency, options)` is exported by `build.zig`. A caller
 supplies an executable name, an environment source, and either:
