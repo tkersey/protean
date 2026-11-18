@@ -1,0 +1,46 @@
+name: Check the self-hosted Linux recurrence driver
+on:
+  push:
+    branches: [diagnostic/self-hosted-recurrence]
+permissions:
+  contents: read
+jobs:
+  recurrence:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        with:
+          version: '0.17.1'
+          mirror: https://zigmirror.com
+          use-cache: false
+          use-tool-cache: true
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '26.9.0'
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends musl-tools
+          zig run -fno-llvm tools/native/dependencies.zig -- setup \
+            conformance/protean/dependencies.lock.json conformance/protean/native-dependencies.lock.json \
+            .protean-native/inputs "$(command -v zig)"
+      - name: Execute the selected driver and verify its compiler and embedded manifest
+        run: |
+          set -euo pipefail
+          zig build check-recurrence-driver recurrence-driver -Dtarget=x86_64-linux-musl \
+            -Dnative-gcc=musl-gcc -Doptimize=safe -j2 --verbose --summary all 2>&1 | tee build.log
+          awk '/zig test / && /--name protean-recurrence-driver/ && /-fno-llvm/ { seen=1 } END { exit !seen }' build.log
+          mapfile -t manifests < <(find .zig-cache -type f -name protean-manifest.json)
+          test "${#manifests[@]}" -eq 1
+          jq -e '.compiler.backend == "self-hosted"' "${manifests[0]}"
+          node --input-type=module - "${manifests[0]}" <<'JS'
+          import assert from 'node:assert/strict';
+          import {readFileSync} from 'node:fs';
+          const manifest = readFileSync(process.argv[2]);
+          const driver = readFileSync('zig-out/bin/protean-recurrence-driver');
+          assert(driver.includes(manifest));
+          console.log('Executed driver contains the selected self-hosted product manifest.');
+          JS
