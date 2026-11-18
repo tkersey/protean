@@ -29,6 +29,7 @@ function launch(task, state = 'state', options = []) {
     assert(call, `unmatched reply ${line}`);
     pending.delete(reply.id);
     clearTimeout(call.timer);
+    if (Date.now() - call.started >= 100) process.stderr.write('RPC ' + call.method + ' ' + (Date.now() - call.started) + 'ms\n');
     if (reply.error) call.reject(new Error(`${reply.error.message}: ${stderr}`)); else call.resolve(reply.result);
   });
   child.once('exit', (code, signal) => {
@@ -42,7 +43,7 @@ function launch(task, state = 'state', options = []) {
     if (method === 'evaluation.fixture') { measuring = true; process.stderr.write('FIXTURE RPC ' + JSON.stringify(params) + '\n'); }
     const id = ++sequence;
     const timer = setTimeout(() => { reject(new Error(`timeout: ${method}: ${stderr}`)); child.kill('SIGKILL'); }, 30_000);
-    pending.set(id, {resolve, reject, timer});
+    pending.set(id, {resolve, reject, timer, method, started: Date.now()});
     child.stdin.write(JSON.stringify({id, method, params}) + '\n');
   });
   return child;
