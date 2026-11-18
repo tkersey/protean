@@ -361,22 +361,8 @@ fn compileFlags(c: Context, encoded: []const u8) !Value {
     return flags;
 }
 
-fn compilerMetadata(c: Context, args: []const []const u8, compiler: *Value, sqlite: *Value) !void {
-    if (args.len == 17) return;
-    const gcc = try c.json(args[17]);
-    try c.put(compiler, "backend", if (args.len >= 20) "stage2_c" else "self-hosted");
-    try sqlite.object.put(c.a, "compiler", gcc);
-    try sqlite.object.put(c.a, "posix_shim_compile_flags", try compileFlags(c, args[18]));
-    if (args.len >= 20) {
-        try compiler.object.put(c.a, "c_compiler", gcc);
-        try compiler.object.put(c.a, "c_compile_flags", try compileFlags(c, args[19]));
-    }
-    if (args.len == 21) try c.put(compiler, "c_header_sha256", try c.fileDigest(args[20]));
-}
-
 fn manifest(c: Context, args: []const []const u8) !void {
-    if (args.len != 17 and (args.len < 19 or args.len > 21))
-        return error.ExpectedManifestArguments;
+    if (args.len != 17 and args.len != 19) return error.ExpectedManifestArguments;
     const compiler_digest = try c.fileDigest(args[15]);
     const image = try c.read(args[0], null);
     const application_bytes = try c.read(args[1], null);
@@ -403,7 +389,11 @@ fn manifest(c: Context, args: []const []const u8) !void {
         .library_entries = library.files.items.len,
         .library_bytes = library.bytes,
     });
-    try compilerMetadata(c, args, &compiler, &sqlite);
+    if (args.len == 19) {
+        try c.put(&compiler, "backend", "self-hosted");
+        try sqlite.object.put(c.a, "compiler", try c.json(args[17]));
+        try sqlite.object.put(c.a, "posix_shim_compile_flags", try compileFlags(c, args[18]));
+    }
     const result = .{
         .format = "agent-native-build/v2",
         .application_id = try text(application, "application_id"),

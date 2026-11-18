@@ -1,6 +1,5 @@
 //! Build/environmental API. No target program executes while generating assets.
 const std = @import("std");
-const backend = @import("tools/native/build_gcc.zig");
 /// One packaging constant supplies both the namespace reader and manifest.
 pub const state_format: u32 = 22;
 pub const sqlite_flags: []const []const u8 = &.{
@@ -22,16 +21,9 @@ pub const shim_flags: []const []const u8 = &.{ "-std=c99", "-D_POSIX_C_SOURCE=20
 
 pub fn gccFlags(
     b: *std.Build,
-    target: std.Build.ResolvedTarget,
     optimize: std.lang.Optimize,
 ) struct { sqlite: []const []const u8, shim: []const []const u8 } {
-    const arch: []const []const u8 = switch (target.result.os.tag) {
-        .linux => &.{ "-march=x86-64", "-mtune=generic" },
-        .macos => &.{ "-march=armv8-a", b.fmt("-mmacosx-version-min={f}", .{
-            target.result.os.version_range.semver.min,
-        }) },
-        else => &.{},
-    };
+    const arch: []const []const u8 = &.{ "-march=x86-64", "-mtune=generic" };
     const safety: []const []const u8 = switch (optimize) {
         .safe, .debug => &.{
             "-fno-omit-frame-pointer",            "-fstack-protector-strong",
@@ -67,14 +59,12 @@ pub const Options = struct {
     name: []const u8,
     environment: std.Build.LazyPath,
     entry: ?std.Build.LazyPath = null,
-    strip: ?bool = null,
     /// Reuse the complete emitted application for another target. Its type
     /// mapping travels with its image, so a second source cannot be ignored.
     application: union(enum) { source: Source, emitted: Assets },
 };
 pub const Product = struct {
     executable: *std.Build.Step.Compile,
-    binary: std.Build.LazyPath,
     install: *std.Build.Step.InstallArtifact,
     assets: Assets,
     manifest: std.Build.LazyPath,
@@ -94,9 +84,7 @@ pub fn addNativeSystem(b: *std.Build, dependency: *std.Build.Dependency, options
         .native_protean = dependency.module("protean_native_types"),
         .native_data = dependency.module("protean_native_data"),
         .sqlite_source = dependency.namedLazyPath("native-sqlite-source"),
-        .host_tool = dependency.namedLazyPath("native-build-tool"),
-        .darwin = backend.Gcc.fromDependency(dependency),
-        .library = dependency.builder.named_lazy_paths.get("darwin-native-library"),
+        .host_tool = dependency.artifact("protean-native-build"),
         .gcc_identity = dependency.builder.named_lazy_paths.get("native-gcc-identity"),
     }, options);
     b.getInstallStep().dependOn(&product.install.step);
@@ -116,9 +104,7 @@ pub const Modules = struct {
     native_protean: *std.Build.Module,
     native_data: *std.Build.Module,
     sqlite_source: std.Build.LazyPath,
-    host_tool: std.Build.LazyPath,
-    darwin: ?backend.Gcc = null,
-    library: ?std.Build.LazyPath = null,
+    host_tool: *std.Build.Step.Compile,
     gcc_identity: ?std.Build.LazyPath = null,
 };
 
@@ -154,14 +140,13 @@ pub fn addWithModules(b: *std.Build, modules: Modules, options: Options) Product
             .{ .name = "horos_data", .module = modules.native_data },
         },
     });
-    const strip = options.strip orelse (optimize != .debug);
-    const manifest_file = createManifest(b, modules, options.name, assets, target, optimize, strip);
+    const manifest_file = createManifest(b, modules, options.name, assets, target, optimize);
 
     const root = b.createModule(.{
         .root_source_file = options.entry orelse modules.root.path(b, "runtime/native/entry.zig"),
         .target = target,
         .optimize = optimize,
-        .strip = strip,
+        .strip = optimize != .debug,
         .imports = &.{
             .{ .name = "protean_native", .module = modules.native },
             .{ .name = "environment", .module = environment },
@@ -173,15 +158,14 @@ pub fn addWithModules(b: *std.Build, modules: Modules, options: Options) Product
     root.addAnonymousImport("native_application", .{ .root_source_file = assets.application });
     root.addAnonymousImport("native_manifest", .{ .root_source_file = manifest_file });
     const product_backend: ?bool = if (linuxX86(target)) true else null;
-    const executable = backend.Binary.create(b, std.Build.ExecutableOptions{
+    const executable = b.addExecutable(.{
         .name = options.name,
         .root_module = root,
         .use_llvm = if (modules.gcc_identity != null) false else product_backend,
-    }, modules.darwin, modules.library, true);
-    const install = executable.install(b, .{});
+    });
+    const install = b.addInstallArtifact(executable, .{});
     return .{
-        .executable = executable.compile,
-        .binary = executable.path,
+        .executable = executable,
         .install = install,
         .assets = assets,
         .manifest = manifest_file,
@@ -195,10 +179,8 @@ fn createManifest(
     assets: Assets,
     target: std.Build.ResolvedTarget,
     optimize: std.lang.Optimize,
-    strip: bool,
 ) std.Build.LazyPath {
-    const manifest = std.Build.Step.Run.create(b, "run native build tool");
-    manifest.addFileArg2(modules.host_tool, .{});
+    const manifest = b.addRunArtifact(modules.host_tool);
     manifest.addArg("manifest");
     manifest.has_side_effects = true;
     manifest.addFileArg2(assets.image, .{});
@@ -217,7 +199,7 @@ fn createManifest(
     ), .{});
     manifest.addDirectoryArg2(modules.sqlite_source, .{ .make_absolute = true });
     manifest.addArg("system");
-    const gcc_flags = if (modules.gcc_identity != null) gccFlags(b, target, optimize) else null;
+    const gcc_flags = if (modules.gcc_identity != null) gccFlags(b, optimize) else null;
     const sqlite_flags_used = if (gcc_flags) |flags| flags.sqlite else sqliteFlags(optimize);
     manifest.addArg(std.json.Stringify.valueAlloc(b.allocator, sqlite_flags_used, .{}) catch
         @panic("out of memory"));
@@ -247,12 +229,6 @@ fn createManifest(
             gcc_flags.?.shim,
             .{},
         ) catch @panic("out of memory"));
-    }
-    if (modules.darwin) |gcc| {
-        const flags = backend.Gcc.generatedFlags(b, target, optimize, strip);
-        manifest.addArg(std.json.Stringify.valueAlloc(b.allocator, flags, .{}) catch
-            @panic("out of memory"));
-        manifest.addFileArg2(gcc.header, .{});
     }
     return manifest_file;
 }
@@ -291,9 +267,9 @@ fn generate(b: *std.Build, modules: Modules, source: Source) Assets {
             .{ .name = "protean_contracts", .module = modules.contracts },
         },
     });
-    const emitter = backend.Binary.create(b, std.Build.ExecutableOptions{
+    const emitter = b.addExecutable(.{
         .name = "protean-native-assets",
-        .use_llvm = if (modules.gcc_identity != null or linuxX86(b.graph.host)) false else null,
+        .use_llvm = if (linuxX86(b.graph.host)) false else null,
         .root_module = b.createModule(.{
             .root_source_file = modules.root.path(b, "tools/native/emit.zig"),
             .target = b.graph.host,
@@ -306,8 +282,8 @@ fn generate(b: *std.Build, modules: Modules, source: Source) Assets {
                 .{ .name = "horos", .module = modules.horos },
             },
         }),
-    }, modules.darwin, null, false);
-    const run = emitter.run(b);
+    });
+    const run = b.addRunArtifact(emitter);
     return .{
         .image = run.addOutputFileArg2("program.bpi3", .{}),
         .application = run.addOutputFileArg2("application.json", .{}),
