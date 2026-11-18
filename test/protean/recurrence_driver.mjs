@@ -23,7 +23,7 @@ function launch(task, state = 'state', options = []) {
   let sequence = 0, stderr = '';
   const pending = new Map();
   let measuring = false;
-  child.stderr.setEncoding('utf8').on('data', bytes => { if (measuring) process.stderr.write(bytes); else stderr += bytes; });
+  child.stderr.setEncoding('utf8').on('data', bytes => { if (measuring || bytes.includes('STARTUP')) process.stderr.write(bytes); else stderr += bytes; });
   createInterface({input: child.stdout}).on('line', line => {
     const reply = JSON.parse(line), call = pending.get(reply.id);
     assert(call, `unmatched reply ${line}`);
@@ -413,6 +413,7 @@ try {
   await mkdir(output);
   const observed = await evaluateRecurrence({subject, plan, output, driver: executable,
     application, build: {scripted_fixture: true}, offline: true});
+  console.error('SUPERVISOR REPORT', JSON.stringify({elapsed_ms: observed.elapsed_ms, timed_out: observed.timed_out, status: observed.status?.status, calls: observed.metrics?.controller.calls, errors: observed.errors}));
   assert.deepEqual(observed.errors, []);
   assert(observed.metrics.controller.calls > 0);
   assert.equal(observed.grading.totals.requests, 12);

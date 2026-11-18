@@ -1221,6 +1221,7 @@ export class RecurrenceDriver {
     this.serial = 0;
     this.diagnostics = '';
     this.child.stderr.setEncoding('utf8').on('data', bytes => {
+      process.stderr.write(bytes);
       this.diagnostics = (this.diagnostics + bytes).slice(-8192);
     });
     this.reader = createInterface({input: this.child.stdout});
@@ -1228,6 +1229,7 @@ export class RecurrenceDriver {
       try {
         const reply = JSON.parse(line), pending = this.pending.get(reply.id);
         assert(pending, 'Uncorrelated evaluation response.');
+        console.error('SUPERVISOR RPC', pending.method, Date.now() - pending.started, reply.result?.step ?? '');
         this.pending.delete(reply.id);
         if (reply.error) pending.reject(new Error(reply.error.message));
         else pending.resolve(reply.result);
@@ -1252,7 +1254,7 @@ export class RecurrenceDriver {
     if (this.failure) return Promise.reject(this.failure);
     const id = `evaluation-${++this.serial}`;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, {resolve, reject});
+      this.pending.set(id, {resolve, reject, method, started: Date.now()});
       this.child.stdin.write(JSON.stringify({id, method, params}) + '\n', error => {
         if (error) this.fail(error);
       });
@@ -1490,7 +1492,7 @@ export async function evaluateRecurrence({subject, plan, output, driver, credent
       ...(task ? ['--profile-task', task.task_id] : [])];
     client = new Client(driver, options);
     clearTimeout(watchdog);
-    watchdog = setTimeout(() => { timedOut = true; client.kill(); },
+    watchdog = setTimeout(() => { console.error('SUPERVISOR watchdog', elapsed()); timedOut = true; client.kill(); },
       Math.max(1, plan.limits.wall_ms - elapsed()));
   };
   const observe = async (after = trace.cursor) => {

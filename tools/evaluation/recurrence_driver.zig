@@ -76,6 +76,8 @@ fn digest(bytes: []const u8) [32]u8 {
 }
 
 fn executableIdentity(a: std.mem.Allocator, io: std.Io) ![32]u8 {
+    std.debug.print("STARTUP executable hash begin\n", .{});
+    defer std.debug.print("STARTUP executable hash finished\n", .{});
     const file = try std.process.openExecutable(io, .{});
     defer file.close(io);
     const before = try file.stat(io);
@@ -152,12 +154,16 @@ fn run(init: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(init.gpa);
     defer arena.deinit();
     const a = arena.allocator();
+    std.debug.print("STARTUP registry\n", .{});
     var handlers = try native.Registry.init(init.gpa, &environment.handlers);
     defer handlers.deinit();
+    std.debug.print("STARTUP application\n", .{});
     var application = try native.discovery.Application.init(types, init.gpa, assets, handlers);
     defer application.deinit();
+    std.debug.print("STARTUP namespace\n", .{});
     var namespace = try native.Namespace.open(init.gpa, init.io, options.state_path);
     defer namespace.close() catch |err| std.debug.panic("namespace: {t}", .{err});
+    std.debug.print("STARTUP service\n", .{});
     var service = try Service.init(
         init.gpa,
         init.io,
@@ -170,6 +176,7 @@ fn run(init: std.process.Init) !void {
     var environment_owner: ?*anyopaque = null;
     defer if (environment_owner) |owner| environment.release(owner);
     defer service.close(init.gpa) catch |err| std.debug.panic("service: {t}", .{err});
+    std.debug.print("STARTUP configure\n", .{});
     try configure(a, init.io, &service, options, &application);
     environment_owner = service.profile.environment;
     const worker = try Worker.init(init.gpa, init.io);
@@ -180,6 +187,7 @@ fn run(init: std.process.Init) !void {
         .worker = worker,
         .fixture_workspace = options.fixture_workspace,
     };
+    std.debug.print("STARTUP serve\n", .{});
     try driver.serve(init.gpa, init.io);
 }
 

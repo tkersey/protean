@@ -171,9 +171,13 @@ pub const Application = struct {
         var temporary = std.heap.ArenaAllocator.init(a);
         defer temporary.deinit();
         const storage = temporary.allocator();
+        std.debug.print("STARTUP metadata json.parseAsset\n", .{});
         const metadata = try json.parseAsset(storage, assets.application, assets.application.len);
+        std.debug.print("STARTUP manifest json.parseAsset\n", .{});
         const manifest = try json.parseAsset(storage, assets.manifest, assets.manifest.len);
+        std.debug.print("STARTUP admitMetadata\n", .{});
         try admitMetadata(Types, storage, assets, metadata.value, manifest.value);
+        std.debug.print("STARTUP admitted data.program_image.Admitted.decode\n", .{});
         const admitted = try data.program_image.Admitted.decode(a, assets.image);
         defer admitted.deinit();
         const image_identity = admitted.identity();
@@ -185,8 +189,11 @@ pub const Application = struct {
         var validation_arena = std.heap.ArenaAllocator.init(a);
         defer validation_arena.deinit();
         const scratch = validation_arena.allocator();
+        std.debug.print("STARTUP admitSchemas\n", .{});
         try admitSchemas(Types, scratch, metadata.value);
+        std.debug.print("STARTUP admitCapabilities\n", .{});
         try admitCapabilities(Types, scratch, metadata.value, handlers);
+        std.debug.print("STARTUP controller admitController\n", .{});
         const controller = try admitController(
             Types,
             storage,
@@ -195,6 +202,7 @@ pub const Application = struct {
             admitted,
             handlers,
         );
+        std.debug.print("STARTUP return retain\n", .{});
         return retain(
             a,
             storage,
