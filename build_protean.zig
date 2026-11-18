@@ -157,6 +157,8 @@ const BuildGraph = struct {
     native_target: std.Build.ResolvedTarget = undefined,
     source: ?std.Build.LazyPath = undefined,
     native_enabled: bool = undefined,
+    native_direct: bool = false,
+    clang_inputs: std.Build.LazyPath = undefined,
     default_musl: bool = undefined,
     kosmos_source: std.Build.LazyPath = undefined,
     sqlite_source: std.Build.LazyPath = undefined,
@@ -174,7 +176,7 @@ const BuildGraph = struct {
     public_protean: *std.Build.Module = undefined,
     kosmos: *std.Build.Module = undefined,
     native_admission: *std.Build.Module = undefined,
-    host_environment: *std.Build.Module = undefined,
+    host_environment: NativeEnvironment = undefined,
     native_data: *std.Build.Module = undefined,
     native_contracts: *std.Build.Module = undefined,
     native_horos: *std.Build.Module = undefined,
@@ -244,6 +246,16 @@ const BuildGraph = struct {
             "horos-source",
             "Authenticated immutable Horos source copy",
         );
+        s.native_direct = s.b.option(
+            bool,
+            "native-direct",
+            "Use direct Zig code generation for the x86_64-linux-musl native product",
+        ) orelse false;
+        if (s.native_direct) {
+            const musl = s.target.query.isNative() or s.target.result.abi == .musl;
+            if (!linuxX86(s.target) or !musl)
+                @panic("native-direct requires the x86_64-linux-musl product target");
+        }
         s.native_enabled = s.b.option(
             bool,
             "native",
@@ -319,8 +331,6 @@ const BuildGraph = struct {
             }),
             .use_llvm = if (linuxX86(s.b.graph.host)) false else null,
         });
-        // Keep the driver on its existing backend and reuse the optimized primitive
-        // without linking SQLite or any dependency that this driver must first admit.
         const build_hash = s.b.addLibrary(.{
             .name = "protean-build-hash",
             .linkage = .static,
@@ -329,7 +339,7 @@ const BuildGraph = struct {
                 .target = s.b.graph.host,
                 .optimize = .safe,
             }),
-            .use_llvm = true,
+            .use_llvm = !s.native_direct or !linuxX86(s.b.graph.host),
         });
         s.host_tool.root_module.linkLibrary(build_hash);
     }
@@ -704,6 +714,7 @@ const BuildGraph = struct {
                 .optimize = s.optimize,
             }) },
         );
+        if (s.native_direct and linuxX86(s.b.graph.host)) runtime_emitter.use_llvm = false;
         runtime_emitter.root_module.addOptions("artifact_options", runtime_options);
         runtime_emitter.step.dependOn(&s.native_guard.step);
         const emit_runtime = s.b.addRunArtifact(runtime_emitter);
@@ -733,7 +744,7 @@ const BuildGraph = struct {
 
     fn hostEnvironment(s: *BuildGraph) void {
         s.host_environment = nativeEnvironment(
-            s.b,
+            s.host_tool,
             s.b.graph.host,
             s.optimize,
             s.kosmos,
@@ -742,6 +753,7 @@ const BuildGraph = struct {
             s.horos,
             s.protean,
             s.native_admission,
+            s.native_direct and linuxX86(s.b.graph.host),
             s.sqlite_source,
             &s.native_guard.step,
         );
@@ -809,8 +821,8 @@ const BuildGraph = struct {
                 }),
             );
         }
-        s.public_environment = if (host_target) s.host_environment else nativeEnvironment(
-            s.b,
+        const public = if (host_target) s.host_environment else nativeEnvironment(
+            s.host_tool,
             s.native_target,
             s.optimize,
             s.native_kosmos,
@@ -819,9 +831,12 @@ const BuildGraph = struct {
             s.native_horos,
             s.native_protean,
             s.native_admission,
+            s.native_direct,
             s.sqlite_source,
             &s.native_guard.step,
         );
+        s.public_environment = public.module;
+        s.clang_inputs = public.clang_inputs;
         // Executed native checks use the delivered ABI when it runs on this
         // host. This also shares its C library instead of compiling a GNU-only
         // SQLite copy solely for tests of a musl product.
@@ -836,7 +851,10 @@ const BuildGraph = struct {
             s.native_graph.contracts = s.native_contracts;
         }
         s.checked_kosmos = if (native_on_host) s.native_kosmos else s.kosmos;
-        s.checked_environment = if (native_on_host) s.public_environment else s.host_environment;
+        s.checked_environment = if (native_on_host)
+            s.public_environment
+        else
+            s.host_environment.module;
     }
 
     fn workspaceGeneral(s: *BuildGraph) void {
@@ -1003,6 +1021,8 @@ const BuildGraph = struct {
 
     fn publishNative(s: *BuildGraph) void {
         s.b.addNamedLazyPath("native-sqlite-source", s.sqlite_source);
+        s.b.addNamedLazyPath("native-clang-inputs", s.clang_inputs);
+        if (s.native_direct) s.b.addNamedLazyPath("native-direct", s.clang_inputs);
         s.b.installArtifact(s.host_tool);
         s.b.modules.put(
             s.b.allocator,
@@ -1039,6 +1059,8 @@ const BuildGraph = struct {
             .native_protean = s.native_protean,
             .sqlite_source = s.sqlite_source,
             .host_tool = s.host_tool,
+            .clang_inputs = s.clang_inputs,
+            .native_direct = s.native_direct,
         };
         s.adaptive_product = @import(
             "build_native.zig",
@@ -1071,7 +1093,7 @@ const BuildGraph = struct {
                 .path = s.b.path("tools/evaluation/recurrence_driver.zig"),
                 .mode = .simple,
             },
-            .use_llvm = if (linuxX86(s.native_target)) true else null,
+            .use_llvm = s.adaptive_product.executable.use_llvm,
         });
         const install = s.b.addInstallArtifact(executable, .{});
         const driver = s.b.step(
@@ -1424,8 +1446,13 @@ const BuildGraph = struct {
     }
 };
 
+const NativeEnvironment = struct {
+    module: *std.Build.Module,
+    clang_inputs: std.Build.LazyPath,
+};
+
 fn nativeEnvironment(
-    b: *std.Build,
+    host_tool: *std.Build.Step.Compile,
     target: std.Build.ResolvedTarget,
     optimize: std.lang.Optimize,
     kosmos: *std.Build.Module,
@@ -1434,9 +1461,11 @@ fn nativeEnvironment(
     horos: *std.Build.Module,
     protean: *std.Build.Module,
     admission: *std.Build.Module,
+    direct: bool,
     sqlite_source: std.Build.LazyPath,
     gate: *std.Build.Step,
-) *std.Build.Module {
+) NativeEnvironment {
+    const b = host_tool.step.owner;
     const options = b.addOptions();
     options.addOption(
         []const u8,
@@ -1457,7 +1486,6 @@ fn nativeEnvironment(
     // C has a stable ABI here. Compile the large SQLite translation unit once
     // for this target, rather than again inside every executable and test root.
     const translated_module = translated.createModule();
-    const c_library = nativeLibrary(b, target, optimize, sqlite_source, gate);
     const module = b.createModule(.{
         .root_source_file = b.path("runtime/native/root.zig"),
         .target = target,
@@ -1475,8 +1503,9 @@ fn nativeEnvironment(
         },
     });
     module.addOptions("native_options", options);
-    module.linkLibrary(c_library);
-    return module;
+    const library = nativeLibrary(host_tool, target, optimize, sqlite_source, gate, direct);
+    module.linkLibrary(library.library);
+    return .{ .module = module, .clang_inputs = library.clang_inputs };
 }
 
 // Keep nested Node qualifiers on the build's selected toolchain and prefix.
@@ -1516,36 +1545,78 @@ fn linuxX86(target: std.Build.ResolvedTarget) bool {
 }
 
 fn nativeLibrary(
-    b: *std.Build,
+    host_tool: *std.Build.Step.Compile,
     target: std.Build.ResolvedTarget,
     optimize: std.lang.Optimize,
     sqlite_source: std.Build.LazyPath,
     gate: *std.Build.Step,
-) *std.Build.Step.Compile {
-    const c_module = b.createModule(.{
+    direct: bool,
+) struct { library: *std.Build.Step.Compile, clang_inputs: std.Build.LazyPath } {
+    const b = host_tool.step.owner;
+    const native = @import("build_native.zig");
+    const sources = b.addWriteFiles();
+    const sqlite = sources.addCopyFile(sqlite_source.path(b, "sqlite3.c"), "sqlite3.c");
+    _ = sources.addCopyFile(sqlite_source.path(b, "sqlite3.h"), "sqlite3.h");
+    const shim = sources.addCopyFile(b.path("runtime/native/native_c.c"), "native_c.c");
+    const header = sources.addCopyFile(b.path("runtime/native/native_c.h"), "native_c.h");
+    sources.step.dependOn(gate);
+    const inputs = b.addWriteFiles();
+    _ = inputs.addCopyFile(shim, "native_c.c");
+    _ = inputs.addCopyFile(header, "native_c.h");
+    const sql_flags = native.sqliteFlags(optimize);
+    const sql_obj = clangObject(host_tool, target, optimize, sqlite, sql_flags, "sqlite3");
+    const shim_obj = clangObject(host_tool, target, optimize, shim, native.shim_flags, "native_c");
+    const module = b.createModule(.{
         .root_source_file = b.path("runtime/native/hash.zig"),
         .target = target,
         .optimize = optimize,
         .strip = optimize != .debug,
         .link_libc = true,
     });
-    c_module.addIncludePath(sqlite_source);
-    c_module.addCSourceFile(.{
-        .file = sqlite_source.path(b, "sqlite3.c"),
-        .flags = @import("build_native.zig").sqliteFlags(optimize),
-    });
-    c_module.addCSourceFile(
-        .{
-            .file = b.path("runtime/native/native_c.c"),
-            .flags = &.{ "-std=c99", "-D_POSIX_C_SOURCE=200809L" },
-        },
-    );
-    const c_library = b.addLibrary(.{
+    module.addObjectFile(inputs.addCopyFile(sql_obj, "sqlite3.o"));
+    module.addObjectFile(inputs.addCopyFile(shim_obj, "native_c.o"));
+    const library = b.addLibrary(.{
         .name = "protean-native-c",
         .linkage = .static,
-        .root_module = c_module,
-        .use_llvm = true,
+        .root_module = module,
+        .use_llvm = !direct,
     });
-    c_library.step.dependOn(gate);
-    return c_library;
+    return .{ .library = library, .clang_inputs = inputs.getDirectory() };
+}
+
+fn clangObject(
+    host_tool: *std.Build.Step.Compile,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    source: std.Build.LazyPath,
+    flags: []const []const u8,
+    name: []const u8,
+) std.Build.LazyPath {
+    const b = host_tool.step.owner;
+    const run = b.addRunArtifact(host_tool);
+    run.setName(b.fmt("compile {s} with Clang", .{name}));
+    run.addArg("compile-c");
+    run.setCwd(source.dirname());
+    run.addFileArg2(.zig_exe, .{ .make_absolute = true });
+    run.addArgs(&.{ "build-obj", "-fllvm", "-cflags" });
+    run.addArgs(flags);
+    run.addArg("--");
+    run.addFileArg2(source, .{});
+    run.addArg(b.fmt("-O{s}", .{@tagName(optimize)}));
+    run.addArg(if (optimize == .debug) "-fno-strip" else "-fstrip");
+    if (!target.query.isNative()) {
+        run.addArg("-target");
+        run.addArg(target.query.zigTriple(b.allocator) catch @panic("out of memory"));
+        run.addArg("-mcpu");
+        run.addArg(target.query.serializeCpuAlloc(b.allocator) catch @panic("out of memory"));
+    }
+    run.addArgs(&.{ "-I", ".", "-Mroot", "-lc", "--name", name, "--cache-dir" });
+    run.addDirectoryArg2(b.graph.path(.local_cache, "native-clang"), .{ .make_absolute = true });
+    run.addArg("--global-cache-dir");
+    run.addDirectoryArg2(b.graph.path(.global_cache, ""), .{ .make_absolute = true });
+    run.addArg("--zig-lib-dir");
+    run.addDirectoryArg2(.zig_lib, .{ .make_absolute = true });
+    run.has_side_effects = true;
+    run.expectExitCode(0);
+    return run.addOutputFileArg2(b.fmt("{s}.o", .{name}), .{ .prefix = "-femit-bin=" });
 }

@@ -1,4 +1,4 @@
-//! Private C ABI between the application and the optimized standard-library
+//! Private C ABI between the application and the optimized
 //! hash implementation. Both compile this one storage definition; neither
 //! needs SQLite/libc header translation to establish the hash ABI.
 pub const State = extern struct { storage: [256]u8 align(16) };

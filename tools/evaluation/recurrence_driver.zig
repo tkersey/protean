@@ -91,7 +91,7 @@ fn executableIdentity(a: std.mem.Allocator, io: std.Io) ![32]u8 {
     if (before.inode != after.inode or before.size != after.size or
         !std.meta.eql(before.mtime, after.mtime) or
         !std.meta.eql(before.ctime, after.ctime)) return error.NativeArtifactChanged;
-    return digest(bytes);
+    return native.testing.digest(bytes);
 }
 
 fn initialProfile(

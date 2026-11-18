@@ -68,6 +68,7 @@ test {
 
 // Private history internals are exposed only to the repository's test graph.
 pub const testing = if (@import("builtin").is_test) struct {
+    pub const digest = @import("store.zig").digest;
     pub const archive = @import("archive.zig");
     pub const workspace_publication = @import("tasks/workspace_publication.zig");
     pub const workspace_consumers = @import("tasks/workspace_consumers.zig");

@@ -45,6 +45,16 @@ The default native inputs are `.protean-native/inputs/kosmos` and
 `-Dhoros-source` overrides receive the same admission checks. Pure authoring
 consumers can select `-Dnative=false`; they still authenticate Horos.
 
+For an x86-64 Linux musl product, a downstream dependency can set
+`.@"native-direct" = true` to select Zig’s direct x86-64 backend. The embedding
+build selects `.use_llvm = false` for its own Linux Zig tests and compile steps.
+Zig’s bundled Clang compiles the authenticated SQLite amalgamation and the
+POSIX shim for the product target. On Apple Silicon, Zig uses LLVM for the
+multithreaded macOS product and the same bundled Clang for C.
+The `describe-build` manifest identifies the Zig executable that supplied
+Clang and gives the SHA-256 digest of each compiled C object under
+`dependencies.sqlite.compiler`.
+
 `addNativeSystem(b, dependency, options)` is exported by `build.zig`. A caller
 supplies an executable name, an environment source, and either:
 
@@ -149,7 +159,9 @@ zig build -Doptimize=safe \
 The product targets are macOS arm64 and Linux x86-64 musl. The Linux executable
 is statically linked; macOS uses system libSystem. Native manifests contain no
 build paths and do not claim to authenticate their enclosing binary. At runtime,
-`describe-build` separately hashes the executing artifact. `licenses` exposes
+`describe-build` hashes the executing artifact and reports its compiler-provided backend
+in `artifact_zig_backend`. Custom entries can obtain the same JSON from
+`discovery.Application.describeBuild`. `licenses` exposes
 the required Protean, Horos, Kosmos, Zig, SQLite, and applicable musl notices.
 
 ## Operate a task

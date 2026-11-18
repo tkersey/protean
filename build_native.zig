@@ -4,6 +4,7 @@ const std = @import("std");
 pub const state_format: u32 = 22;
 pub const sqlite_flags: []const []const u8 = &.{
     "-std=c99",
+    "-ffile-compilation-dir=.",
     "-DSQLITE_THREADSAFE=1",
     "-DSQLITE_OMIT_LOAD_EXTENSION=1",
     "-DSQLITE_DQS=0",
@@ -16,6 +17,10 @@ pub fn sqliteFlags(optimize: std.lang.Optimize) []const []const u8 {
     // hardening and undefined-behavior traps. Other build modes keep their defaults.
     return if (optimize == .safe) sqlite_flags ++ &[_][]const u8{"-O1"} else sqlite_flags;
 }
+
+pub const shim_flags: []const []const u8 = &.{
+    "-std=c99", "-ffile-compilation-dir=.", "-D_POSIX_C_SOURCE=200809L",
+};
 
 pub const Assets = struct {
     image: std.Build.LazyPath,
@@ -53,6 +58,8 @@ pub fn addNativeSystem(b: *std.Build, dependency: *std.Build.Dependency, options
         .native_data = dependency.module("protean_native_data"),
         .sqlite_source = dependency.namedLazyPath("native-sqlite-source"),
         .host_tool = dependency.artifact("protean-native-build"),
+        .clang_inputs = dependency.namedLazyPath("native-clang-inputs"),
+        .native_direct = dependency.builder.named_lazy_paths.contains("native-direct"),
     }, options);
     b.getInstallStep().dependOn(&product.install.step);
     return product;
@@ -72,6 +79,8 @@ pub const Modules = struct {
     native_data: *std.Build.Module,
     sqlite_source: std.Build.LazyPath,
     host_tool: *std.Build.Step.Compile,
+    clang_inputs: std.Build.LazyPath,
+    native_direct: bool = false,
 };
 
 pub fn addWithModules(b: *std.Build, modules: Modules, options: Options) Product {
@@ -123,10 +132,11 @@ pub fn addWithModules(b: *std.Build, modules: Modules, options: Options) Product
     root.addAnonymousImport("native_image", .{ .root_source_file = assets.image });
     root.addAnonymousImport("native_application", .{ .root_source_file = assets.application });
     root.addAnonymousImport("native_manifest", .{ .root_source_file = manifest_file });
+    const product_backend: ?bool = if (linuxX86(target)) true else null;
     const executable = b.addExecutable(.{
         .name = options.name,
         .root_module = root,
-        .use_llvm = if (linuxX86(target)) true else null,
+        .use_llvm = if (modules.native_direct) false else product_backend,
     });
     const install = b.addInstallArtifact(executable, .{});
     return .{
@@ -148,31 +158,27 @@ fn createManifest(
     const manifest = b.addRunArtifact(modules.host_tool);
     manifest.addArg("manifest");
     manifest.has_side_effects = true;
-    manifest.addFileArg2(assets.image, .{});
-    manifest.addFileArg2(assets.application, .{});
-    manifest.addFileArg2(modules.root.path(b, "conformance/protean/dependencies.lock.json"), .{});
-    manifest.addFileArg2(modules.root.path(b, "LICENSE"), .{});
+    const inputs = b.addWriteFiles();
+    manifest.setCwd(inputs.getDirectory());
+    manifest.addFileArg2(inputs.addCopyFile(assets.image, "program.bpi3"), .{});
+    manifest.addFileArg2(inputs.addCopyFile(assets.application, "application.json"), .{});
+    const locks = modules.root.path(b, "conformance/protean");
+    manifest.addFileArg2(inputs.addCopyFile(locks.path(b, "dependencies.lock.json"), "lock"), .{});
+    const protean_license = inputs.addCopyFile(modules.root.path(b, "LICENSE"), "protean-license");
+    manifest.addFileArg2(protean_license, .{});
     const kosmos = modules.native.import_table.get(
         "kosmos",
     ) orelse @panic(
         "missing admitted Kosmos module",
     );
-    manifest.addFileArg2(kosmos.root_source_file.?.dirname().dirname().path(b, "LICENSE"), .{});
-    manifest.addFileArg2(modules.native_data.root_source_file.?.dirname().dirname().dirname().path(
-        b,
-        "LICENSE",
-    ), .{});
+    const kosmos_root = kosmos.root_source_file.?.dirname().dirname();
+    const horos_root = modules.native_data.root_source_file.?.dirname().dirname().dirname();
+    manifest.addFileArg2(inputs.addCopyFile(kosmos_root.path(b, "LICENSE"), "kosmos-license"), .{});
+    manifest.addFileArg2(inputs.addCopyFile(horos_root.path(b, "LICENSE"), "horos-license"), .{});
     manifest.addDirectoryArg2(modules.sqlite_source, .{ .make_absolute = true });
     manifest.addArg("system");
-    manifest.addArg(
-        std.json.Stringify.valueAlloc(
-            b.allocator,
-            sqliteFlags(optimize),
-            .{},
-        ) catch @panic(
-            "out of memory",
-        ),
-    );
+    manifest.addArg(std.json.Stringify.valueAlloc(b.allocator, sqliteFlags(optimize), .{}) catch
+        @panic("out of memory"));
     manifest.addArg("filesystem");
     manifest.addArg(b.fmt("agent-native-state/{d}", .{state_format}));
     manifest.addArgs(&.{
@@ -185,13 +191,16 @@ fn createManifest(
     const manifest_file = manifest.addOutputFileArg2(b.fmt("{s}-manifest.json", .{
         name,
     }), .{});
-    manifest.addFileArg2(modules.root.path(
-        b,
-        "conformance/protean/native-dependencies.lock.json",
-    ), .{});
+    const native_lock = locks.path(b, "native-dependencies.lock.json");
+    manifest.addFileArg2(inputs.addCopyFile(native_lock, "native-lock"), .{});
     manifest.addFileArg2(.zig_exe, .{ .make_absolute = true });
     manifest.addDirectoryArg2(.zig_lib, .{ .make_absolute = true });
 
+    for ([_][]const u8{ "sqlite3.o", "native_c.o", "native_c.c", "native_c.h" }) |file| {
+        manifest.addFileArg2(inputs.addCopyFile(modules.clang_inputs.path(b, file), file), .{});
+    }
+    manifest.addArg(std.json.Stringify.valueAlloc(b.allocator, shim_flags, .{}) catch
+        @panic("out of memory"));
     return manifest_file;
 }
 

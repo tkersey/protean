@@ -6,6 +6,10 @@ on:
     branches: [main]
   workflow_dispatch:
     inputs:
+      mac_backup:
+        description: Run on the Mac's self-hosted Linux runner
+        type: boolean
+        default: false
       diagnostic_lane:
         description: Run one existing lane for diagnosis; only all qualifies the complete product
         type: choice
@@ -33,7 +37,7 @@ jobs:
   tiger-style:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.diagnostic_lane != 'retained-runtime' }}
     name: TigerStyle
-    runs-on: ubuntu-22.04
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.mac_backup && 'mac-backup' || 'ubuntu-22.04' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -59,8 +63,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'authoring' && '[{"lane":"authoring"}]' || github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'owners' && '[{"lane":"owners","compiled_profile":"owners"}]' || github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'downstream' && '[{"lane":"downstream"}]' || '[{"lane":"authoring"},{"lane":"owners","compiled_profile":"owners"},{"lane":"owner-adaptive-control","compiled_profile":"owner-adaptive-control","adaptive_groups":"[0,2,5,6]","adaptive_tests":19,"adaptive_group_count":4},{"lane":"owner-projection-repair","compiled_profile":"owner-adaptive-control","adaptive_groups":"[1]","adaptive_tests":1,"adaptive_group_count":1},{"lane":"owner-projection-boundaries","compiled_profile":"owner-adaptive-control","adaptive_groups":"[3,4,7,8]","adaptive_tests":8,"adaptive_group_count":4},{"lane":"owner-support"},{"lane":"workspace","compiled_profile":"workspace"},{"lane":"workspace-retention","compiled_profile":"workspace-retention"},{"lane":"workspace-history","compiled_profile":"workspace-history"},{"lane":"correspondence"},{"lane":"native","compiled_profile":"product"},{"lane":"native-placement","product_consumer":true},{"lane":"downstream"}]') }}
-    runs-on: ubuntu-22.04
+        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'authoring' && '[{"lane":"authoring"}]' || github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'owners' && '[{"lane":"owners","compiled_profile":"owners"}]' || github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'downstream' && '[{"lane":"downstream"}]' || '[{"lane":"authoring"},{"lane":"owners","compiled_profile":"owners"},{"lane":"owner-adaptive-control","compiled_profile":"owner-adaptive-control","adaptive_groups":"[0,2,5,6]","adaptive_tests":19,"adaptive_group_count":4},{"lane":"owner-projection-repair","compiled_profile":"owner-adaptive-control","adaptive_groups":"[1]","adaptive_tests":1,"adaptive_group_count":1},{"lane":"owner-projection-boundaries","compiled_profile":"owner-adaptive-control","adaptive_groups":"[3,4,7,8]","adaptive_tests":8,"adaptive_group_count":4},{"lane":"owner-support"},{"lane":"workspace","compiled_profile":"workspace"},{"lane":"workspace-retention","compiled_profile":"workspace-retention"},{"lane":"workspace-history","compiled_profile":"workspace-history"},{"lane":"correspondence"},{"lane":"recurrence-driver"},{"lane":"recurrence-driver-direct"},{"lane":"native","compiled_profile":"product"},{"lane":"native-placement","product_consumer":true},{"lane":"downstream"}]') }}
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.mac_backup && 'mac-backup' || 'ubuntu-22.04' }}
     timeout-minutes: 10
     env:
       ZIG_DEBUG_CMD: '1'
@@ -139,7 +143,7 @@ jobs:
           mkdir -p .zig-cache/tmp
           lane="${{ matrix.lane }}"
           packages=()
-          if [ -z "${{ matrix.compiled_profile }}" ] || [ "${{ matrix.compiled_profile }}" = product ] || [ "$lane" = authoring ]; then
+          if [[ "$lane" != recurrence-driver* && ( -z "${{ matrix.compiled_profile }}" || "${{ matrix.compiled_profile }}" = product || "$lane" = authoring ) ]]; then
             command -v rg >/dev/null || packages+=(ripgrep)
           fi
           if [[ "$lane" == native* ]] || [ "$lane" = downstream ]; then
@@ -168,7 +172,7 @@ jobs:
           path: |
             .protean-native/inputs/*.tar.gz
             .protean-native/inputs/*.zip
-          key: protean-native-archives-v2-${{ matrix.lane == 'downstream' && 'native' || matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}
+          key: protean-native-archives-v2-${{ (matrix.lane == 'downstream' || startsWith(matrix.lane, 'recurrence-driver')) && 'native' || matrix.lane }}-${{ hashFiles('conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json') }}
       - name: Authenticate and provision selected native inputs
         if: ${{ !matrix.product_consumer && matrix.lane != 'downstream' }}
         run: |
@@ -266,7 +270,12 @@ jobs:
           elif [ "${{ matrix.lane }}" = workspace-history ]; then
             run_compiled_tests workspace-general 3
           elif [ "${{ matrix.lane }}" = correspondence ]; then
-            zig build check-workspace-semantics check-recurrence-driver -Doptimize=safe --summary all
+            zig build check-workspace-semantics -Doptimize=safe --summary all
+          elif [ "${{ matrix.lane }}" = recurrence-driver ]; then
+            zig build check-recurrence-driver -Doptimize=safe --summary all
+          elif [ "${{ matrix.lane }}" = recurrence-driver-direct ]; then
+            zig build check-recurrence-driver -Dtarget=x86_64-linux-musl \
+              -Dnative-direct=true -Doptimize=safe --summary all
           elif [ "${{ matrix.lane }}" = downstream ]; then
             # The downstream witness authenticates its own inputs and builds
             # independently, without competing with native tests on one runner.
@@ -303,7 +312,7 @@ jobs:
             assert.equal(execution.sha256, manifest.artifact_sha256);
           }
           assert.equal(createHash('sha256').update(readFileSync(binary)).digest('hex'), manifest.artifact_sha256);
-          const identity = Object.fromEntries(['program_sha256', 'application_assets_sha256', 'dependencies', 'compiler', 'target'].map(key => [key, manifest[key]]));
+          const identity = Object.fromEntries(['program_sha256', 'application_assets_sha256', 'dependencies', 'compiler', 'target', 'artifact_zig_backend'].map(key => [key, manifest[key]]));
           writeFileSync(output, JSON.stringify({identity, artifact_sha256: manifest.artifact_sha256}));
           JS
           fi
@@ -373,7 +382,7 @@ jobs:
     name: native
     needs: [qualify, tiger-style]
     if: ${{ always() }}
-    runs-on: ubuntu-24.04
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.mac_backup && 'mac-backup' || 'ubuntu-24.04' }}
     timeout-minutes: 5
     steps:
       - name: Require complete qualification within ten minutes
@@ -416,7 +425,7 @@ jobs:
             return JSON.parse(bytes);
           };
           const [native, placement, downstream] = await Promise.all(['native', 'native-placement', 'downstream'].map(load));
-          for (const key of ['program_sha256', 'application_assets_sha256', 'dependencies', 'compiler', 'target']) {
+          for (const key of ['program_sha256', 'application_assets_sha256', 'dependencies', 'compiler', 'target', 'artifact_zig_backend']) {
             assert.notEqual(native.identity[key], undefined, key);
             assert.deepEqual(downstream.identity[key], native.identity[key], key);
             assert.deepEqual(placement.identity[key], native.identity[key], key);
@@ -433,7 +442,7 @@ jobs:
   retention:
     name: Historical executable retention diagnostic
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.diagnostic_lane == 'retained-runtime' }}
-    runs-on: ubuntu-22.04
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.mac_backup && 'mac-backup' || 'ubuntu-22.04' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1

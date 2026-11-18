@@ -506,6 +506,27 @@ pub const Application = struct {
         self.* = undefined;
     }
 
+    pub fn describeBuild(self: *const Application, a: std.mem.Allocator, io: std.Io) ![]u8 {
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        const scratch = arena.allocator();
+        const artifact = try @import("identity.zig").executable(io);
+        var report: json.Value = .{ .object = try self.manifest.object.clone(scratch) };
+        const sha256 = std.fmt.bytesToHex(artifact.sha256, .lower);
+        try json.put(scratch, &report, "artifact_sha256", json.string(&sha256));
+        try json.put(scratch, &report, "artifact_bytes", json.string(
+            try std.fmt.allocPrint(scratch, "{d}", .{artifact.bytes}),
+        ));
+        try json.put(scratch, &report, "artifact_zig_backend", json.string(
+            @tagName(@import("builtin").zig_backend),
+        ));
+        try json.put(scratch, &report, "embedded_manifest_sha256", json.string(self.manifest_id));
+        try json.put(scratch, &report, "protocol_schema_sha256", json.string(
+            self.protocol_schema_sha256,
+        ));
+        return json.canonical(a, report);
+    }
+
     pub fn schemaArtifact(self: Application, id: [32]u8) !Artifact {
         for (self.schema_artifacts) |candidate| if (candidate) |artifact| {
             if (std.mem.eql(u8, &id, &artifact.sha256)) return artifact;

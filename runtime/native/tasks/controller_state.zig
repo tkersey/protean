@@ -66,11 +66,12 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             )) return error.CorruptState;
             if (binding.predecessor == null) {
                 const seed = self.application.controller orelse return error.InvalidArchive;
+                const cached = if (self.compiler_facts) |facts| facts.export_seed_digest else null;
                 if (binding.epoch != 0 or binding.activated_at != 1 or
                     !std.meta.eql(binding.image, value.image) or
                     !std.meta.eql(binding.program_identity, self.application.image_identity) or
                     !std.meta.eql(program.value.description.source, state.Reference{
-                        .digest = storage.digest(seed.source),
+                        .digest = cached orelse storage.digest(seed.source),
                         .bytes = seed.source.len,
                     })) return error.InvalidArchive;
             }

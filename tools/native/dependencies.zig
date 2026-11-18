@@ -355,8 +355,26 @@ fn verifySqlite(c: Context, path: []const u8, lock_path: []const u8) !Value {
     });
 }
 
+fn compileFlags(c: Context, encoded: []const u8) !Value {
+    const flags = try std.json.parseFromSliceLeaky(Value, c.a, encoded, .{});
+    if (flags != .array) return error.InvalidMetadata;
+    return flags;
+}
+
+fn clangCompiler(c: Context, args: []const []const u8, compiler_digest: []const u8) !Value {
+    return c.value(.{
+        .family = "clang",
+        .driver = "zig build-obj",
+        .zig_executable_sha256 = compiler_digest,
+        .sqlite_object_sha256 = try c.fileDigest(args[17]),
+        .posix_shim_object_sha256 = try c.fileDigest(args[18]),
+        .posix_shim_source_sha256 = try c.fileDigest(args[19]),
+        .posix_shim_header_sha256 = try c.fileDigest(args[20]),
+    });
+}
+
 fn manifest(c: Context, args: []const []const u8) !void {
-    if (args.len != 17) return error.ExpectedManifestArguments;
+    if (args.len != 22) return error.ExpectedManifestArguments;
     const compiler_digest = try c.fileDigest(args[15]);
     const image = try c.read(args[0], null);
     const application_bytes = try c.read(args[1], null);
@@ -372,12 +390,19 @@ fn manifest(c: Context, args: []const []const u8) !void {
         try std.fmt.parseInt(u32, args[10][19..], 10) == 0)
         return error.InvalidMetadata;
     try c.put(&sqlite, "allocator", "system");
-    const flags = try std.json.parseFromSliceLeaky(Value, c.a, args[8], .{});
-    if (flags != .array) return error.InvalidMetadata;
-    try sqlite.object.put(c.a, "compile_flags", flags);
+    try sqlite.object.put(c.a, "compile_flags", try compileFlags(c, args[8]));
     const library_path = try Dir.cwd().realPathFileAlloc(c.io, args[16], c.a);
     const library = try Inventory.load(c, library_path, 100000);
     const licenses = try dependencyLicenses(c, args, library_path);
+    const compiler = try c.value(.{
+        .version = @import("builtin").zig_version_string,
+        .executable_sha256 = compiler_digest,
+        .library_inventory_sha256 = try library.libraryIdentity(c),
+        .library_entries = library.files.items.len,
+        .library_bytes = library.bytes,
+    });
+    try sqlite.object.put(c.a, "compiler", try clangCompiler(c, args, compiler_digest));
+    try sqlite.object.put(c.a, "posix_shim_compile_flags", try compileFlags(c, args[21]));
     const result = .{
         .format = "agent-native-build/v2",
         .application_id = try text(application, "application_id"),
@@ -398,13 +423,7 @@ fn manifest(c: Context, args: []const []const u8) !void {
             .dependency_lock_sha256 = try c.fileDigest(args[2]),
             .sqlite = sqlite,
         },
-        .compiler = .{
-            .version = @import("builtin").zig_version_string,
-            .executable_sha256 = compiler_digest,
-            .library_inventory_sha256 = try library.libraryIdentity(c),
-            .library_entries = library.files.items.len,
-            .library_bytes = library.bytes,
-        },
+        .compiler = compiler,
         .runtime_dependencies = runtimeDependencies(args[11]),
         .binary_identity = "Final executable SHA-256 is recorded externally; this manife" ++
             "st does not authenticate itself.",
@@ -682,6 +701,16 @@ pub fn main(init: std.process.Init) !void {
     const operation = iterator.next() orelse return error.ExpectedCommand;
     var args: std.ArrayList([]const u8) = .empty;
     while (iterator.next()) |arg| try args.append(c.a, arg);
+    if (std.mem.eql(u8, operation, "compile-c")) {
+        if (args.items.len < 2) return error.ExpectedCompilerArguments;
+        try equal(args.items[1], "build-obj");
+        _ = init.environ_map.swapRemove("CPATH");
+        _ = init.environ_map.swapRemove("C_INCLUDE_PATH");
+        return std.process.replace(init.io, .{
+            .argv = args.items,
+            .environ_map = init.environ_map,
+        });
+    }
     if (std.mem.eql(u8, operation, "setup")) return setup(c, args.items);
     if (std.mem.eql(u8, operation, "manifest")) return manifest(c, args.items);
     if (std.mem.eql(u8, operation, "verify-horos")) {

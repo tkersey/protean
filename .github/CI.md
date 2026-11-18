@@ -5,7 +5,7 @@ seconds of its original automatic trigger**. The budget includes runner queueing
 setup, acquisition, compilation, every selected test, packaging, artifact and
 cache transfers, TigerStyle, and the final identity comparison. The terminal `native` gate
 measures from the run's `created_at`, rejects `run_attempt != 1`, and requires all
-thirteen qualification lanes and TigerStyle to succeed. A failed warmup followed by a successful
+fifteen qualification lanes and TigerStyle to succeed. A failed warmup followed by a successful
 retry does not satisfy this requirement.
 
 Pull requests and main pushes run the same inventory on native Linux x86-64 with
@@ -39,7 +39,9 @@ TigerStyle and still cannot pass the terminal gate.
 | `workspace` | The 16 workspace execution and construction tests. |
 | `workspace-retention` | The three retained-work, wait and delegated-answer tests. |
 | `workspace-history` | The three history, cancellation-read and allocation-failure tests. |
-| `correspondence` | Independent source-oracle agreement, capsule restoration, duplicate-custody rejection, and the evaluation driver's sealed capture/SIGKILL/reopen witness. |
+| `correspondence` | Independent source-oracle agreement, capsule restoration and duplicate-custody rejection. |
+| `recurrence-driver` | The evaluation driver's sealed capture/SIGKILL/reopen witness with the default backend. |
+| `recurrence-driver-direct` | The same witness with direct Zig x86-64 code generation and Zig’s bundled Clang for SQLite and the POSIX shim. |
 | `native` | Build and package the adaptive product; verify its manifest and protocol/state rejection through the isolated native deployment. |
 | `native-placement` | Execute the same current-run packaged binary through authenticated transfer, reopen, refusal and duplicate-acceptance checks. |
 | `downstream` | Independently acquire, authenticate, package, build, install and execute the public `addNativeSystem` consumer; reject altered Horos and Kosmos inputs. |
@@ -164,9 +166,9 @@ and do not automatically become required again.
 
 The five authoring test roots, the native task and adaptive owner test roots, all three general
 workspace groups, and the downstream package-surface test use Zig's native x86-64
-backend on Linux, retaining safe optimization and every selected test. The
-production native executable uses LLVM. The native-backend suites avoid repeated LLVM
-compilation but do not exercise LLVM-generated code on Linux.
+backend on Linux, retaining safe optimization and every selected test. The default
+Linux production executable uses LLVM. The separate `recurrence-driver-direct`
+lane exercises the opt-in Zig x86-64 backend with Clang targeting Linux musl for both C sources.
 Compile-time rejection and independent execution checks remain selected.
 
 Exact compiled-artifact keys bind compiler identity, target, recipe and source
