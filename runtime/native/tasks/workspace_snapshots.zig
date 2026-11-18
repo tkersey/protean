@@ -226,9 +226,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 .semantic_sources = true,
             };
             defer checked.deinit();
-            std.debug.print("archive occurrence provenance at={d}ms\n", .{std.Io.Clock.awake.now(self.io).toMilliseconds()});
             try validateOccurrenceProvenance(self, a, parent, records, &checked);
-            std.debug.print("archive captured projections at={d}ms\n", .{std.Io.Clock.awake.now(self.io).toMilliseconds()});
             if (mode != .records)
                 try validateCapturedProjections(
                     self,
@@ -237,7 +235,6 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     if (mode == .inspect) .inspect else .retain,
                     &checked,
                 );
-            std.debug.print("archive record bodies at={d}ms\n", .{std.Io.Clock.awake.now(self.io).toMilliseconds()});
             try validateWorkspaceRecordBodies(self, a, parent.id, records, &checked);
         }
         fn validateWorkspaceRecordBodies(
@@ -260,16 +257,12 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             if (!std.meta.eql(runtime_cut.runtime, parent.value.controller_runtime) or
                 runtime_cut.realization_revision != parent.value.realization_revision)
                 return error.InvalidArchive;
-            std.debug.print("archive publications at={d}ms\n", .{std.Io.Clock.awake.now(self.io).toMilliseconds()});
             phase = "publications";
             try validateWorkspacePublications(self, a, parent.value, records, checked);
-            std.debug.print("archive receipts at={d}ms\n", .{std.Io.Clock.awake.now(self.io).toMilliseconds()});
             phase = "receipts";
             try validateWorkspaceReceipts(self, a, parent.value, records, checked);
-            std.debug.print("archive controller bindings at={d}ms\n", .{std.Io.Clock.awake.now(self.io).toMilliseconds()});
             phase = "controller bindings";
             try validateWorkspaceControllerBindings(self, a, parent.value, records);
-            std.debug.print("archive individual records at={d}ms\n", .{std.Io.Clock.awake.now(self.io).toMilliseconds()});
             const Generation = struct { work: state.Digest, generation: u64 };
             var generations: std.AutoHashMap(Generation, void) = .init(a);
             for (records) |row| {
@@ -277,7 +270,6 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 defer record_arena.deinit();
                 const frame = record_arena.allocator();
                 phase = @tagName(row.kind);
-                std.debug.print("archive record {s} at={d}ms\n", .{ phase, std.Io.Clock.awake.now(self.io).toMilliseconds() });
                 try validateWorkspaceRecordBody(
                     self,
                     frame,
@@ -288,7 +280,6 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     &generations,
                 );
             }
-            std.debug.print("archive generations at={d}ms\n", .{std.Io.Clock.awake.now(self.io).toMilliseconds()});
             try validateWorkspaceGenerations(self, parent.value, records, checked, &generations);
         }
         fn validateWorkspaceInputs(self: *Self, a: std.mem.Allocator, value: workspace.Work) !void {

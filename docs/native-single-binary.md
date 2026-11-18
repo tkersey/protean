@@ -60,11 +60,16 @@ An embedding build can use `NativeBinary.addExecutable(b, dependency, options,
 link_native)` and `NativeBinary.addTest(b, dependency, options, link_native)`.
 Set `link_native` for roots importing `protean_native`. Pass the usual Zig
 executable or test options, including `.use_llvm = false` for self-hosted
-Linux builds. Use the result's `.run(b)` for execution and `.path` for
-installation or as an input to another step. For the product returned by
-`addNativeSystem`, `.binary` identifies the executable and `.strip = false`
-in the options requests debugging symbols. Native dependencies expose their
-host build tool at `dependency.namedLazyPath("native-build-tool")`.
+Linux builds. Use `.run(b)` to execute a test or program. The returned `.path`
+identifies the executable, or a relocatable object for `.emit_object = true`.
+For `addNativeSystem`, `.binary` identifies the executable and `.strip = false`
+requests debugging symbols. On the Darwin GCC path, the normal installation
+places the matching `.dSYM` bundle beside an unstripped executable. A custom
+installer can copy the bundle from `.debug_symbols` along with the executable.
+For source display after relocation, set LLDB's `target.source-map` from the
+recorded generated C source directory to `<name>.dSYM/Contents/Resources/Sources`.
+Native dependencies expose their host build tool at
+`dependency.namedLazyPath("native-build-tool")`.
 
 `addNativeSystem(b, dependency, options)` is exported by `build.zig`. A caller
 supplies an executable name, an environment source, and either:

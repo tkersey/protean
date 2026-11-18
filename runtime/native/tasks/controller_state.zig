@@ -46,12 +46,26 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 )) return error.IncompatibleProfile;
             }
         }
+        const CheckedBinding = struct {
+            binding: state.ControllerBinding,
+            program: contracts.Decoded(workspace.Program),
+        };
         pub fn controllerBinding(
             self: *Self,
             a: std.mem.Allocator,
             value: state.Task,
             id: state.Digest,
         ) !state.ControllerBinding {
+            var checked = try loadControllerBinding(self, a, value, id);
+            defer checked.program.deinit();
+            return checked.binding;
+        }
+        fn loadControllerBinding(
+            self: *Self,
+            a: std.mem.Allocator,
+            value: state.Task,
+            id: state.Digest,
+        ) !CheckedBinding {
             var saved =
                 try record(self, state.ControllerBinding, a, "controller_binding", id, value.id);
             defer saved.deinit();
@@ -59,7 +73,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             if (!std.meta.eql(binding.id, id) or !std.meta.eql(binding.task, value.id))
                 return error.CorruptState;
             var program = try self.workspaceProgram(a, value.id, binding.program);
-            defer program.deinit();
+            errdefer program.deinit();
             if (program.value.description.controller == null or !std.meta.eql(
                 program.value.description.image,
                 binding.image,
@@ -74,7 +88,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                         .bytes = seed.source.len,
                     })) return error.InvalidArchive;
             }
-            return binding;
+            return .{ .binding = binding, .program = program };
         }
         pub fn rootImage(self: *Self, a: std.mem.Allocator, value: state.Task) !state.Reference {
             if (value.controller) |id| return (try controllerBinding(self, a, value, id)).image;
@@ -86,15 +100,28 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             value: state.Task,
             watermark: u64,
         ) !?state.Digest {
+            var checked = try controllerBindingAt(self, a, value, watermark) orelse return null;
+            defer checked.program.deinit();
+            return checked.binding.id;
+        }
+        pub fn controllerBindingAt(
+            self: *Self,
+            a: std.mem.Allocator,
+            value: state.Task,
+            watermark: u64,
+        ) !?CheckedBinding {
             if (watermark > value.event_high) return error.InvalidArchive;
             var cursor = value.controller;
             var after: ?u64 = null;
             while (cursor) |id| {
-                const binding = try controllerBinding(self, a, value, id);
+                var checked = try loadControllerBinding(self, a, value, id);
+                errdefer checked.program.deinit();
+                const binding = checked.binding;
                 if (after) |later| if (binding.activated_at >= later) return error.CorruptState;
-                if (binding.activated_at <= watermark) return id;
+                if (binding.activated_at <= watermark) return checked;
                 after = binding.activated_at;
                 cursor = binding.predecessor;
+                checked.program.deinit();
             }
             return null;
         }

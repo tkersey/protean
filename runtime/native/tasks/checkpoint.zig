@@ -57,8 +57,6 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             task_id: state.TaskId,
             path: []const u8,
         ) !archive_api.Exported {
-            const started = std.Io.Clock.awake.now(self.io).toMilliseconds();
-            std.debug.print("checkpoint {s} start\n", .{path});
             try archiveAccess(self);
             try retire(self, a);
             var compiler_facts: Compiler.CompilerFacts = .{ .allocator = self.allocator };
@@ -67,7 +65,6 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             if (self.compiler_facts == null) self.compiler_facts = &compiler_facts;
             defer self.compiler_facts = prior_compiler_facts;
             _ = try store(self).auditRetention(self.handlers, self.application.image_identity);
-            std.debug.print("checkpoint retention-audit elapsed={d}ms\n", .{std.Io.Clock.awake.now(self.io).toMilliseconds() - started});
             var value = try self.task(a, task_id);
             defer value.deinit();
             try compatible(self, value.value);
@@ -78,9 +75,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     .digest = storage.digest(self.assets.manifest),
                     .bytes = self.assets.manifest.len,
                 });
-                std.debug.print("checkpoint build-index elapsed={d}ms\n", .{std.Io.Clock.awake.now(self.io).toMilliseconds() - started});
                 try validateArchiveAdmissions(self, arena.allocator(), value.value, index);
-                std.debug.print("checkpoint admissions elapsed={d}ms\n", .{std.Io.Clock.awake.now(self.io).toMilliseconds() - started});
                 try validateWorkspaceArchive(
                     self,
                     arena.allocator(),
@@ -89,8 +84,6 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     .inspect,
                 );
             }
-            std.debug.print("checkpoint workspace elapsed={d}ms\n", .{std.Io.Clock.awake.now(self.io).toMilliseconds() - started});
-            defer std.debug.print("checkpoint write elapsed={d}ms\n", .{std.Io.Clock.awake.now(self.io).toMilliseconds() - started});
             return archive_api.write(
                 self.allocator,
                 self.io,

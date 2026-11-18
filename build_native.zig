@@ -75,6 +75,7 @@ pub const Options = struct {
 pub const Product = struct {
     executable: *std.Build.Step.Compile,
     binary: std.Build.LazyPath,
+    debug_symbols: ?std.Build.LazyPath = null,
     install: *std.Build.Step.InstallArtifact,
     assets: Assets,
     manifest: std.Build.LazyPath,
@@ -182,6 +183,7 @@ pub fn addWithModules(b: *std.Build, modules: Modules, options: Options) Product
     return .{
         .executable = executable.compile,
         .binary = executable.path,
+        .debug_symbols = executable.debug_symbols,
         .install = install,
         .assets = assets,
         .manifest = manifest_file,

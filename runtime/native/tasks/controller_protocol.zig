@@ -13,7 +13,6 @@ const same = task_types.same;
 
 pub fn Operations(comptime Types: type, comptime Self: type) type {
     return struct {
-        const controllerAt = Controller.controllerAt;
         const controllerBinding = Controller.controllerBinding;
         const controllerEpochAt = Controller.controllerEpochAt;
         const controllerOverlay = Context.controllerOverlay;
@@ -548,20 +547,22 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             if (!std.meta.eql(interaction.id, id) or
                 !std.meta.eql(interaction.task, parent.id) or
                 !std.meta.eql(interaction.policy, parent.profile) or
-                interaction.next_message > parent.next_message or !std.meta.eql(
-                @as(?state.Digest, interaction.controller),
-                try controllerAt(self, a, parent, interaction.event_cut),
-            ) or interaction.epoch != try controllerEpochAt(
+                interaction.next_message > parent.next_message) return error.InvalidArchive;
+            var checked = try Controller.controllerBindingAt(
                 self,
                 a,
                 parent,
                 interaction.event_cut,
-            )) return error.InvalidArchive;
-            const binding =
-                try controllerBinding(self, a, parent, interaction.controller);
-            var program = try self.workspaceProgram(a, parent.id, binding.program);
-            defer program.deinit();
-            const schema = program.value.description.controller.?.carry.bytes;
+            ) orelse return error.InvalidArchive;
+            defer checked.program.deinit();
+            if (!std.meta.eql(interaction.controller, checked.binding.id) or
+                interaction.epoch != try controllerEpochAt(
+                    self,
+                    a,
+                    parent,
+                    interaction.event_cut,
+                )) return error.InvalidArchive;
+            const schema = checked.program.value.description.controller.?.carry.bytes;
             if (!std.meta.eql(interaction.carry_schema.digest, storage.digest(schema)) or
                 interaction.carry_schema.bytes != schema.len) return error.InvalidArchive;
         }
