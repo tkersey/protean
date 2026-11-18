@@ -339,9 +339,6 @@ pub fn run(
 ) !Json.Value {
     _ = mark(service, if (options.delegated) "begin-delegated" else "begin-selected");
     defer _ = mark(service, "fixture-finished");
-    const prior_assets = service.asset_digests;
-    if (service.asset_digests == null) service.asset_digests = service.currentAssetDigests();
-    defer service.asset_digests = prior_assets;
     if (options.value) |value| return delegated(
         service,
         worker,

@@ -62,10 +62,12 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             var compiler_facts: Compiler.CompilerFacts = .{ .allocator = self.allocator };
             defer compiler_facts.deinit();
             const prior_compiler_facts = self.compiler_facts;
-            const prior_assets = self.asset_digests;
-            if (self.asset_digests == null) self.asset_digests = self.currentAssetDigests();
-            defer self.asset_digests = prior_assets;
-            if (self.compiler_facts == null) self.compiler_facts = &compiler_facts;
+            if (self.compiler_facts == null) {
+                compiler_facts.export_image_digest = storage.digest(self.assets.image);
+                if (self.application.controller) |seed|
+                    compiler_facts.export_seed_digest = storage.digest(seed.source);
+                self.compiler_facts = &compiler_facts;
+            }
             defer self.compiler_facts = prior_compiler_facts;
             _ = try store(self).auditRetention(self.handlers, self.application.image_identity);
             var value = try self.task(a, task_id);

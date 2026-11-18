@@ -66,7 +66,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             )) return error.CorruptState;
             if (binding.predecessor == null) {
                 const seed = self.application.controller orelse return error.InvalidArchive;
-                const cached = if (self.asset_digests) |assets| assets.seed else null;
+                const cached = if (self.compiler_facts) |facts| facts.export_seed_digest else null;
                 const started = std.Io.Clock.awake.now(self.io).toMilliseconds();
                 defer {
                     const elapsed = std.Io.Clock.awake.now(self.io).toMilliseconds() - started;

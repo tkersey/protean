@@ -5,12 +5,20 @@ const hash_abi = @import("hash_abi.zig");
 pub const Identity = struct { sha256: [32]u8, bytes: u64 };
 
 pub fn executable(io: std.Io) !Identity {
+    return executableWithin(io, 256 * 1024 * 1024);
+}
+
+pub fn executableIdentity(io: std.Io) !Identity {
+    return executableWithin(io, std.math.maxInt(u64));
+}
+
+fn executableWithin(io: std.Io, maximum: u64) !Identity {
     const file = try std.process.openExecutable(io, .{});
     defer file.close(io);
     const before = try file.stat(io);
     if (before.kind != .file or
         before.size == 0 or
-        before.size > 256 * 1024 * 1024)
+        before.size > maximum)
     {
         return error.UnsupportedNativeArtifact;
     }
