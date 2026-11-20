@@ -687,6 +687,67 @@ fn setup(c: Context, args: []const []const u8) !void {
     );
 }
 
+fn sameObject(io: std.Io, output: *const std.Io.File.Atomic, temporary: []const u8) !bool {
+    const staged = try output.dir.openFile(io, temporary, .{ .allow_directory = false });
+    defer staged.close(io);
+    const size = (try staged.stat(io)).size;
+    if (size == 0) return error.EmptyCompilerOutput;
+    const previous = output.dir.openFile(io, output.dest_sub_path, .{
+        .follow_symlinks = false,
+        .allow_directory = false,
+    }) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    defer previous.close(io);
+    if ((try previous.stat(io)).size != size) return false;
+    var offset: u64 = 0;
+    var left: [16384]u8 = undefined;
+    var right: [left.len]u8 = undefined;
+    while (offset < size) {
+        const length: usize = @intCast(@min(left.len, size - offset));
+        if (try staged.readPositionalAll(io, left[0..length], offset) != length or
+            try previous.readPositionalAll(io, right[0..length], offset) != length)
+            return error.InputChanged;
+        if (!std.mem.eql(u8, left[0..length], right[0..length])) return false;
+        offset += length;
+    }
+    return true;
+}
+
+fn publishObject(io: std.Io, output: *std.Io.File.Atomic) !void {
+    const temporary = std.fmt.hex(output.file_basename_hex);
+    const lock = try output.dir.openFile(io, ".", .{ .lock = .exclusive });
+    defer lock.close(io);
+    if (!try sameObject(io, output, &temporary)) try output.replace(io);
+}
+
+fn compileC(c: Context, args: [][]const u8) !std.process.Child.Term {
+    const prefix = "-femit-bin=";
+    if (args.len < 3 or !std.mem.eql(u8, args[1], "build-obj"))
+        return error.ExpectedCompilerArguments;
+    const emit = &args[args.len - 1];
+    if (!std.mem.startsWith(u8, emit.*, prefix) or emit.len == prefix.len)
+        return error.ExpectedCompilerOutput;
+    const original_emit = emit.*;
+    defer emit.* = original_emit;
+    const destination = original_emit[prefix.len..];
+    var output = try Dir.cwd().createFileAtomic(c.io, destination, .{ .replace = true });
+    defer output.deinit(c.io);
+    const temporary = std.fmt.hex(output.file_basename_hex);
+    const directory = Dir.path.dirname(destination) orelse ".";
+    const path = try c.join(&.{ directory, &temporary });
+    emit.* = try std.mem.concat(c.a, u8, &.{ prefix, path });
+
+    var child = try std.process.spawn(c.io, .{ .argv = args, .environ_map = c.environ });
+    defer child.kill(c.io);
+    const term = try child.wait(c.io);
+    if (!term.success()) return term;
+
+    try publishObject(c.io, &output);
+    return term;
+}
+
 pub fn main(init: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(init.gpa);
     defer arena.deinit();
@@ -702,14 +763,15 @@ pub fn main(init: std.process.Init) !void {
     var args: std.ArrayList([]const u8) = .empty;
     while (iterator.next()) |arg| try args.append(c.a, arg);
     if (std.mem.eql(u8, operation, "compile-c")) {
-        if (args.items.len < 2) return error.ExpectedCompilerArguments;
-        try equal(args.items[1], "build-obj");
         _ = init.environ_map.swapRemove("CPATH");
         _ = init.environ_map.swapRemove("C_INCLUDE_PATH");
-        return std.process.replace(init.io, .{
-            .argv = args.items,
-            .environ_map = init.environ_map,
-        });
+        const term = try compileC(c, args.items);
+        if (term == .exited) {
+            if (term.exited != 0) std.process.exit(term.exited);
+            return;
+        }
+        std.debug.print("C compiler {f}\n", .{term});
+        return error.CompilerFailed;
     }
     if (std.mem.eql(u8, operation, "setup")) return setup(c, args.items);
     if (std.mem.eql(u8, operation, "manifest")) return manifest(c, args.items);
@@ -728,6 +790,32 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     return error.UnknownCommand;
+}
+
+test "unchanged compiler output preserves the published object" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for ([_][]const u8{ "first", "first", "other", "" }, 0..) |bytes, index| {
+        const before = if (index == 0) null else try tmp.dir.statFile(io, "test.o", .{});
+        var output = try tmp.dir.createFileAtomic(io, "test.o", .{ .replace = true });
+        defer output.deinit(io);
+        try output.file.writePositionalAll(io, bytes, 0);
+        if (bytes.len == 0) {
+            try std.testing.expectError(error.EmptyCompilerOutput, publishObject(io, &output));
+        } else {
+            try publishObject(io, &output);
+        }
+        if (before) |old| {
+            const current = try tmp.dir.statFile(io, "test.o", .{});
+            try std.testing.expectEqual(index != 2, stable(old, current));
+        }
+        var contents: [5]u8 = undefined;
+        try std.testing.expectEqualStrings(
+            if (index < 2) "first" else "other",
+            try tmp.dir.readFile(io, "test.o", &contents),
+        );
+    }
 }
 
 test "source admission binds exact names bytes modes and complete inventory" {
