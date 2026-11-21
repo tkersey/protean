@@ -89,7 +89,13 @@ It runs setup, TigerStyle, authoring, owner and workspace tests, recurrence,
 packaged execution and placement, and builds and runs an independent downstream
 consumer. The command reports elapsed time and identifies unfinished groups
 if a check fails or the run is interrupted. Keep the usual Zig caches between
-runs. Every selected execution still runs against the candidate.
+runs. Every selected execution still runs against the candidate. On macOS a
+single Zig invocation builds the product and checks shared dependencies once.
+Adaptive tests run in seven isolated children, and workspace tests run in five
+in a separate group. The source audit runs every time. The launcher fixture
+suite reuses a successful ancestor only while its scripts, auditor pin,
+workflow, build, and local toolchain inputs match. Run
+`bash tools/test-tiger-style.sh` to exercise the launcher fixtures directly.
 
 Use `zig build qualify -- --list` to see the inventory. To investigate one
 group with its prerequisites, run `zig build qualify -- --group NAME`.

@@ -28,40 +28,50 @@ const build = (...targets) => buildIn(prefix, ...targets);
 const directOptions = ['-Dtarget=x86_64-linux-musl', '-Dnative-direct=true'];
 const smoke = (root, backend) => [node, 'test/protean/native_adaptive.mjs', join(root, 'bin/protean'),
   join(root, 'protean/adaptive/application.json'), join(root, 'protean/adaptive/program.bpi3'), 'smoke', backend];
-const partition = (name, encoded, prerequisite) => {
-  const groups = JSON.parse(encoded);
-  assert(groups.length > 0);
-  return groups.map((_, i) => [name + '-' + (i + 1), [node, 'tools/native/qualification_tests.mjs',
-    join(prefix, 'verification', name), encoded, JSON.stringify([i])], [prerequisite]]);
+const groupedTests = (name, encoded, prerequisite) => {
+  const index = JSON.parse(encoded).findIndex((_, i) => selection === name + '-' + (i + 1));
+  const args = [node, 'tools/native/qualification_tests.mjs', join(prefix, 'verification', name), encoded];
+  if (index >= 0) args.push(JSON.stringify([index]));
+  return [index >= 0 ? selection : name, args, [prerequisite]];
 };
+const sharedGraph = mac && (!selection || selection === 'native-build-and-tests');
+const product = sharedGraph ? 'native-build-and-tests' : 'product';
 const inventory = [
   ['tigerstyle', ['bash', 'tools/tiger-style.sh', '--all', 'HEAD']],
-  ['tigerstyle-integration', ['bash', 'tools/test-tiger-style.sh']],
+  ['tigerstyle-integration', ['bash', 'tools/test-tiger-style.sh', localCache]],
   ['setup', [zig, 'run', 'tools/native/dependencies.zig', '--cache-dir', localCache,
     '--', 'setup', 'conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json', inputs, zig]],
-  ['authoring-https', build('check-protean', 'check-native-https'), ['setup']],
-  ['task-owners', build('check-native-owner-tasks'), ['setup']],
-  ['adaptive-build', build('build-native-owner-adaptive-check'), ['setup']],
-  ...partition('native-owner-adaptive', adaptiveGroups, 'adaptive-build'),
-  ['owner-support', build('check-native-owner-support'), ['setup']],
-  ['workspace-build', build('build-workspace-general-check'), ['setup']],
-  ...partition('workspace-general', workspaceGroups, 'workspace-build'),
-  ['correspondence', build('check-workspace-semantics'), ['setup']],
-  ['recurrence', build('check-recurrence-driver'), ['setup']],
+  ...(sharedGraph ? [
+    [product, build('protean', 'check-native-owner', 'check-recurrence-driver',
+      'check-workspace-semantics', 'check-protean', 'check-native-https'), ['setup']],
+    ['workspace-general', build('check-workspace-general'), ['setup']],
+  ] : [
+    ['authoring-https', build('check-protean', 'check-native-https'), ['setup']],
+    ['task-owners', build('check-native-owner-tasks'), ['setup']],
+    ['adaptive-build', build('build-native-owner-adaptive-check'), ['setup']],
+    groupedTests('native-owner-adaptive', adaptiveGroups, 'adaptive-build'),
+    ['owner-support', build('check-native-owner-support'), ['setup']],
+    ['workspace-build', build('build-workspace-general-check'), ['setup']],
+    groupedTests('workspace-general', workspaceGroups, 'workspace-build'),
+    ['correspondence', build('check-workspace-semantics'), ['setup']],
+    ['recurrence', build('check-recurrence-driver'), ['setup']],
+    ['product', build('protean'), ['setup']],
+  ]),
   ...(linux ? [
     ['direct-recurrence', buildIn(directPrefix, 'check-recurrence-driver', ...directOptions), ['setup']],
     ['direct-product', buildIn(directPrefix, 'protean', ...directOptions), ['setup']],
     ['direct-smoke', smoke(directPrefix, 'stage2_x86_64'), ['direct-product']],
   ] : []),
-  ['product', build('protean'), ['setup']],
-  ['native-smoke', smoke(prefix, 'stage2_llvm'), ['product']],
-  ['native-placement', [node, 'test/protean/native_placement.mjs', app], ['product']],
-  ['downstream-identity', [node, 'test/protean/installations.mjs', inputs, app], ['product']],
+  ['native-smoke', smoke(prefix, 'stage2_llvm'), [product]],
+  ['native-placement', [node, 'test/protean/native_placement.mjs', app], [product]],
+  ['downstream-identity', [node, 'test/protean/installations.mjs', inputs, app], [product]],
 ];
 
 if (listing) {
   for (const [name, , dependencies = []] of inventory)
     console.log(name, dependencies.length ? '(requires ' + dependencies.join(', ') + ')' : '');
+  if (mac) console.log('Individual Zig targets are also selectable as authoring-https, task-owners,',
+    'adaptive-build, native-owner-adaptive, owner-support, workspace-build, correspondence, recurrence, product.');
   process.exit(0);
 }
 const needed = new Set(selection ? [selection] : inventory.map(([name]) => name));

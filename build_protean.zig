@@ -159,6 +159,7 @@ const BuildGraph = struct {
     source: ?std.Build.LazyPath = undefined,
     native_enabled: bool = undefined,
     native_direct: bool = false,
+    recovery_probe: ?*std.Build.Step.Compile = null,
     clang_inputs: std.Build.LazyPath = undefined,
     default_musl: bool = undefined,
     kosmos_source: std.Build.LazyPath = undefined,
@@ -1093,9 +1094,26 @@ const BuildGraph = struct {
     fn recurrenceDriver(s: *BuildGraph) void {
         const root = s.b.allocator.create(std.Build.Module) catch @panic("out of memory");
         root.init(s.b, .{ .existing = s.adaptive_product.executable.root_module });
-        root.root_source_file = s.b.path("tools/evaluation/recurrence_entry.zig");
+        root.import_table = root.import_table.clone(s.b.allocator) catch @panic("out of memory");
+        const crash_backend: ?bool = if (linuxX86(s.b.graph.host)) s.optimize != .debug else null;
+        const shared = s.checked_environment == s.public_environment and
+            s.adaptive_product.executable.use_llvm == crash_backend;
+        root.root_source_file = if (shared)
+            s.b.path("test/protean/native_recovery_crash.zig")
+        else
+            s.b.path("tools/evaluation/recurrence_entry.zig");
+        if (shared) {
+            root.addImport("protean", s.native_protean);
+            root.addImport("horos", s.native_horos);
+            root.addImport("horos_data", s.native_data);
+            root.addImport("kosmos", s.native_kosmos);
+        }
+        root.addAnonymousImport("zig_test_runner", .{
+            .root_source_file = s.b.graph.path(.zig_lib, "compiler/test_runner.zig"),
+        });
         const executable = s.b.addTest(.{
             .name = "protean-recurrence-driver",
+            .filters = &.{"process-crash-controller-only"},
             .root_module = root,
             .test_runner = .{
                 .path = s.b.path("tools/evaluation/recurrence_driver.zig"),
@@ -1103,6 +1121,7 @@ const BuildGraph = struct {
             },
             .use_llvm = s.adaptive_product.executable.use_llvm,
         });
+        if (shared) s.recovery_probe = executable;
         const install = s.b.addInstallArtifact(executable, .{});
         const driver = s.b.step(
             "recurrence-driver",
@@ -1406,7 +1425,7 @@ const BuildGraph = struct {
         crash_module.addImport("protean_native", s.checked_environment);
         // Private history/Worker access stays in the test graph. The Node
         // controller owns process death and independent reopen.
-        const crash_probe = s.b.addTest(.{
+        const crash_probe = s.recovery_probe orelse s.b.addTest(.{
             .name = "protean-recovery-crash",
             .root_module = crash_module,
             .filters = &.{"process-crash-controller-only"},
@@ -1612,8 +1631,10 @@ fn nativeLibrary(
         .strip = optimize != .debug,
         .link_libc = true,
     });
-    module.addObjectFile(inputs.addCopyFile(sql_obj, "sqlite3.o"));
-    module.addObjectFile(inputs.addCopyFile(shim_obj, "native_c.o"));
+    _ = inputs.addCopyFile(sql_obj, "sqlite3.o");
+    _ = inputs.addCopyFile(shim_obj, "native_c.o");
+    module.addObjectFile(sql_obj);
+    module.addObjectFile(shim_obj);
     const library = b.addLibrary(.{
         .name = "protean-native-c",
         .linkage = .static,

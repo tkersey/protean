@@ -2,10 +2,43 @@
 set -euo pipefail
 export LC_ALL=C
 
+launcher_environment() (
+    set -euo pipefail
+    uname -smrv || return 1
+    git config --list --includes --show-origin -z || return 1
+    env | grep -E '^(GIT_|ZIG_|DYLD_|LD_|XDG_|PATH=|HOME=|TMPDIR=|SDKROOT=|DEVELOPER_DIR=|MACOSX_DEPLOYMENT_TARGET=)' | sort || return 1
+    git hash-object --no-filters -- "$BASH" "$(type -P git)" "$(type -P zig)" \
+        "$(type -P grep)" "$(type -P mktemp)" "$(type -P rm)" "$(type -P ln)" "$(type -P dirname)" \
+        "$(type -P cat)" "$(type -P bash)" || return 1
+    if [[ $(uname -s) == Darwin ]]; then xcrun --show-sdk-build-version || return 1; fi
+    COPYFILE_DISABLE=1 tar -cf - -C "$ZIG_LIB_DIR" .
+)
+
+receipt=
+if [[ $# == 1 && -d "$1" && -d ${ZIG_LIB_DIR:-} && -z ${BASH_ENV:-} ]]; then
+    candidate=$(git rev-parse --verify HEAD)
+    if environment=$(launcher_environment | git hash-object --stdin); then
+        receipt="$(cd -- "$1" && pwd)/tigerstyle-launcher-pass"
+        if [[ -f "$receipt" ]] && read -r base previous < "$receipt" &&
+            [[ $previous == "$environment" ]] && git merge-base --is-ancestor "$base" "$candidate" &&
+            git diff --quiet --no-ext-diff --no-textconv "$base" "$candidate" -- tools/tiger-style.sh tools/test-tiger-style.sh \
+                .github/workflows .github/actions .gitattributes .gitmodules .gitignore \
+                build.zig build.zig.zon build_protean.zig tools/native/qualify.mjs
+        then
+            echo "TigerStyle launcher inputs match the successful integration at $base."
+            exit 0
+        fi
+    fi
+fi
+
 launcher=$(cd -- "$(dirname -- "$0")" && pwd)/tiger-style.sh
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/tiger-style-test.XXXXXXXX")
 trap 'rm -rf "$scratch"' EXIT
-git init --quiet "$scratch/repository"
+export GIT_ATTR_NOSYSTEM=1
+export GIT_CONFIG_NOSYSTEM=1
+export GIT_CONFIG_GLOBAL=/dev/null
+export GIT_TEMPLATE_DIR=
+git init --quiet --template= "$scratch/repository"
 cd "$scratch/repository"
 git config user.name TigerStyle
 git config user.email tiger-style@example.invalid
@@ -91,3 +124,8 @@ expect_failure 'cannot audit changed Zig file types' "$base" HEAD
 expect_failure 'requires regular tracked Zig files' --all HEAD
 
 printf 'TigerStyle integration passed: full-source and diff audits, revisions, index/worktree, binary/type changes.\n'
+if [[ -n "$receipt" ]]; then
+    temporary=$(mktemp "$receipt.XXXXXXXX")
+    printf '%s %s\n' "$candidate" "$environment" > "$temporary"
+    mv -f "$temporary" "$receipt"
+fi

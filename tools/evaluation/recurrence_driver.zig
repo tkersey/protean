@@ -143,7 +143,14 @@ fn configure(
         .live;
 }
 
+pub const std_options = @import("zig_test_runner").std_options;
+
 pub fn main(init: std.process.Init) void {
+    if (@import("builtin").test_functions.len == 1 and init.minimal.args.vector.len == 1) {
+        if (init.environ_map.contains("PROTEAN_CRASH_MODE")) {
+            return @import("zig_test_runner").main(init.minimal);
+        }
+    }
     run(init) catch |err| std.process.exit(native.reportFailure(err));
 }
 

@@ -23,7 +23,7 @@ async function* frames(stream) {
   assert.equal(pending.length, 0, 'truncated Zig test message');
 }
 
-function client() {
+function client(group) {
   const child = spawn(executable, ['--listen=-'], {stdio: ['pipe', 'pipe', 'pipe']});
   const messages = frames(child.stdout)[Symbol.asyncIterator]();
   child.stderr.pipe(process.stderr, {end: false});
@@ -77,7 +77,7 @@ function client() {
       const flags = result.readBigUInt64LE(4);
       process.stderr.write(`Finished Zig test ${names[index]}: ${Math.round(performance.now() - started)} ms, flags=${flags}\n`);
       if ((flags & ~4n) === 0n) passed += 1;
-      else process.stderr.write(`Failed Zig test ${names[index]}: flags=${flags}\n`);
+      else process.stderr.write(`Failed Zig test ${names[index]} (group ${group + 1}): flags=${flags}\n`);
     }
     await send(0);
     const exit = await closed;
@@ -87,7 +87,7 @@ function client() {
   return {child, closed, metadata, run};
 }
 
-const clients = selectedGroups.map(() => client());
+const clients = selectedGroups.map(client);
 const stop = () => { for (const {child} of clients) if (child.exitCode === null) child.kill(); };
 for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => {
   stop();
@@ -106,7 +106,8 @@ try {
   assert(partitions.every(indices => indices.length > 0), 'empty Zig test group');
   const selectedCount = selectedGroups.reduce((sum, group) => sum + partitions[group].length, 0);
   const results = await Promise.allSettled(clients.map((value, index) => value.run(partitions[selectedGroups[index]], names)));
-  for (const result of results) if (result.status === 'rejected') process.stderr.write(`${result.reason}\n`);
+  for (const [i, result] of results.entries()) if (result.status === 'rejected')
+    process.stderr.write(`Zig test group ${selectedGroups[i] + 1}: ${result.reason}\n`);
   const passed = results.reduce((sum, result) => sum + (result.status === 'fulfilled' ? result.value : 0), 0);
   const inventory = encodedSelection === undefined ? '' : ` (${names.length} tests in complete inventory)`;
   process.stdout.write(`${passed}/${selectedCount} tests passed across ${clients.length} independent groups${inventory}.\n`);

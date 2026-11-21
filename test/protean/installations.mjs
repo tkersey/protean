@@ -2,9 +2,8 @@
 // acquisition/build/install command runs behind a native executable allowlist.
 import assert from 'node:assert/strict';
 import {execFileSync, spawnSync} from 'node:child_process';
-import {copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
+import {copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
 import {basename, dirname, join, resolve} from 'node:path';
-import {tmpdir} from 'node:os';
 import {pathToFileURL} from 'node:url';
 import {ProteanClient} from '../support/stdio-client.mts';
 
@@ -18,14 +17,24 @@ const root = resolve(import.meta.dirname, '../..');
 const deadline = process.platform === 'linux' ? performance.now() + 540_000 : null;
 const zig = realpathSync(process.env.PROTEAN_ZIG_EXE ?? execFileSync('which', ['zig'], {encoding: 'utf8'}).trim());
 const description = execFileSync(zig, ['env'], {encoding: 'utf8'});
-const library = realpathSync(JSON.parse(description.match(/^\s*\.lib_dir = (".*"),$/m)?.[1] ?? 'null'));
+const zigPath = key => JSON.parse(description.match(new RegExp(`^\\s*\\.${key} = (".*"),$`, 'm'))[1]);
+const library = realpathSync(zigPath('lib_dir'));
 assert.equal(execFileSync(zig, ['version'], {encoding: 'utf8'}).trim(), '0.17.1');
-const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'Protean downstream ü ')));
-const cache = resolve(process.env.ZIG_GLOBAL_CACHE_DIR ?? join(scratch, 'global-cache'));
-const local = join(cache, 'downstream-local');
+const cache = resolve(zigPath('global_cache_dir'));
+function acquireWorkspace() {
+  const parent = join(cache, 'downstream-workspaces');
+  mkdirSync(parent, {recursive: true});
+  for (let slot = 0; ; slot++) {
+    const path = join(parent, `Protean downstream ü ${slot}`);
+    try { mkdirSync(path, {mode: 0o700}); }
+    catch (error) { if (error.code === 'EEXIST') continue; throw error; }
+    return {scratch: realpathSync(path), local: join(cache, slot ? `downstream-local-${slot}` : 'downstream-local')};
+  }
+}
+const {scratch, local} = acquireWorkspace();
 const inputs = join(scratch, 'inputs');
 const sandboxPath = value => process.platform === 'linux' ? value.replaceAll(scratch, '/tmp/Protean downstream ü') : value;
-mkdirSync(cache, {recursive: true}); mkdirSync(local, {recursive: true}); mkdirSync(inputs);
+mkdirSync(local, {recursive: true}); mkdirSync(inputs);
 // Package managers may expose the selected library through a directory link.
 const libraryAlias = join(scratch, 'selected-zig-lib');
 symlinkSync(library, libraryAlias, 'dir');
