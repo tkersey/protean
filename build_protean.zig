@@ -148,6 +148,7 @@ pub fn build(b: *std.Build) void {
     graph.nativeSteps();
     if (graph.native_enabled) graph.nativeBuild() else graph.missingNative();
     graph.pureChecks();
+    graph.localQualification();
 }
 
 const BuildGraph = struct {
@@ -193,6 +194,7 @@ const BuildGraph = struct {
     native_guard: *std.Build.Step.Run = undefined,
     g: Graph = undefined,
     native_graph: Graph = undefined,
+    fast: *std.Build.Step = undefined,
     check: *std.Build.Step = undefined,
     adaptive_image_step: *std.Build.Step = undefined,
     aggregate: *std.Build.Step = undefined,
@@ -558,7 +560,9 @@ const BuildGraph = struct {
         });
         lint.dependOn(&format_check.step);
         lint.dependOn(&s.b.addSystemCommand(&.{ "sh", "tools/check_zig_paths.sh" }).step);
-        s.check.dependOn(lint);
+        s.fast = s.b.step("check", "Run focused authoring and bundled Clang checks");
+        s.fast.dependOn(lint);
+        s.check.dependOn(s.fast);
         const workspace_values = s.b.step(
             "check-workspace-values",
             "Check runtime-schema workspace value projection",
@@ -579,7 +583,7 @@ const BuildGraph = struct {
         const dialogue = s.g.module("test/protean/dialogue_probe.zig");
         dialogue.addImport("interaction", s.g.helper("interaction"));
         const authoring_tests = [_]*std.Build.Step.Compile{
-            s.g.testModule(s.check, s.g.module("test/authoring_tests.zig")),
+            s.g.testModule(s.fast, s.g.module("test/authoring_tests.zig")),
             s.g.testModule(s.check, s.g.module("src/test_root.zig")),
             s.g.testModule(
                 program_construction,
@@ -617,7 +621,11 @@ const BuildGraph = struct {
             });
             rejected.expect_errors = .{ .contains = negative[1] };
             rejected.step.dependOn(s.g.gate);
-            s.check.dependOn(&rejected.step);
+            const step = if (comptime std.mem.eql(u8, negative[0], "model_runtime_callback"))
+                s.fast
+            else
+                s.check;
+            step.dependOn(&rejected.step);
         }
         for ([_][]const u8{ "decode recursive", "encode recursive" }) |filter| {
             const root = s.g.module("test/protean/recursive_client_values.zig");
@@ -1430,6 +1438,38 @@ const BuildGraph = struct {
         s.scheduler_benchmark.dependOn(&missing.step);
     }
 
+    fn localQualification(s: *BuildGraph) void {
+        if (s.b.option(std.Build.LazyPath, "clang-probe-source", "Header mutation fixture")) |src| {
+            const object = clangObject(s.host_tool, s.b.graph.host, .safe, src, &.{}, "probe");
+            const install = s.b.addInstallFile(object, "probe.o");
+            const probe = s.b.step("build-clang-probe", "Build the header mutation fixture");
+            probe.dependOn(&install.step);
+        }
+        const clang = nativeCheckCommand(s.b);
+        clang.addArg("node");
+        clang.addFileArg2(s.b.path("test/protean/clang_inputs.mjs"), .{});
+        clang.addDirectoryArg2(s.b.graph.path(.local_cache, "clang-probe"), .{
+            .make_absolute = true,
+        });
+        clang.setCwd(s.b.path("."));
+        const clang_checks = s.b.step("check-clang-inputs", "Check bundled Clang header changes");
+        clang_checks.dependOn(&clang.step);
+        s.fast.dependOn(clang_checks);
+
+        const qualify = nodeCommand(s.b);
+        qualify.addArgs(&.{ "node", "tools/native/qualify.mjs" });
+        qualify.setCwd(s.b.path("."));
+        qualify.addDirectoryArg2(s.b.graph.path(.local_cache, ""), .{ .make_absolute = true });
+        qualify.addDirectoryArg2(s.b.graph.path(.global_cache, ""), .{ .make_absolute = true });
+        inline for (.{ adaptive_owner_groups, workspace_execution_groups }) |groups| {
+            qualify.addArg(std.json.Stringify.valueAlloc(s.b.allocator, groups, .{}) catch
+                @panic("out of memory"));
+        }
+        qualify.addPassthruArgs();
+        qualify.has_side_effects = true;
+        s.b.step("qualify", "Run the complete local host qualification").dependOn(&qualify.step);
+    }
+
     fn pureChecks(s: *BuildGraph) void {
         const pure = nativeCheckCommand(s.b);
         pure.addArgs(&.{
@@ -1441,7 +1481,6 @@ const BuildGraph = struct {
         s.check.dependOn(&pure.step);
         s.aggregate.dependOn(s.check);
         s.b.step("check-authoring-core", "Check retained authoring contracts").dependOn(s.check);
-        s.b.step("check", "Check Protean authoring").dependOn(s.aggregate);
         s.b.default_step = s.aggregate;
     }
 };

@@ -73,9 +73,28 @@ builds the adaptive application through that public API.
 ## Qualification
 
 ```sh
-zig build check-protean check-native -Doptimize=safe
-node test/protean/installations.mjs .protean-native/inputs zig-out/bin/protean
+zig build check
+zig build qualify
 ```
+
+Use `check` for local feedback on authoring and the native C compiler wrapper.
+It runs source inventory, formatting, focused authoring and rejection tests, and
+a real bundled-Clang build. The compiler witness changes a transitive header
+and verifies the resulting object. It also checks that a failed compilation
+preserves the previous usable object. For the full authoring suite use
+`zig build check-protean -Doptimize=safe`.
+
+Use `qualify` on the committed release candidate on each supported host.
+It runs setup, TigerStyle, authoring, owner and workspace tests, recurrence,
+packaged execution and placement, and builds and runs an independent downstream
+consumer. The command reports elapsed time and identifies unfinished groups
+if a check fails or the run is interrupted. Keep the usual Zig caches between
+runs. Every selected execution still runs against the candidate.
+
+Use `zig build qualify -- --list` to see the inventory. To investigate one
+group with its prerequisites, run `zig build qualify -- --group NAME`.
+Each local group has a 600-second limit. On a translated x86-64 Linux guest
+on Apple silicon, export `ZIG_DEBUG_CMD=1` before invoking Zig.
 
 Node is an external verification controller only. The independent native peer
 uses controlled HTTPS, actual authored actions and created tools, killed/restarted
