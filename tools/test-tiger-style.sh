@@ -6,7 +6,7 @@ launcher_environment() (
     set -euo pipefail
     uname -smrv || return 1
     git config --list --includes --show-origin -z || return 1
-    env | grep -E '^(GIT_|ZIG_|DYLD_|LD_|XDG_|PATH=|HOME=|TMPDIR=|SDKROOT=|DEVELOPER_DIR=|MACOSX_DEPLOYMENT_TARGET=)' | sort || return 1
+    env | grep -E '^(GIT_|ZIG_|DYLD_|LD_|XDG_|BASH_FUNC_|SHELLOPTS=|BASHOPTS=|CPATH=|C_INCLUDE_PATH=|LIBRARY_PATH=|PATH=|HOME=|TMPDIR=|SDKROOT=|DEVELOPER_DIR=|MACOSX_DEPLOYMENT_TARGET=)' | sort || return 1
     git hash-object --no-filters -- "$BASH" "$(type -P git)" "$(type -P zig)" \
         "$(type -P grep)" "$(type -P mktemp)" "$(type -P rm)" "$(type -P ln)" "$(type -P dirname)" \
         "$(type -P cat)" "$(type -P bash)" || return 1
@@ -20,10 +20,12 @@ if [[ $# == 1 && -d "$1" && -d ${ZIG_LIB_DIR:-} && -z ${BASH_ENV:-} ]]; then
     if environment=$(launcher_environment | git hash-object --stdin); then
         receipt="$(cd -- "$1" && pwd)/tigerstyle-launcher-pass"
         if [[ -f "$receipt" ]] && read -r base previous < "$receipt" &&
-            [[ $previous == "$environment" ]] && git merge-base --is-ancestor "$base" "$candidate" &&
+            [[ $base =~ ^[[:xdigit:]]{40}([[:xdigit:]]{24})?$ && $previous == "$environment" ]] &&
+            git merge-base --is-ancestor "$base" "$candidate" &&
             git diff --quiet --no-ext-diff --no-textconv "$base" "$candidate" -- tools/tiger-style.sh tools/test-tiger-style.sh \
                 .github/workflows .github/actions .gitattributes .gitmodules .gitignore \
-                build.zig build.zig.zon build_protean.zig tools/native/qualify.mjs
+                build.zig build.zig.zon build_native.zig build_protean.zig tools/native/qualify.mjs \
+                .zigversion .zig-version .tool-versions mise.toml .mise.toml
         then
             echo "TigerStyle launcher inputs match the successful integration at $base."
             exit 0
@@ -44,6 +46,8 @@ git config user.name TigerStyle
 git config user.email tiger-style@example.invalid
 git config commit.gpgsign false
 git config core.hooksPath /dev/null
+git config core.attributesFile /dev/null
+git config core.excludesFile /dev/null
 
 commit_fixture() {
     git add --all

@@ -28,11 +28,11 @@ const build = (...targets) => buildIn(prefix, ...targets);
 const directOptions = ['-Dtarget=x86_64-linux-musl', '-Dnative-direct=true'];
 const smoke = (root, backend) => [node, 'test/protean/native_adaptive.mjs', join(root, 'bin/protean'),
   join(root, 'protean/adaptive/application.json'), join(root, 'protean/adaptive/program.bpi3'), 'smoke', backend];
-const groupedTests = (name, encoded, prerequisite) => {
-  const index = JSON.parse(encoded).findIndex((_, i) => selection === name + '-' + (i + 1));
+const groupedTests = (name, encoded, prerequisite, fixedIndex) => {
+  const index = fixedIndex ?? JSON.parse(encoded).findIndex((_, i) => selection === name + '-' + (i + 1));
   const args = [node, 'tools/native/qualification_tests.mjs', join(prefix, 'verification', name), encoded];
   if (index >= 0) args.push(JSON.stringify([index]));
-  return [index >= 0 ? selection : name, args, [prerequisite]];
+  return [index >= 0 ? name + '-' + (index + 1) : name, args, [prerequisite]];
 };
 const sharedGraph = mac && (!selection || selection === 'native-build-and-tests');
 const product = sharedGraph ? 'native-build-and-tests' : 'product';
@@ -49,7 +49,9 @@ const inventory = [
     ['authoring-https', build('check-protean', 'check-native-https'), ['setup']],
     ['task-owners', build('check-native-owner-tasks'), ['setup']],
     ['adaptive-build', build('build-native-owner-adaptive-check'), ['setup']],
-    groupedTests('native-owner-adaptive', adaptiveGroups, 'adaptive-build'),
+    ...(linux ? JSON.parse(adaptiveGroups).map((_, index) =>
+      groupedTests('native-owner-adaptive', adaptiveGroups, 'adaptive-build', index))
+      : [groupedTests('native-owner-adaptive', adaptiveGroups, 'adaptive-build')]),
     ['owner-support', build('check-native-owner-support'), ['setup']],
     ['workspace-build', build('build-workspace-general-check'), ['setup']],
     groupedTests('workspace-general', workspaceGroups, 'workspace-build'),
