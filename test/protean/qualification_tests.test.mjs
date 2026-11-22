@@ -30,7 +30,9 @@ let binaryReady = false;
 const groups = [['first'], ['second'], ['third']];
 function run(selection = groups, mode = '', selectedGroups) {
   if (!binaryReady) {
-    execFileSync(process.env.PROTEAN_ZIG_EXE ?? 'zig', ['test', source, '-Osafe', '--test-no-exec', `-femit-bin=${binary}`], {timeout: 30_000});
+    // A cold safe-mode test build competes with the enclosing build's jobs; qualification's
+    // shared deadline bounds the run, so this only guards a standalone invocation.
+    execFileSync(process.env.PROTEAN_ZIG_EXE ?? 'zig', ['test', source, '-Osafe', '--test-no-exec', `-femit-bin=${binary}`], {timeout: 300_000});
     binaryReady = true;
   }
   const args = ['tools/native/qualification_tests.mjs', binary, JSON.stringify(selection)];
