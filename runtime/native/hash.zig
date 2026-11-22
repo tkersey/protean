@@ -36,6 +36,25 @@ export fn protean_native_sha256_final(storage: *abi.State, output: *[32]u8) void
     hasher(storage).final(output);
 }
 
+test "SHA-256 retains a seven-byte prefix across compression block boundaries" {
+    var bytes: [129]u8 = undefined;
+    for (&bytes, 0..) |*byte, index| byte.* = @truncate(index * 37);
+    const digests = [_][]const u8{
+        "1b6e94ae18eff1dbc2ee77615845eaf55a88b19cb3a867179a0cfe90789943cf",
+        "44d942056dd7041cfe6a1bbcb1a1f3afc385bb951b5efd787e71f514f29e1ddc",
+        "a14a45b30d8e4eca06366744bea6597da4da3404e76a29019874cfec816bc586",
+    };
+    for (digests, 127..) |expected, length| {
+        var state: abi.State = undefined;
+        protean_native_sha256_init(&state);
+        protean_native_sha256_update(&state, bytes[0..7], 7);
+        protean_native_sha256_update(&state, bytes[7..].ptr, length - 7);
+        var actual: [32]u8 = undefined;
+        protean_native_sha256_final(&state, &actual);
+        try std.testing.expectEqualStrings(expected, &std.fmt.bytesToHex(actual, .lower));
+    }
+}
+
 export fn protean_native_sha3_256(bytes: [*]const u8, length: usize, output: *[32]u8) void {
     std.crypto.hash.sha3.Sha3_256.hash(bytes[0..length], output, .{});
 }

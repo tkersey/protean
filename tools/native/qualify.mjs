@@ -1,136 +1,186 @@
 import assert from 'node:assert/strict';
-import {execFileSync, spawn} from 'node:child_process';
-import {mkdtempSync, realpathSync, rmSync} from 'node:fs';
-import {tmpdir} from 'node:os';
-import {dirname, join} from 'node:path';
+import {execFileSync} from 'node:child_process';
+import {createHash} from 'node:crypto';
+import {constants, copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync} from 'node:fs';
+import {basename, dirname, join, resolve} from 'node:path';
+import {runQualificationCommand} from './qualification_process.mjs';
+import {acquireWorkspace, gitEnvironment} from './qualification_workspace.mjs';
 
 const started = performance.now();
 const budget = 600_000;
-const [localCache, globalCache, adaptiveGroups, workspaceGroups, ...options] = process.argv.slice(2);
+const [cacheArg, globalArg, network, ...options] = process.argv.slice(2);
 const zig = process.env.PROTEAN_ZIG_EXE;
 const mac = process.platform === 'darwin' && process.arch === 'arm64';
 const linux = process.platform === 'linux' && process.arch === 'x64';
 assert(mac || linux, 'qualification requires an arm64 macOS or x86-64 Linux host');
-assert(zig && localCache && globalCache && adaptiveGroups && workspaceGroups, 'invoke zig build qualify');
-const env = {...process.env, PATH: dirname(zig) + ':' + process.env.PATH, ZIG_GLOBAL_CACHE_DIR: globalCache};
+assert(zig && cacheArg && globalArg && ['online', 'offline'].includes(network), 'invoke zig build qualify');
+const localCache = resolve(cacheArg), globalCache = resolve(globalArg);
+const env = gitEnvironment({...process.env, ZIG_GLOBAL_CACHE_DIR: globalCache});
 delete env.ZIG_PROGRESS;
+delete env.ZIG_LOCAL_PKG_DIR;
 const listing = options.length === 1 && options[0] === '--list';
 const selection = options.length === 2 && options[0] === '--group' ? options[1] : null;
 assert(options.length === 0 || listing || selection, 'usage: zig build qualify [-- --list | -- --group NAME]');
-const prefix = listing ? '' : realpathSync(mkdtempSync(join(tmpdir(), 'protean-qualify-')));
+const source = realpathSync(resolve(import.meta.dirname, '../..'));
+const seconds = ms => (ms / 1000).toFixed(3) + 's';
 const inputs = '.protean-native/inputs';
-const app = join(prefix, 'bin/protean');
-const directPrefix = join(prefix, 'direct');
-const node = process.execPath;
-const buildIn = (destination, ...targets) => [zig, 'build', ...targets, '-Doptimize=safe', '-j2',
-  '--prefix', destination, '--cache-dir', localCache, '--summary', 'all'];
-const build = (...targets) => buildIn(prefix, ...targets);
-const directOptions = ['-Dtarget=x86_64-linux-musl', '-Dnative-direct=true'];
-const smoke = (root, backend) => [node, 'test/protean/native_adaptive.mjs', join(root, 'bin/protean'),
-  join(root, 'protean/adaptive/application.json'), join(root, 'protean/adaptive/program.bpi3'), 'smoke', backend];
-const groupedTests = (name, encoded, prerequisite, fixedIndex) => {
-  const index = fixedIndex ?? JSON.parse(encoded).findIndex((_, i) => selection === name + '-' + (i + 1));
-  const args = [node, 'tools/native/qualification_tests.mjs', join(prefix, 'verification', name), encoded];
-  if (index >= 0) args.push(JSON.stringify([index]));
-  return [index >= 0 ? name + '-' + (index + 1) : name, args, [prerequisite]];
-};
-const sharedGraph = mac && (!selection || selection === 'native-build-and-tests');
-const product = sharedGraph ? 'native-build-and-tests' : 'product';
-const inventory = [
-  ['tigerstyle', ['bash', 'tools/tiger-style.sh', '--all', 'HEAD']],
-  ['tigerstyle-integration', ['bash', 'tools/test-tiger-style.sh', localCache]],
-  ['setup', [zig, 'run', 'tools/native/dependencies.zig', '--cache-dir', localCache,
-    '--', 'setup', 'conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json', inputs, zig]],
-  ...(sharedGraph ? [
-    [product, build('protean', 'check-native-owner', 'check-recurrence-driver',
-      'check-workspace-semantics', 'check-protean', 'check-native-https'), ['setup']],
-    ['workspace-general', build('check-workspace-general'), ['setup']],
-  ] : [
-    ['authoring-https', build('check-protean', 'check-native-https'), ['setup']],
-    ['task-owners', build('check-native-owner-tasks'), ['setup']],
-    ['adaptive-build', build('build-native-owner-adaptive-check'), ['setup']],
-    ...(linux ? JSON.parse(adaptiveGroups).map((_, index) =>
-      groupedTests('native-owner-adaptive', adaptiveGroups, 'adaptive-build', index))
-      : [groupedTests('native-owner-adaptive', adaptiveGroups, 'adaptive-build')]),
-    ['owner-support', build('check-native-owner-support'), ['setup']],
-    ['workspace-build', build('build-workspace-general-check'), ['setup']],
-    groupedTests('workspace-general', workspaceGroups, 'workspace-build'),
-    ['correspondence', build('check-workspace-semantics'), ['setup']],
-    ['recurrence', build('check-recurrence-driver'), ['setup']],
-    ['product', build('protean'), ['setup']],
-  ]),
-  ...(linux ? [
-    ['direct-recurrence', buildIn(directPrefix, 'check-recurrence-driver', ...directOptions), ['setup']],
-    ['direct-product', buildIn(directPrefix, 'protean', ...directOptions), ['setup']],
-    ['direct-smoke', smoke(directPrefix, 'stage2_x86_64'), ['direct-product']],
-  ] : []),
-  ['native-smoke', smoke(prefix, 'stage2_llvm'), [product]],
-  ['native-placement', [node, 'test/protean/native_placement.mjs', app], [product]],
-  ['downstream-identity', [node, 'test/protean/installations.mjs', inputs, app], [product]],
-];
+const controller = new AbortController();
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'])
+  process.once(signal, () => controller.abort(new Error(signal)));
+
+function macDeadline() {
+  if (!mac) return Infinity;
+  let pid = process.ppid, age = 0;
+  while (pid > 1) {
+    const row = execFileSync('/bin/ps', ['-p', String(pid), '-o', 'ppid=,etime=,comm='], {encoding: 'utf8'}).trim();
+    const match = row.match(/^(\d+)\s+([\d:-]+)\s+(.+)$/);
+    if (!match || !['zig', 'maker', basename(zig)].includes(basename(match[3]))) break;
+    const [time, days] = match[2].split('-').reverse();
+    age = (Number(days ?? 0) * 86400 + time.split(':').reduce((a, b) => a * 60 + Number(b), 0) + 1) * 1000;
+    pid = Number(match[1]);
+  }
+  return started + budget - age;
+}
+const deadline = macDeadline();
+const git = (cwd, ...args) => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-C', cwd, ...args],
+  {env, encoding: 'utf8', timeout: Math.max(1, Math.ceil(Math.min(budget, deadline - performance.now())))}).trimEnd();
+const clean = cwd => assert.equal(git(cwd, 'status', '--porcelain', '--untracked-files=all',
+  '--ignore-submodules=none'), '', 'qualification requires the complete committed candidate');
+
+function checkout(directory, candidate) {
+  const work = join(directory, 'source');
+  if (!existsSync(join(work, '.git', 'HEAD'))) {
+    rmSync(work, {recursive: true, force: true});
+    git(directory, 'clone', '--quiet', '--no-checkout', '--shared', '--no-tags', '--template=', '--', source, work);
+  }
+  git(work, 'clean', '-ffd');
+  git(work, 'checkout', '--quiet', '--force', '--detach', candidate);
+  assert.equal(git(work, 'rev-parse', 'HEAD'), candidate);
+  clean(work);
+  return work;
+}
+
+function seedArchives(work) {
+  const read = file => JSON.parse(readFileSync(join(work, 'conformance/protean', file)));
+  const lock = read('dependencies.lock.json'), native = read('native-dependencies.lock.json');
+  mkdirSync(join(work, inputs), {recursive: true});
+  for (const file of [`horos-${lock.boundary.commit}.tar.gz`, `kosmos-${lock.world.commit}.tar.gz`,
+    native.sqlite.archive.root + '.zip']) {
+    const origin = join(source, inputs, file), target = join(work, inputs, file);
+    if (!existsSync(target) && existsSync(origin)) copyFileSync(origin, target, constants.COPYFILE_EXCL);
+  }
+}
+
+function inventory(work, prefix) {
+  const groups = JSON.parse(readFileSync(join(work, 'tools/native/qualification_groups.json')));
+  const directPrefix = join(prefix, 'direct');
+  const direct = ['-Dtarget=x86_64-linux-musl', '-Dnative-direct=true'];
+  const offline = network === 'offline' ? ['--system', join(work, 'zig-pkg')] : [];
+  const buildIn = (dest, ...targets) => [zig, 'build', ...targets, '-Doptimize=safe', '-j2', '--prefix',
+    dest, '--cache-dir', localCache, '--summary', 'all', ...offline];
+  const build = (...targets) => buildIn(prefix, ...targets);
+  const smoke = (root, backend) => [process.execPath, 'test/protean/native_adaptive.mjs', join(root, 'bin/protean'),
+    join(root, 'protean/adaptive/application.json'), join(root, 'protean/adaptive/program.bpi3'), 'smoke', backend];
+  const commands = new Map();
+  const add = (name, command, needs = []) => commands.set(name, {name, command, needs});
+  add('tigerstyle', ['bash', 'tools/tiger-style.sh', '--all', 'HEAD']);
+  add('tigerstyle-integration', ['bash', 'tools/test-tiger-style.sh',
+    ...(selection === 'tigerstyle-integration' ? [] : ['--if-changed', localCache])]);
+  add('setup', [zig, 'run', 'tools/native/dependencies.zig', '--cache-dir', localCache, '--', 'setup',
+    'conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json',
+    inputs, zig, ...(network === 'offline' ? ['--offline'] : [])]);
+  for (const [name, targets] of [
+    ['authoring-https', ['check-protean', 'check-native-https']],
+    ['task-owners', ['check-native-owner-tasks']], ['adaptive-build', ['build-native-owner-adaptive-check']],
+    ['owner-support', ['check-native-owner-support']], ['workspace-build', ['build-workspace-general-check']],
+    ['correspondence', ['check-workspace-semantics']], ['recurrence', ['check-recurrence-driver']],
+    ['product', ['protean']],
+  ]) add(name, build(...targets), ['setup']);
+  for (const [name, filters, prerequisite] of [
+    ['native-owner-adaptive', groups.adaptive, 'adaptive-build'],
+    ['workspace-general', groups.workspace, 'workspace-build'],
+  ]) {
+    const cmd = [process.execPath, 'tools/native/qualification_tests.mjs',
+      join(prefix, 'verification', name), JSON.stringify(filters)];
+    add(name, cmd, [prerequisite]);
+    filters.forEach((_, i) => add(name + '-' + (i + 1), [...cmd, JSON.stringify([i])], [prerequisite]));
+  }
+  if (mac) add('native-build-and-tests', build('protean', 'check-native-owner', 'check-recurrence-driver',
+    'check-workspace-general', 'check-workspace-semantics', 'check-protean', 'check-native-https'), ['setup']);
+  if (linux) {
+    add('direct-recurrence', buildIn(directPrefix, 'check-recurrence-driver', ...direct), ['setup']);
+    add('direct-product', buildIn(directPrefix, 'protean', ...direct), ['setup']);
+    add('direct-smoke', smoke(directPrefix, 'stage2_x86_64'), ['direct-product']);
+  }
+  add('native-smoke', smoke(prefix, 'stage2_llvm'), ['product']);
+  add('native-placement', [process.execPath, 'test/protean/native_placement.mjs', join(prefix, 'bin/protean')], ['product']);
+  add('downstream-identity', [process.execPath, 'test/protean/installations.mjs', inputs, join(prefix, 'bin/protean')], ['product']);
+  const full = ['tigerstyle', 'tigerstyle-integration', 'setup', ...(mac ? ['native-build-and-tests'] :
+    ['authoring-https', 'task-owners', 'adaptive-build', ...groups.adaptive.map((_, i) => 'native-owner-adaptive-' + (i + 1)),
+      'owner-support', 'workspace-build', 'workspace-general', 'correspondence', 'recurrence', 'product',
+      'direct-recurrence', 'direct-product', 'direct-smoke']), 'native-smoke', 'native-placement', 'downstream-identity'];
+  return {commands, full};
+}
+
+function selected(commands, name) {
+  const result = new Set();
+  function include(group) {
+    assert(commands.has(group), 'unknown qualification group: ' + group);
+    if (result.has(group)) return;
+    for (const prerequisite of commands.get(group).needs) include(prerequisite);
+    result.add(group);
+  }
+  include(name);
+  return [...result];
+}
 
 if (listing) {
-  for (const [name, , dependencies = []] of inventory)
-    console.log(name, dependencies.length ? '(requires ' + dependencies.join(', ') + ')' : '');
-  if (mac) console.log('Individual Zig targets are also selectable as authoring-https, task-owners,',
-    'adaptive-build, native-owner-adaptive, owner-support, workspace-build, correspondence, recurrence, product.');
+  const {commands, full} = inventory(source, '');
+  console.log('Full qualification:', full.join(', '));
+  for (const name of commands.keys()) console.log('--group', name, 'runs', selected(commands, name).join(', '));
   process.exit(0);
 }
-const needed = new Set(selection ? [selection] : inventory.map(([name]) => name));
-for (const [name, , dependencies = []] of inventory.toReversed())
-  if (needed.has(name)) for (const dependency of dependencies) needed.add(dependency);
-const groups = inventory.filter(([name]) => needed.has(name));
 
-const seconds = ms => (ms / 1000).toFixed(3) + 's';
-let child;
-let interruption;
-function stop(reason) {
-  interruption ??= reason;
-  if (child?.pid) {
-    try { process.kill(-child.pid, 'SIGKILL'); }
-    catch (error) { if (error.code !== 'ESRCH') throw error; }
-  }
-}
-for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.once(signal, () => stop(signal));
-const head = () => execFileSync('git', ['rev-parse', 'HEAD'], {encoding: 'utf8'}).trim();
-const clean = () => assert.equal(execFileSync('git', ['status', '--porcelain'], {encoding: 'utf8'}), '',
-  'qualification requires the complete committed candidate');
-let completed = 0;
+let lease, pending = [], passed = 0, skipped = 0;
 try {
-  assert(groups.length === needed.size, 'unknown qualification group: ' + selection);
-  const candidate = head();
-  console.log('Protean local qualification', candidate, process.platform, process.arch, '600s per group');
-  clean();
-  for (const [name, [command, ...args]] of groups) {
+  const candidate = git(source, 'rev-parse', '--verify', 'HEAD^{commit}');
+  clean(source);
+  env.PROTEAN_QUALIFICATION_COMMIT = candidate;
+  env.PROTEAN_QUALIFICATION_GIT_SOURCE = source;
+  const key = createHash('sha256').update(source).digest('hex');
+  const slots = join(globalCache, 'protean-qualification', key);
+  lease = acquireWorkspace(slots, 'run');
+  const directory = join(slots, 'checkout-' + lease.slot);
+  mkdirSync(directory, {recursive: true});
+  const work = checkout(directory, candidate);
+  const {commands, full} = inventory(work, lease.path);
+  pending = selection ? selected(commands, selection) : [...full];
+  console.log('Protean local qualification', candidate, process.platform, process.arch,
+    mac ? '600s shared' : '600s per group');
+  while (pending.length) {
+    const name = pending[0], [program, ...args] = commands.get(name).command;
     const start = performance.now();
-    const deadline = start + budget;
-    assert(!interruption, interruption);
+    const conditional = name === 'tigerstyle-integration' && !selection;
+    if (name === 'setup') seedArchives(work);
     console.log('Starting', name);
-    child = spawn(command, args, {env, detached: true, stdio: 'inherit'});
-    const timer = setTimeout(() => stop('deadline exceeded'), Math.max(0, deadline - performance.now()));
-    let result;
-    try {
-      result = await new Promise((resolve, reject) => {
-        child.once('error', reject);
-        child.once('close', (code, signal) => resolve({code, signal}));
-      });
-      if (result.code !== 0) stop(result.signal ?? 'exit ' + result.code);
-    } finally { clearTimeout(timer); child = undefined; }
-    const end = performance.now();
-    if (interruption || result.code !== 0 || end > deadline)
-      throw new Error(name + ' incomplete after ' + seconds(end - start) + ' (' +
-        (interruption ?? result.signal ?? (result.code || 'deadline exceeded')) + ')');
-    completed++;
-    console.log('Passed', name, seconds(end - start));
+    const code = await runQualificationCommand(program, args, {cwd: work, env, signal: controller.signal,
+      deadline: Math.min(deadline, start + budget), allowedExitCodes: conditional ? [0, 77] : [0]});
+    if (code === 77) { skipped++; console.log('Skipped', name, '(launcher inputs unchanged)'); }
+    else { passed++; console.log('Passed', name, seconds(performance.now() - start)); }
+    pending.shift();
   }
-  clean();
-  assert.equal(head(), candidate, 'candidate changed during qualification');
+  clean(work);
+  assert.equal(git(work, 'rev-parse', 'HEAD'), candidate, 'qualification checkout changed');
+  lease.release();
+  lease = undefined;
+  controller.signal.throwIfAborted();
+  assert(performance.now() < deadline, 'deadline exceeded');
   console.log(selection ? 'Selected group passed:' : 'Qualified', selection ?? candidate);
 } catch (error) {
   console.error(error.message);
-  console.error('Incomplete qualification.', 'Remaining groups:', groups.slice(completed).map(([name]) => name).join(', '));
+  console.error('Incomplete qualification. Remaining groups:', pending.join(', '));
   process.exitCode = 1;
 } finally {
-  rmSync(prefix, {recursive: true, force: true});
-  console.log('Completed', completed + '/' + groups.length, 'groups in', seconds(performance.now() - started));
+  lease?.release();
+  console.log('Passed', passed, 'groups, skipped', skipped, 'in', seconds(performance.now() - started));
 }

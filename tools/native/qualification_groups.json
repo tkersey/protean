@@ -1,0 +1,18 @@
+{
+  "adaptive": [
+    ["adaptive_controls.", "adaptive_reports.", "adaptive_recovery."],
+    ["projection_recovery."],
+    ["projection_failure_tests.", "projection_late_recovery."],
+    ["projection owner authenticates", "projection receipts preserve"],
+    ["projection required-current", "projection selection rechecks", "delegated projection binds"],
+    ["constructed successor rejects"],
+    ["delegated ordinary", "delegated projection answer"]
+  ],
+  "workspace": [
+    ["CTX-01"],
+    ["WORK-C07"],
+    ["BUILD-", "WORK-C03", "WORK-06", "WORK-08", "exposure carries", "workspace commands", "deep recursive workspace"],
+    ["WORK-01", "AUT-07", "OWN-02"],
+    ["collected history", "WORK-14", "delegated model interpretation"]
+  ]
+}

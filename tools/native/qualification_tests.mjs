@@ -105,7 +105,16 @@ try {
   }
   assert(partitions.every(indices => indices.length > 0), 'empty Zig test group');
   const selectedCount = selectedGroups.reduce((sum, group) => sum + partitions[group].length, 0);
-  const results = await Promise.allSettled(clients.map((value, index) => value.run(partitions[selectedGroups[index]], names)));
+  const queue = clients.entries();
+  const results = new Array(clients.length);
+  const width = process.platform === 'darwin' && process.env.PROTEAN_QUALIFICATION_COMMIT ? 4 : clients.length;
+  async function runGroups() {
+    for (const [index, value] of queue) {
+      const [result] = await Promise.allSettled([value.run(partitions[selectedGroups[index]], names)]);
+      results[index] = result;
+    }
+  }
+  await Promise.all(Array.from({length: Math.min(width, clients.length)}, runGroups));
   for (const [i, result] of results.entries()) if (result.status === 'rejected')
     process.stderr.write(`Zig test group ${selectedGroups[i] + 1}: ${result.reason}\n`);
   const passed = results.reduce((sum, result) => sum + (result.status === 'fulfilled' ? result.value : 0), 0);

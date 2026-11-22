@@ -29,7 +29,7 @@ if (operation === 'key') {
   const files = new Set(['LICENSE', 'build.zig', 'build_protean.zig', 'build_native.zig', 'build.zig.zon', 'tools/native/qualification_build.mjs']);
   for (const file of tracked) {
     if (file.startsWith('src/') || file.startsWith('runtime/native/') || file.startsWith('conformance/protean/') ||
-        (file.startsWith('tools/native/') && file.endsWith('.zig')) ||
+        (file.startsWith('tools/native/') && file.endsWith('.zig')) || file === 'tools/native/qualification_groups.json' ||
         ((profile === 'product' || profile.startsWith('owner')) && file.startsWith('examples/adaptive/'))) files.add(file);
   }
   const modules = new Set(['std', 'builtin', 'root', 'protean', 'contracts', 'protean_contracts', 'horos', 'horos_data', 'kosmos', 'protean_native', 'adaptive_report', 'adaptive_types', 'adaptive_environment', 'projection_example', 'native_asset_writer', 'native_c', 'native_options', 'hash_abi', 'environment', 'application_types', 'definition', 'construction', 'packaged_runtime', '_native_dependency_admission', '_protean_dependency_admission']);

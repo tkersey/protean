@@ -15,12 +15,30 @@ pub const sqlite_flags: []const []const u8 = &.{
 pub fn sqliteFlags(optimize: std.lang.Optimize) []const []const u8 {
     // Reduce optimization work on the amalgamation while retaining safe mode's
     // hardening and undefined-behavior traps. Other build modes keep their defaults.
-    return if (optimize == .safe) sqlite_flags ++ &[_][]const u8{"-O1"} else sqlite_flags;
+    return switch (optimize) {
+        .safe => sqlite_flags ++ &[_][]const u8{"-O1"},
+        .debug => sqlite_debug_flags,
+        else => sqlite_flags,
+    };
 }
 
 pub const shim_flags: []const []const u8 = &.{
     "-std=c99", "-ffile-compilation-dir=.", "-D_POSIX_C_SOURCE=200809L",
 };
+
+fn debugSourceFlags(comptime name: []const u8) [5][]const u8 {
+    return .{
+        "-Xclang",                       "-main-file-name", "-Xclang", "/protean/" ++ name,
+        "-fdebug-prefix-map=/protean/=",
+    };
+}
+
+const sqlite_debug_flags: []const []const u8 = sqlite_flags ++ debugSourceFlags("sqlite3.c");
+const shim_debug_flags: []const []const u8 = shim_flags ++ debugSourceFlags("native_c.c");
+
+pub fn shimFlags(optimize: std.lang.Optimize) []const []const u8 {
+    return if (optimize == .debug) shim_debug_flags else shim_flags;
+}
 
 pub const Assets = struct {
     image: std.Build.LazyPath,
@@ -199,7 +217,7 @@ fn createManifest(
     for ([_][]const u8{ "sqlite3.o", "native_c.o", "native_c.c", "native_c.h" }) |file| {
         manifest.addFileArg2(inputs.addCopyFile(modules.clang_inputs.path(b, file), file), .{});
     }
-    manifest.addArg(std.json.Stringify.valueAlloc(b.allocator, shim_flags, .{}) catch
+    manifest.addArg(std.json.Stringify.valueAlloc(b.allocator, shimFlags(optimize), .{}) catch
         @panic("out of memory"));
     return manifest_file;
 }

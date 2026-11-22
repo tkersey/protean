@@ -217,5 +217,6 @@ tools/evaluation/recurrence_entry.zig
 tools/evaluation/recurrence_fixture.zig
 tools/evaluation/recurrence_presentation.zig
 tools/native/build_entry.zig
+tools/native/clang.zig
 tools/native/dependencies.zig
 tools/native/emit.zig

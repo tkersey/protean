@@ -2,7 +2,8 @@
 import assert from 'node:assert/strict';
 import {mkdir, readFile, writeFile, appendFile, readdir, stat, realpath} from 'node:fs/promises';
 import {resolve, join, dirname} from 'node:path';
-import {spawn, spawnSync} from 'node:child_process';
+import {spawnSync} from 'node:child_process';
+import {spawnQualificationGroup} from '../native/qualification_process.mjs';
 import {createInterface} from 'node:readline';
 import {createHash} from 'node:crypto';
 import {isUtf8} from 'node:buffer';
@@ -1215,7 +1216,7 @@ function releaseRecurrenceDriver(driver) {
 
 export class RecurrenceDriver {
   constructor(binary, args) {
-    this.child = spawn(binary, args, {detached: true, stdio: ['pipe', 'pipe', 'pipe']});
+    this.child = spawnQualificationGroup(binary, args, {stdio: ['pipe', 'pipe', 'pipe']});
     retainRecurrenceDriver(this);
     this.pending = new Map();
     this.serial = 0;
