@@ -138,3 +138,23 @@ test('a helper registered under another time zone is still reported and reaped',
     rmSync(directory, {recursive: true, force: true});
   }
 });
+
+test('a registration is never observed without its start time', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'protean-registration-'));
+  try {
+    for (let round = 0; round < 20; round++) {
+      const child = spawnQualificationGroup('sleep', ['0'], {stdio: 'ignore'}, directory);
+      const path = join(directory, String(child.pid));
+      const until = performance.now() + 200;
+      while (performance.now() < until) {
+        let text;
+        try { text = readFileSync(path, 'utf8'); } catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+        assert.notEqual(text.trim(), '', 'empty registration for ' + child.pid);
+        break;
+      }
+      await once(child, 'close');
+    }
+  } finally {
+    rmSync(directory, {recursive: true, force: true});
+  }
+});

@@ -25,7 +25,8 @@ export function spawnQualificationGroup(command, args, options,
   if (!registration) return spawn(command, args, detached);
   const base = registration + '/' + prefix;
   // The registration records the group leader's start time, so a reused pid is never mistaken for it.
-  const child = spawn('/bin/sh', ['-c', 'TZ=UTC LC_ALL=C /bin/ps -o lstart= -p $$ > "$1$$" && test -s "$1$$" || exit 125; shift; exec "$@"',
+  // It appears complete or not at all; a sealed scope makes the rename fail before the command runs.
+  const child = spawn('/bin/sh', ['-c', 'TZ=UTC LC_ALL=C /bin/ps -o lstart= -p $$ > "$1$$.new" && test -s "$1$$.new" && mv "$1$$.new" "$1$$" || exit 125; shift; exec "$@"',
     'qualification', base, command, ...args], detached);
   if (child.pid) child.once('close', () => {
     const path = base + child.pid;
