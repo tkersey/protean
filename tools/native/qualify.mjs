@@ -52,10 +52,13 @@ const clean = cwd => assert.equal(git(cwd, 'status', '--porcelain', '--untracked
 
 function checkout(directory, candidate) {
   const work = join(directory, 'source');
-  if (!existsSync(join(work, '.git', 'HEAD'))) {
+  // Own every object: the source can be replaced at the same path between runs.
+  if (!existsSync(join(work, '.git', 'HEAD')) || existsSync(join(work, '.git', 'objects', 'info', 'alternates'))) {
     rmSync(work, {recursive: true, force: true});
-    git(directory, 'clone', '--quiet', '--no-checkout', '--shared', '--no-tags', '--template=', '--', source, work);
+    git(directory, '-c', 'init.defaultBranch=qualification', 'init', '--quiet', '--template=', '--', work);
   }
+  git(work, 'fetch', '--quiet', '--no-tags', '--', source, '+HEAD:refs/qualification/candidate');
+  assert.equal(git(work, 'rev-parse', 'refs/qualification/candidate'), candidate, 'source HEAD moved');
   // Committed bytes, not the caller's line-ending or filter configuration.
   mkdirSync(join(work, '.git', 'info'), {recursive: true});
   writeFileSync(join(work, '.git', 'info', 'attributes'), '* -text -eol -filter -ident\n');
