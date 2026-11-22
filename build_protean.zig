@@ -1499,7 +1499,6 @@ const BuildGraph = struct {
         clang.setCwd(s.b.path("."));
         const clang_checks = s.b.step("check-clang-inputs", "Check bundled Clang header changes");
         clang_checks.dependOn(&clang.step);
-        // Without native C there is no bundled-Clang build to witness or to guard.
         if (s.native_enabled) s.fast.dependOn(clang_checks);
 
         const qualify = nodeCommand(s.b);
@@ -1646,7 +1645,6 @@ fn nativeLibrary(
     const shim_sources = b.addWriteFiles();
     const shim = shim_sources.addCopyFile(b.path("runtime/native/native_c.c"), "native_c.c");
     const header = shim_sources.addCopyFile(b.path("runtime/native/native_c.h"), "native_c.h");
-    // Debug builds compile staged copies; record those exact bytes.
     const shim_stage = if (optimize == .debug)
         clang.stageSources(host_tool, shim_sources, optimize, "native_c")
     else

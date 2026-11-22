@@ -1,6 +1,4 @@
 name: macOS fallback qualification
-# Dispatched by the fallback workflow when hosted runners never start a run.
-# It reports its own check, so it never stands in for the hosted `native` gate.
 on:
   workflow_dispatch:
 permissions:
@@ -26,7 +24,6 @@ jobs:
           use-cache: false
       - name: Qualify the essential macOS set
         run: |
-          # The runner provides a persistent cache that setup-zig does not know about.
           if [ -n "${PROTEAN_CI_CACHE:-}" ]; then
             export ZIG_GLOBAL_CACHE_DIR="$PROTEAN_CI_CACHE/zig-global" ZIG_LOCAL_CACHE_DIR="$PROTEAN_CI_CACHE/zig-local"
           fi

@@ -106,7 +106,6 @@ test('a closed qualification scope refuses late workers and reaps helpers after 
 test('a registration whose pid now leads an unrelated group is neither reported nor signalled', async () => {
   const unrelated = spawn('sleep', ['30'], {detached: true, stdio: 'ignore'});
   try {
-    // The command forges a registration naming the unrelated group with another start time.
     const script = 'require("node:fs").writeFileSync(process.env.PROTEAN_QUALIFICATION_GROUPS + "/" + process.argv[1], "Thu Jan  1 00:00:00 1970\\n")';
     await runQualificationCommand(process.execPath, ['-e', script, String(unrelated.pid)],
       {deadline: performance.now() + 10000, cwd: tmpdir(), stdio: 'ignore'});

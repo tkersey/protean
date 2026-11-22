@@ -45,17 +45,14 @@ function sharedDeadline() {
   return started + budget - age;
 }
 const deadline = sharedDeadline();
-// Elapsed time is reported from the same origin as the deadline: the zig build invocation.
 const origin = deadline - budget;
 const identityKeys = ['program_sha256', 'application_assets_sha256', 'dependencies', 'compiler', 'target',
   'artifact_zig_backend'];
-// fsmonitor-valid index bits would let status skip files; read the working tree directly.
 const git = (cwd, ...args) => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', cwd, ...args],
   {env, encoding: 'utf8', timeout: Math.max(1, Math.ceil(Math.min(budget, deadline - performance.now())))}).trimEnd();
 const clean = cwd => {
   assert.equal(git(cwd, 'status', '--porcelain', '--untracked-files=all',
     '--ignore-submodules=none'), '', 'qualification requires the complete committed candidate');
-  // Status trusts assume-unchanged and skip-worktree entries; their edits would still run.
   const flagged = git(cwd, 'ls-files', '-v').split('\n').filter(line => /^([a-z]|S) /.test(line));
   assert.equal(flagged.length, 0, 'index flags hide working-tree edits: ' + flagged.slice(0, 3).join(', '));
 };
@@ -63,18 +60,14 @@ const clean = cwd => {
 function checkout(directory, candidate) {
   const work = join(directory, 'source');
   const prepare = () => {
-    // Own every object: the source can be replaced at the same path between runs.
     if (!existsSync(join(work, '.git', 'HEAD')) || existsSync(join(work, '.git', 'objects', 'info', 'alternates'))) {
       rmSync(work, {recursive: true, force: true});
       git(directory, '-c', 'init.defaultBranch=qualification', 'init', '--quiet', '--template=', '--', work);
     }
     git(work, 'fetch', '--quiet', '--no-tags', '--update-shallow', '--', source, '+HEAD:refs/qualification/candidate');
     assert.equal(git(work, 'rev-parse', 'refs/qualification/candidate'), candidate, 'source HEAD moved');
-    // Committed bytes, not the caller's line-ending or filter configuration.
     mkdirSync(join(work, '.git', 'info'), {recursive: true});
     writeFileSync(join(work, '.git', 'info', 'attributes'), '* -text -eol -filter -ident\n');
-    // Ignored state is disposable here: stale or partial inputs must not outlive their run.
-    // Zig's package directory stays, so offline runs keep their fetched packages.
     git(work, 'clean', '-ffdx', '-e', '/zig-pkg/');
     git(work, 'checkout', '--quiet', '--force', '--detach', candidate);
     assert.equal(git(work, 'rev-parse', 'HEAD'), candidate);
@@ -82,7 +75,6 @@ function checkout(directory, candidate) {
   };
   try { prepare(); }
   catch (error) {
-    // An interrupted run can leave locks or partial state; rebuild the slot once.
     if (error.message === 'source HEAD moved' || error.signal) throw error;
     console.warn('Rebuilding qualification checkout:', error.message.split('\n')[0]);
     rmSync(work, {recursive: true, force: true});
@@ -99,7 +91,6 @@ function seedArchives(work) {
     native.sqlite.archive.root + '.zip']) {
     const origin = join(source, inputs, file), target = join(work, inputs, file);
     if (existsSync(target) || !existsSync(origin)) continue;
-    // A seed interrupted mid-copy must not leave a partial archive at the final path.
     const partial = target + '.partial-' + process.pid;
     copyFileSync(origin, partial);
     renameSync(partial, target);
@@ -110,7 +101,6 @@ function inventory(work, prefix) {
   const directPrefix = join(prefix, 'direct');
   const direct = ['-Dtarget=x86_64-linux-musl', '-Dnative-direct=true'];
   const offline = network === 'offline' ? ['--system', join(work, 'zig-pkg')] : [];
-  // The largest compile steps peak near 3 GiB.
   const jobs = Math.max(1, Math.min(availableParallelism(), Math.floor(totalmem() / 3 / 2 ** 30)));
   const buildIn = (dest, ...targets) => [zig, 'build', ...targets, '-Doptimize=safe', '-j' + jobs, '--prefix',
     dest, '--cache-dir', localCache, '--summary', 'all', ...offline];
@@ -161,7 +151,6 @@ if (listing) {
 }
 
 let lease, pending = [], passed = 0, skipped = 0;
-// Groups this run intends to execute, named even if it stops before checkout.
 let planned, invalidSelection;
 try {
   const {commands, full} = inventory(source, '');
@@ -169,7 +158,6 @@ try {
 } catch (error) { invalidSelection = error; }
 const ran = new Set();
 try {
-  // Reject an unknown group before taking a slot or checking anything out.
   if (invalidSelection) throw invalidSelection;
   const candidate = git(source, 'rev-parse', '--verify', 'HEAD^{commit}');
   clean(source);
@@ -201,7 +189,6 @@ try {
   }
   const identityPath = process.env.PROTEAN_PRODUCT_IDENTITY;
   if (identityPath && (ran.has('product') || ran.has('native-build-and-tests'))) {
-    // CI compares this product's identity with the independently built downstream consumer.
     const manifest = JSON.parse(execFileSync(join(lease.path, 'bin/protean'), ['describe-build'], {encoding: 'utf8'}));
     writeFileSync(identityPath, JSON.stringify(Object.fromEntries(identityKeys.map(key => [key, manifest[key]]))));
   }

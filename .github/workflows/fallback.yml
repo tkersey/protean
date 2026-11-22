@@ -22,7 +22,6 @@ jobs:
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
         run: |
-          # Run the macOS fallback only when no hosted job started; its own check never replaces the hosted one.
           jobs=$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" \
             --jq '"\(.total_count) \([.jobs[] | select((.runner_id // 0) != 0 or (.steps | length) > 0)] | length)"')
           read -r total started <<<"$jobs"

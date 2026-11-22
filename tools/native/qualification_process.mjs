@@ -6,17 +6,14 @@ import {setTimeout as delay} from 'node:timers/promises';
 
 function signalGroup(pid, signal) {
   try { process.kill(-pid, signal); return true; }
-  // A group this user cannot signal is not one this qualification spawned.
   catch (error) { if (error.code === 'ESRCH' || error.code === 'EPERM') return false; throw error; }
 }
 
-// lstart text depends on time zone and locale; registration and comparison pin both.
 const psEnvironment = {PATH: '/usr/bin:/bin', TZ: 'UTC', LC_ALL: 'C'};
 
-// Start time of a live process, or '' once it has exited.
 function started(pid) {
   try { return execFileSync('/bin/ps', ['-o', 'lstart=', '-p', String(pid)], {encoding: 'utf8', env: psEnvironment}).trim(); }
-  catch { return ''; }
+  catch (error) { if (error.status === 1 && !String(error.stdout ?? '').trim()) return ''; throw error; }
 }
 
 export function spawnQualificationGroup(command, args, options,
@@ -24,8 +21,6 @@ export function spawnQualificationGroup(command, args, options,
   const detached = {...options, detached: true};
   if (!registration) return spawn(command, args, detached);
   const base = registration + '/' + prefix;
-  // The registration records the group leader's start time, so a reused pid is never mistaken for it.
-  // It appears complete or not at all; a sealed scope makes the rename fail before the command runs.
   const child = spawn('/bin/sh', ['-c', 'TZ=UTC LC_ALL=C /bin/ps -o lstart= -p $$ > "$1$$.new" && test -s "$1$$.new" && /bin/mv "$1$$.new" "$1$$" || { echo "qualification: cannot register process group $$ in $1" >&2; exit 125; }; shift; exec "$@"',
     'qualification', base, command, ...args], detached);
   if (child.pid) child.once('close', () => {
@@ -41,7 +36,6 @@ export function spawnQualificationGroup(command, args, options,
 }
 
 function registrations(directory) {
-  // Nested scopes are sealed or removed concurrently; a vanished entry is simply gone.
   const found = [];
   let entries;
   try { entries = readdirSync(directory, {withFileTypes: true}); }
@@ -66,8 +60,6 @@ function liveGroups(root, directory, supervisorsOnly = false) {
   }
   return [...groups].filter(([pid, recorded]) => {
     if (!Number.isSafeInteger(pid) || pid <= 1 || !signalGroup(pid, 0)) return false;
-    // A pid is not reused while its group exists, so a departed leader still identifies our group.
-    // A live leader must match the recorded start time; without one it is never assumed to be ours.
     const current = started(pid);
     return current === '' || current === recorded;
   }).map(([pid]) => pid);
@@ -109,7 +101,6 @@ export async function runQualificationCommand(command, args, {
   try {
     child = spawnQualificationGroup(command, args, {cwd, stdio,
       env: {...env, PROTEAN_QUALIFICATION_GROUPS: directory}}, inherited ?? null, 'supervisor-');
-    // The root group is identified like every registered group once its leader has exited.
     if (child.pid) root = {pid: child.pid, started: started(child.pid)};
     const result = await new Promise((resolve, reject) => {
       child.once('error', reject);
