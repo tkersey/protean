@@ -429,8 +429,8 @@ default executable:
 node tools/native/install.mjs zig-out/bin/protean "$HOME/.local"
 ```
 
-Qualification archives include the same helper as `install.mjs`; from an
-extracted archive run `node install.mjs ./protean "$HOME/.local"`.
+CI does not publish product archives; install an executable you built from a
+checkout of the qualified commit.
 
 Its JSON output names `previous` and `current` executable paths. Keep the previous
 path with the corresponding state-directory location, and use it for the old

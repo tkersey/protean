@@ -51,8 +51,13 @@ const identityKeys = ['program_sha256', 'application_assets_sha256', 'dependenci
   'artifact_zig_backend'];
 const git = (cwd, ...args) => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-C', cwd, ...args],
   {env, encoding: 'utf8', timeout: Math.max(1, Math.ceil(Math.min(budget, deadline - performance.now())))}).trimEnd();
-const clean = cwd => assert.equal(git(cwd, 'status', '--porcelain', '--untracked-files=all',
-  '--ignore-submodules=none'), '', 'qualification requires the complete committed candidate');
+const clean = cwd => {
+  assert.equal(git(cwd, 'status', '--porcelain', '--untracked-files=all',
+    '--ignore-submodules=none'), '', 'qualification requires the complete committed candidate');
+  // Status trusts assume-unchanged and skip-worktree entries; their edits would still run.
+  const flagged = git(cwd, 'ls-files', '-v').split('\n').filter(line => /^([a-z]|S) /.test(line));
+  assert.equal(flagged.length, 0, 'index flags hide working-tree edits: ' + flagged.slice(0, 3).join(', '));
+};
 
 function checkout(directory, candidate) {
   const work = join(directory, 'source');
@@ -155,6 +160,12 @@ if (listing) {
 }
 
 let lease, pending = [], passed = 0, skipped = 0;
+// Groups this run intends to execute, named even if it stops before checkout.
+let planned;
+try {
+  const {commands, full} = inventory(source, '');
+  planned = selection ? selected(commands, selection) : full;
+} catch { planned = undefined; } // An invalid selection is reported by the run itself.
 const ran = new Set();
 try {
   const candidate = git(source, 'rev-parse', '--verify', 'HEAD^{commit}');
@@ -169,6 +180,7 @@ try {
   const work = checkout(directory, candidate);
   const {commands, full} = inventory(work, lease.path);
   pending = selection ? selected(commands, selection) : [...full];
+  planned = undefined;
   console.log('Protean local qualification', candidate, process.platform, process.arch,
     '600s shared');
   while (pending.length) {
@@ -199,7 +211,7 @@ try {
   console.log(selection ? 'Selected groups passed:' : 'Qualified', selection?.join(', ') ?? candidate);
 } catch (error) {
   console.error(error.message);
-  console.error('Incomplete qualification. Remaining groups:', pending.join(', '));
+  console.error('Incomplete qualification. Remaining groups:', (planned ?? pending).join(', '));
   process.exitCode = 1;
 } finally {
   lease?.release();
