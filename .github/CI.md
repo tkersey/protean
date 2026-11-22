@@ -35,22 +35,22 @@ the product. Full local qualification makes the same comparison within one run.
 
 When none of a hosted run's jobs received a runner or ran a step, the
 [fallback workflow](workflows/fallback.yml) runs on the Mac's self-hosted macOS
-runner. If the branch still points at that run's commit, it dispatches the same
-workflow with `mac_backup=true`. It ignores manual dispatches and runs from other
-repositories. `workflow_run` uses the workflow from the default branch. A manual
-dispatch with `mac_backup=true` can cover a hosted queue that never starts.
+runner. If the branch still points at that run's commit, it dispatches the
+[macOS fallback workflow](workflows/macos.yml). It ignores manual dispatches and
+runs from other repositories. `workflow_run` uses the workflow from the default
+branch. Dispatch the macOS workflow manually to cover a hosted queue that never
+starts.
 
-A `mac_backup` run replaces TigerStyle and the Linux lanes with one job that runs
-the complete local macOS `zig build qualify` on the self-hosted runner: TigerStyle
-and its launcher fixtures, authoring and the bundled-Clang witness, the LLVM
-product with its smoke and placement checks, and the downstream consumer with
-its identity comparison. Its terminal check is named `macOS fallback`, not
-`native`, and requires the job to finish within 600 seconds. It never replaces
-or hides a hosted result. It does not exercise Linux x86-64 or the direct
-backend; the next hosted run does. The runner keeps a persistent cache directory,
-advertised as `PROTEAN_CI_CACHE`, for Zig's global and local caches. It executes
-the dispatched commit directly on the Mac as its owner. Its first run with an
-empty cache can exceed ten minutes.
+The macOS workflow has one job, `macOS fallback`, which runs the complete local
+macOS `zig build qualify` on the self-hosted runner: TigerStyle and its launcher
+fixtures, authoring and the bundled-Clang witness, the LLVM product with its smoke
+and placement checks, and the downstream consumer with its identity comparison.
+It must finish within 600 seconds of its trigger. It is a separate workflow and
+check, so it never replaces or hides a hosted result. It does not exercise Linux
+x86-64 or the direct backend; the next hosted run does. The runner keeps a
+persistent cache directory, advertised as `PROTEAN_CI_CACHE`, for Zig's global
+and local caches. It executes the dispatched commit directly on the Mac as its
+owner. Its first run with an empty cache can exceed ten minutes.
 
 A Linux container under Rosetta could not fit the Linux lanes in 600 seconds:
 its emulated compiler took 422 seconds to build the product alone.

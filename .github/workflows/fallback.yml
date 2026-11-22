@@ -36,4 +36,4 @@ jobs:
             exit 0
           fi
           echo "None of $total hosted jobs started; dispatching macOS qualification of $HEAD_SHA."
-          gh workflow run zig.yml --repo "$REPO" --ref "$HEAD_BRANCH" -f mac_backup=true
+          gh workflow run macos.yml --repo "$REPO" --ref "$HEAD_BRANCH"
