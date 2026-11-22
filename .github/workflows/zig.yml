@@ -18,7 +18,8 @@ permissions:
   actions: read
 jobs:
   tiger-style:
-    name: TigerStyle
+    # A fallback run skips this job; a distinct name keeps its skipped check from superseding the hosted result.
+    name: ${{ github.event_name == 'workflow_dispatch' && inputs.mac_backup && 'TigerStyle (hosted only)' || 'TigerStyle' }}
     if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.mac_backup) }}
     runs-on: ubuntu-22.04
     timeout-minutes: 10

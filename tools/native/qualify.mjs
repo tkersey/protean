@@ -49,7 +49,8 @@ const deadline = sharedDeadline();
 const origin = deadline - budget;
 const identityKeys = ['program_sha256', 'application_assets_sha256', 'dependencies', 'compiler', 'target',
   'artifact_zig_backend'];
-const git = (cwd, ...args) => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-C', cwd, ...args],
+// fsmonitor-valid index bits would let status skip files; read the working tree directly.
+const git = (cwd, ...args) => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', cwd, ...args],
   {env, encoding: 'utf8', timeout: Math.max(1, Math.ceil(Math.min(budget, deadline - performance.now())))}).trimEnd();
 const clean = cwd => {
   assert.equal(git(cwd, 'status', '--porcelain', '--untracked-files=all',
