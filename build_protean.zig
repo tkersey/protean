@@ -207,6 +207,10 @@ const BuildGraph = struct {
         if (product_supported) {
             s.productBuild();
             s.recurrenceDriver();
+            if (s.native_direct) s.directHashCheck(s.b.step(
+                "check-native-direct-hash",
+                "Check the direct x86-64 SHA-256 fallback",
+            ));
             s.nativeSmoke();
             s.runtimeDiagnostics();
             s.httpsConsumer();
@@ -1641,10 +1645,13 @@ fn nativeLibrary(
     const shim_sources = b.addWriteFiles();
     const shim = shim_sources.addCopyFile(b.path("runtime/native/native_c.c"), "native_c.c");
     const header = shim_sources.addCopyFile(b.path("runtime/native/native_c.h"), "native_c.h");
-    const shim_source = if (optimize == .debug)
-        clang.stageSources(host_tool, shim_sources, optimize, "native_c").path(b, "native_c.c")
+    // Debug builds compile staged copies; record those exact bytes.
+    const shim_stage = if (optimize == .debug)
+        clang.stageSources(host_tool, shim_sources, optimize, "native_c")
     else
-        shim;
+        null;
+    const shim_source = if (shim_stage) |stage| stage.path(b, "native_c.c") else shim;
+    const shim_header = if (shim_stage) |stage| stage.path(b, "native_c.h") else header;
     const config = clang.configuration(host_tool, target);
     const sql_obj = clang.object(
         config,
@@ -1665,8 +1672,8 @@ fn nativeLibrary(
         "native_c",
     );
     const inputs = b.addWriteFiles();
-    _ = inputs.addCopyFile(shim, "native_c.c");
-    _ = inputs.addCopyFile(header, "native_c.h");
+    _ = inputs.addCopyFile(shim_source, "native_c.c");
+    _ = inputs.addCopyFile(shim_header, "native_c.h");
     const module = b.createModule(.{
         .root_source_file = b.path("runtime/native/hash.zig"),
         .target = target,

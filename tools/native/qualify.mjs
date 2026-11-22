@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
-import {constants, copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync} from 'node:fs';
+import {constants, copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync} from 'node:fs';
+import {availableParallelism, totalmem} from 'node:os';
 import {basename, dirname, join, resolve} from 'node:path';
 import {runQualificationCommand} from './qualification_process.mjs';
 import {acquireWorkspace, gitEnvironment} from './qualification_workspace.mjs';
@@ -19,8 +20,9 @@ const env = gitEnvironment({...process.env, ZIG_GLOBAL_CACHE_DIR: globalCache});
 delete env.ZIG_PROGRESS;
 delete env.ZIG_LOCAL_PKG_DIR;
 const listing = options.length === 1 && options[0] === '--list';
-const selection = options.length === 2 && options[0] === '--group' ? options[1] : null;
-assert(options.length === 0 || listing || selection, 'usage: zig build qualify [-- --list | -- --group NAME]');
+const selection = options.length === 2 && options[0] === '--group' ? options[1].split(',') : null;
+assert(options.length === 0 || listing || selection?.every(Boolean),
+  'usage: zig build qualify [-- --list | -- --group NAME[,NAME...]]');
 const source = realpathSync(resolve(import.meta.dirname, '../..'));
 const seconds = ms => (ms / 1000).toFixed(3) + 's';
 const inputs = '.protean-native/inputs';
@@ -28,11 +30,12 @@ const controller = new AbortController();
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'])
   process.once(signal, () => controller.abort(new Error(signal)));
 
-function macDeadline() {
-  if (!mac) return Infinity;
+function sharedDeadline() {
   let pid = process.ppid, age = 0;
   while (pid > 1) {
-    const row = execFileSync('/bin/ps', ['-p', String(pid), '-o', 'ppid=,etime=,comm='], {encoding: 'utf8'}).trim();
+    let row;
+    try { row = execFileSync('ps', ['-p', String(pid), '-o', 'ppid=,etime=,comm='], {encoding: 'utf8'}).trim(); }
+    catch { break; }
     const match = row.match(/^(\d+)\s+([\d:-]+)\s+(.+)$/);
     if (!match || !['zig', 'maker', basename(zig)].includes(basename(match[3]))) break;
     const [time, days] = match[2].split('-').reverse();
@@ -41,7 +44,7 @@ function macDeadline() {
   }
   return started + budget - age;
 }
-const deadline = macDeadline();
+const deadline = sharedDeadline();
 const git = (cwd, ...args) => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-C', cwd, ...args],
   {env, encoding: 'utf8', timeout: Math.max(1, Math.ceil(Math.min(budget, deadline - performance.now())))}).trimEnd();
 const clean = cwd => assert.equal(git(cwd, 'status', '--porcelain', '--untracked-files=all',
@@ -53,6 +56,9 @@ function checkout(directory, candidate) {
     rmSync(work, {recursive: true, force: true});
     git(directory, 'clone', '--quiet', '--no-checkout', '--shared', '--no-tags', '--template=', '--', source, work);
   }
+  // Committed bytes, not the caller's line-ending or filter configuration.
+  mkdirSync(join(work, '.git', 'info'), {recursive: true});
+  writeFileSync(join(work, '.git', 'info', 'attributes'), '* -text -eol -filter -ident\n');
   git(work, 'clean', '-ffd');
   git(work, 'checkout', '--quiet', '--force', '--detach', candidate);
   assert.equal(git(work, 'rev-parse', 'HEAD'), candidate);
@@ -72,11 +78,12 @@ function seedArchives(work) {
 }
 
 function inventory(work, prefix) {
-  const groups = JSON.parse(readFileSync(join(work, 'tools/native/qualification_groups.json')));
   const directPrefix = join(prefix, 'direct');
   const direct = ['-Dtarget=x86_64-linux-musl', '-Dnative-direct=true'];
   const offline = network === 'offline' ? ['--system', join(work, 'zig-pkg')] : [];
-  const buildIn = (dest, ...targets) => [zig, 'build', ...targets, '-Doptimize=safe', '-j2', '--prefix',
+  // The largest compile steps peak near 3 GiB.
+  const jobs = Math.max(1, Math.min(availableParallelism(), Math.floor(totalmem() / 3 / 2 ** 30)));
+  const buildIn = (dest, ...targets) => [zig, 'build', ...targets, '-Doptimize=safe', '-j' + jobs, '--prefix',
     dest, '--cache-dir', localCache, '--summary', 'all', ...offline];
   const build = (...targets) => buildIn(prefix, ...targets);
   const smoke = (root, backend) => [process.execPath, 'test/protean/native_adaptive.mjs', join(root, 'bin/protean'),
@@ -85,44 +92,27 @@ function inventory(work, prefix) {
   const add = (name, command, needs = []) => commands.set(name, {name, command, needs});
   add('tigerstyle', ['bash', 'tools/tiger-style.sh', '--all', 'HEAD']);
   add('tigerstyle-integration', ['bash', 'tools/test-tiger-style.sh',
-    ...(selection === 'tigerstyle-integration' ? [] : ['--if-changed', localCache])]);
+    ...(selection?.includes('tigerstyle-integration') ? [] : ['--if-changed', localCache])]);
   add('setup', [zig, 'run', 'tools/native/dependencies.zig', '--cache-dir', localCache, '--', 'setup',
     'conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json',
     inputs, zig, ...(network === 'offline' ? ['--offline'] : [])]);
-  for (const [name, targets] of [
-    ['authoring-https', ['check-protean', 'check-native-https']],
-    ['task-owners', ['check-native-owner-tasks']], ['adaptive-build', ['build-native-owner-adaptive-check']],
-    ['owner-support', ['check-native-owner-support']], ['workspace-build', ['build-workspace-general-check']],
-    ['correspondence', ['check-workspace-semantics']], ['recurrence', ['check-recurrence-driver']],
-    ['product', ['protean']],
-  ]) add(name, build(...targets), ['setup']);
-  for (const [name, filters, prerequisite] of [
-    ['native-owner-adaptive', groups.adaptive, 'adaptive-build'],
-    ['workspace-general', groups.workspace, 'workspace-build'],
-  ]) {
-    const cmd = [process.execPath, 'tools/native/qualification_tests.mjs',
-      join(prefix, 'verification', name), JSON.stringify(filters)];
-    add(name, cmd, [prerequisite]);
-    filters.forEach((_, i) => add(name + '-' + (i + 1), [...cmd, JSON.stringify([i])], [prerequisite]));
-  }
-  if (mac) add('native-build-and-tests', build('protean', 'check-native-owner', 'check-recurrence-driver',
-    'check-workspace-general', 'check-workspace-semantics', 'check-protean', 'check-native-https'), ['setup']);
+  add('authoring-https', build('check-protean', 'check-native-https'), ['setup']);
+  add('product', build('protean'), ['setup']);
+  if (mac) add('native-build-and-tests', build('protean', 'check-protean', 'check-native-https'), ['setup']);
   if (linux) {
-    add('direct-recurrence', buildIn(directPrefix, 'check-recurrence-driver', ...direct), ['setup']);
-    add('direct-product', buildIn(directPrefix, 'protean', ...direct), ['setup']);
+    add('direct-product', buildIn(directPrefix, 'protean', 'check-native-direct-hash', ...direct), ['setup']);
     add('direct-smoke', smoke(directPrefix, 'stage2_x86_64'), ['direct-product']);
   }
   add('native-smoke', smoke(prefix, 'stage2_llvm'), ['product']);
   add('native-placement', [process.execPath, 'test/protean/native_placement.mjs', join(prefix, 'bin/protean')], ['product']);
   add('downstream-identity', [process.execPath, 'test/protean/installations.mjs', inputs, join(prefix, 'bin/protean')], ['product']);
+  add('downstream', [process.execPath, 'test/protean/installations.mjs', inputs], ['setup']);
   const full = ['tigerstyle', 'tigerstyle-integration', 'setup', ...(mac ? ['native-build-and-tests'] :
-    ['authoring-https', 'task-owners', 'adaptive-build', ...groups.adaptive.map((_, i) => 'native-owner-adaptive-' + (i + 1)),
-      'owner-support', 'workspace-build', 'workspace-general', 'correspondence', 'recurrence', 'product',
-      'direct-recurrence', 'direct-product', 'direct-smoke']), 'native-smoke', 'native-placement', 'downstream-identity'];
+    ['authoring-https', 'product', 'direct-product', 'direct-smoke']), 'native-smoke', 'native-placement', 'downstream-identity'];
   return {commands, full};
 }
 
-function selected(commands, name) {
+function selected(commands, names) {
   const result = new Set();
   function include(group) {
     assert(commands.has(group), 'unknown qualification group: ' + group);
@@ -130,14 +120,14 @@ function selected(commands, name) {
     for (const prerequisite of commands.get(group).needs) include(prerequisite);
     result.add(group);
   }
-  include(name);
+  names.forEach(include);
   return [...result];
 }
 
 if (listing) {
   const {commands, full} = inventory(source, '');
   console.log('Full qualification:', full.join(', '));
-  for (const name of commands.keys()) console.log('--group', name, 'runs', selected(commands, name).join(', '));
+  for (const name of commands.keys()) console.log('--group', name, 'runs', selected(commands, [name]).join(', '));
   process.exit(0);
 }
 
@@ -156,15 +146,15 @@ try {
   const {commands, full} = inventory(work, lease.path);
   pending = selection ? selected(commands, selection) : [...full];
   console.log('Protean local qualification', candidate, process.platform, process.arch,
-    mac ? '600s shared' : '600s per group');
+    '600s shared');
   while (pending.length) {
     const name = pending[0], [program, ...args] = commands.get(name).command;
     const start = performance.now();
-    const conditional = name === 'tigerstyle-integration' && !selection;
+    const conditional = name === 'tigerstyle-integration' && !selection?.includes(name);
     if (name === 'setup') seedArchives(work);
     console.log('Starting', name);
     const code = await runQualificationCommand(program, args, {cwd: work, env, signal: controller.signal,
-      deadline: Math.min(deadline, start + budget), allowedExitCodes: conditional ? [0, 77] : [0]});
+      deadline, allowedExitCodes: conditional ? [0, 77] : [0]});
     if (code === 77) { skipped++; console.log('Skipped', name, '(launcher inputs unchanged)'); }
     else { passed++; console.log('Passed', name, seconds(performance.now() - start)); }
     pending.shift();

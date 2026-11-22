@@ -88,7 +88,7 @@ async function verify() {
   const objects = join(scratch, 'objects.git');
   git('clone', '--template=', '--quiet', '--bare', '--shared', '--no-tags', '--', root, objects);
   mkdirSync(join(objects, 'info'), {recursive: true});
-  writeFileSync(join(objects, 'info/attributes'), '* -export-ignore -export-subst\n');
+  writeFileSync(join(objects, 'info/attributes'), '* -export-ignore -export-subst -text -eol -filter -ident\n');
   const archive = join(scratch, 'candidate.tar');
   git('--git-dir', objects, '-c', 'tar.umask=0002', 'archive', '--format=tar', '--prefix=source/', '--output=' + archive, commit);
 

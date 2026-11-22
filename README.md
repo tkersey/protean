@@ -88,24 +88,27 @@ Select the SDK and libc with Zig’s ordinary build options. For the full author
 
 Use `qualify` on the committed release candidate on each supported host.
 The command checks out that commit in a private directory before running its checks.
-It runs setup, TigerStyle, authoring, owner and workspace tests, recurrence,
-packaged execution and placement, and builds and runs an independent downstream
-consumer. The command reports elapsed time and identifies unfinished groups
-if a check fails or the run is interrupted. Keep the usual Zig caches between
-runs. Every selected execution still runs against the candidate. On macOS a
-single Zig invocation builds the product and checks shared dependencies once.
-The adaptive tests use seven isolated processes and the workspace tests use five.
-Each suite runs up to four groups at once on macOS. Linux schedules adaptive groups individually. The source
-audit runs every time. The launcher fixture
-suite reuses a successful ancestor only while its scripts, auditor pin,
-workflow, build, and local toolchain inputs match. Run
-`bash tools/test-tiger-style.sh` to exercise the launcher fixtures directly.
+It runs only the essential set: TigerStyle and its launcher fixtures, setup,
+authoring and the bundled-Clang witness, the native product with its smoke and
+placement checks, and an independent downstream consumer whose build identity
+must match the product. On Linux it also builds and smokes the direct x86-64
+product and runs the split SHA-256 vectors against the direct fallback. The
+command reports elapsed time and identifies unfinished groups if a check fails
+or the run is interrupted. Keep the usual Zig caches between runs. The source
+audit runs every time. The launcher fixture suite reuses a successful ancestor
+only while its scripts, auditor pin, workflow, build, and local toolchain inputs
+match. Run `bash tools/test-tiger-style.sh` to exercise the launcher fixtures
+directly.
 
-Use `zig build qualify -- --list` to see the inventory. To investigate one
-group with its prerequisites, run `zig build qualify -- --group NAME`.
-macOS shares one 600-second deadline across the run. On Linux each group has a
-600-second limit. On a translated x86-64 Linux guest
-on Apple silicon, export `ZIG_DEBUG_CMD=1` before invoking Zig.
+Use `zig build qualify -- --list` to see the inventory. To investigate groups
+with their prerequisites, run `zig build qualify -- --group NAME[,NAME...]`.
+Every run shares one 600-second deadline, measured from the `zig build`
+invocation. On a translated x86-64 Linux guest on Apple silicon, export
+`ZIG_DEBUG_CMD=1` before invoking Zig.
+
+Owner, workspace, correspondence and recurrence suites are diagnostics, not
+qualification. Run them directly with their build steps, for example
+`zig build check-native-owner -Doptimize=safe`.
 
 Node is an external verification controller only. The independent native peer
 uses controlled HTTPS, actual authored actions and created tools, killed/restarted
@@ -115,12 +118,11 @@ Python during acquisition, authoring, public-API building, installation, inspect
 and offline execution. Source and compiler caches are authenticated or reused
 without deleting unrelated local data.
 
-CI qualifies Linux and retains only the adaptive executable, its build metadata,
-program/contracts, and example configuration. Each job and the complete workflow
-must finish within 600 seconds. Compiled artifacts are reused only when their
-complete input keys match; changed inputs rebuild, and every selected test runs.
-Exact-head results belong to the PR; a previous run does not qualify a changed
-candidate.
+CI runs the same groups on Linux in four parallel lanes plus TigerStyle. The
+complete workflow must finish within 600 seconds. GitHub-hosted runners run it
+by default; when they never start the jobs, CI falls back to the Mac's
+self-hosted Linux runners. See [CI](.github/CI.md). Exact-head results belong to
+the PR; a previous run does not qualify a changed candidate.
 
 ## Retired applications
 

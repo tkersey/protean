@@ -7,7 +7,7 @@ expected=$(mktemp "${TMPDIR:-/tmp}/protean-zig-paths-expected.XXXXXX")
 trap 'rm -f "$observed" "$expected"' EXIT
 
 cd "$repo_root"
-rg --files -g '*.zig' -g '!zig-cache/**' -g '!zig-out/**' -g '!zig-pkg/**' | sort >"$observed"
+rg --files -g '*.zig' -g '!zig-cache/**' -g '!zig-out/**' -g '!zig-pkg/**' | LC_ALL=C sort >"$observed"
 if [ -e .git ]; then
     cp repo_zig_paths.txt "$expected"
 else

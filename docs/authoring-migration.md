@@ -243,8 +243,8 @@ ordered control receipts, tool-authorization cases and protocol/signal
 cancellation. Its deployment receipt records 37 traced executions in private
 user/mount/PID namespaces without a live provider.
 
-Historical retention is a separate `retained-runtime` diagnostic using
-authenticated product archives and `workspace_runtime_retention.mjs`. It retains
+Historical retention is a local diagnostic: run
+`workspace_runtime_retention.mjs` with a baseline and a candidate executable. It retains
 the original executable, frozen question/profile, captured source and task
 namespace while installing the successor into a separate namespace. The existing
 controlled loopback HTTPS provider asks first, then reads source evidence and
