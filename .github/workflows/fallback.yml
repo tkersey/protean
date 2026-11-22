@@ -9,10 +9,10 @@ permissions:
 jobs:
   dispatch:
     if: ${{ github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.event != 'workflow_dispatch' }}
-    runs-on: [self-hosted, linux, x64]
+    runs-on: [self-hosted, macOS, ARM64]
     timeout-minutes: 5
     steps:
-      - name: Re-run on the Mac's runners when hosted runners never started
+      - name: Re-run on the Mac's macOS runner when hosted runners never started
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -32,5 +32,5 @@ jobs:
             echo "$HEAD_BRANCH moved to $current; its own run qualifies it."
             exit 0
           fi
-          echo "$unstarted jobs never started on hosted runners; dispatching self-hosted qualification of $HEAD_SHA."
+          echo "$unstarted jobs never started on hosted runners; dispatching macOS qualification of $HEAD_SHA."
           gh workflow run zig.yml --repo "$REPO" --ref "$HEAD_BRANCH" -f mac_backup=true

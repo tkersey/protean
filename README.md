@@ -120,8 +120,8 @@ without deleting unrelated local data.
 
 CI runs the same groups on Linux in four parallel lanes plus TigerStyle. The
 complete workflow must finish within 600 seconds. GitHub-hosted runners run it
-by default; when they never start the jobs, CI falls back to the Mac's
-self-hosted Linux runners. See [CI](.github/CI.md). Exact-head results belong to
+by default; when they never start the jobs, CI falls back to full macOS
+qualification on the Mac's self-hosted runner. See [CI](.github/CI.md). Exact-head results belong to
 the PR; a previous run does not qualify a changed candidate.
 
 ## Retired applications

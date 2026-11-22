@@ -33,20 +33,25 @@ target identities to match the product it builds.
 ## Self-hosted fallback
 
 When GitHub-hosted runners never start a run's jobs, the
-[fallback workflow](workflows/fallback.yml) runs on the Mac's self-hosted Linux
+[fallback workflow](workflows/fallback.yml) runs on the Mac's self-hosted macOS
 runner. It confirms that failed jobs never received a runner and that the branch
 still points at the run's commit, then dispatches the same workflow with
-`mac_backup=true`. Every job of that run uses the `mac-backup` runners, under the
-same 600-second gate. A failed check on a hosted runner does not trigger the
+`mac_backup=true`. A failed check on a hosted runner does not trigger the
 fallback. `workflow_run` uses the workflow from the default branch. A manual
 dispatch with `mac_backup=true` also covers a hosted queue that never starts.
 
-The Mac runners are ephemeral x86-64 Linux containers under Rosetta, one job
-each, started by per-slot launch agents. Run enough slots for TigerStyle and the
-four lanes to proceed in parallel. Each slot mounts its own persistent cache
-directory and advertises it as `PROTEAN_CI_CACHE`; qualification then keeps
-Zig's global and local caches there instead of in the ephemeral workspace.
-Slots never share a cache, so no lock crosses a VM boundary.
+A `mac_backup` run replaces TigerStyle and the Linux lanes with one job that runs
+the complete local macOS `zig build qualify` on the self-hosted runner: TigerStyle
+and its launcher fixtures, authoring and the bundled-Clang witness, the LLVM
+product with its smoke and placement checks, and the downstream consumer with
+its identity comparison. The same terminal gate requires it to finish within 600
+seconds. It does not exercise Linux x86-64 or the direct backend; the next
+hosted run does. The runner keeps a persistent cache directory, advertised as
+`PROTEAN_CI_CACHE`, for Zig's global and local caches. It executes the dispatched
+commit directly on the Mac as its owner.
+
+A Linux container under Rosetta could not fit the Linux lanes in 600 seconds:
+its emulated compiler took 422 seconds to build the product alone.
 
 ## Coverage deliberately reduced
 

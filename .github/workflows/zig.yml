@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       mac_backup:
-        description: Run on the Mac's self-hosted Linux runners
+        description: Qualify on the Mac's self-hosted macOS runner instead of GitHub-hosted Linux
         type: boolean
         default: false
 concurrency:
@@ -19,7 +19,8 @@ permissions:
 jobs:
   tiger-style:
     name: TigerStyle
-    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.mac_backup && 'mac-backup' || 'ubuntu-22.04' }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.mac_backup) }}
+    runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -41,6 +42,7 @@ jobs:
         run: bash tools/test-tiger-style.sh
   qualify:
     name: Qualification / ${{ matrix.lane }} / linux-x86_64
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.mac_backup) }}
     strategy:
       fail-fast: false
       matrix:
@@ -53,7 +55,7 @@ jobs:
             groups: direct-smoke
           - lane: downstream
             groups: downstream
-    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.mac_backup && 'mac-backup' || 'ubuntu-22.04' }}
+    runs-on: ubuntu-22.04
     timeout-minutes: 10
     env:
       ZIG_DEBUG_CMD: '1'
@@ -91,17 +93,37 @@ jobs:
             /usr/bin/bwrap --unshare-user --ro-bind / / /usr/bin/true
           fi
       - name: Qualify ${{ matrix.groups }}
+        run: zig build qualify -- --group "${{ matrix.groups }}"
+  macos:
+    name: Qualification / macos-arm64
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mac_backup }}
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '26.9.0'
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: '0.17.1'
+          mirror: https://zigmirror.com
+          use-tool-cache: true
+          use-cache: false
+      - name: Qualify the essential macOS set
         run: |
-          # Self-hosted slots provide a persistent cache that setup-zig does not know about.
+          # The runner provides a persistent cache that setup-zig does not know about.
           if [ -n "${PROTEAN_CI_CACHE:-}" ]; then
             export ZIG_GLOBAL_CACHE_DIR="$PROTEAN_CI_CACHE/zig-global" ZIG_LOCAL_CACHE_DIR="$PROTEAN_CI_CACHE/zig-local"
           fi
-          zig build qualify -- --group "${{ matrix.groups }}"
+          zig build qualify
   native:
     name: native
-    needs: [qualify, tiger-style]
+    needs: [qualify, tiger-style, macos]
     if: ${{ always() }}
-    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.mac_backup && 'mac-backup' || 'ubuntu-24.04' }}
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.mac_backup && fromJSON('["self-hosted","macOS","ARM64"]') || 'ubuntu-24.04' }}
     timeout-minutes: 5
     steps:
       - name: Require complete qualification within ten minutes
@@ -112,14 +134,19 @@ jobs:
           RUN_ATTEMPT: ${{ github.run_attempt }}
           QUALIFICATION: ${{ needs.qualify.result }}
           TIGER_STYLE: ${{ needs.tiger-style.result }}
+          MACOS: ${{ needs.macos.result }}
+          MAC_BACKUP: ${{ github.event_name == 'workflow_dispatch' && inputs.mac_backup }}
         run: |
-          test "$QUALIFICATION" = success
-          test "$TIGER_STYLE" = success
+          if [ "$MAC_BACKUP" = true ]; then
+            test "$MACOS" = success
+          else
+            test "$QUALIFICATION" = success
+            test "$TIGER_STYLE" = success
+          fi
           if [ "$RUN_ATTEMPT" != 1 ]; then
             echo 'Qualification requires the first attempt of its run.'
             exit 1
           fi
-          started="$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID" --jq .created_at)"
-          elapsed=$(( $(date +%s) - $(date -d "$started" +%s) ))
+          elapsed=$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID" --jq '(now - (.created_at | fromdate)) | floor')
           echo "Complete workflow from trigger through terminal checks: ${elapsed}s (maximum 600s)" | tee -a "$GITHUB_STEP_SUMMARY"
           test "$elapsed" -le 600
