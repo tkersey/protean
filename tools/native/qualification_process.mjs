@@ -66,8 +66,8 @@ function liveGroups(root, directory, supervisorsOnly = false) {
   }
   return [...groups].filter(([pid, recorded]) => {
     if (!Number.isSafeInteger(pid) || pid <= 1 || !signalGroup(pid, 0)) return false;
-    if (recorded === null) return true;
     // A pid is not reused while its group exists, so a departed leader still identifies our group.
+    // A live leader must match the recorded start time; without one it is never assumed to be ours.
     const current = started(pid);
     return current === '' || current === recorded;
   }).map(([pid]) => pid);

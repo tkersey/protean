@@ -162,13 +162,15 @@ if (listing) {
 
 let lease, pending = [], passed = 0, skipped = 0;
 // Groups this run intends to execute, named even if it stops before checkout.
-let planned;
+let planned, invalidSelection;
 try {
   const {commands, full} = inventory(source, '');
   planned = selection ? selected(commands, selection) : full;
-} catch { planned = undefined; } // An invalid selection is reported by the run itself.
+} catch (error) { invalidSelection = error; }
 const ran = new Set();
 try {
+  // Reject an unknown group before taking a slot or checking anything out.
+  if (invalidSelection) throw invalidSelection;
   const candidate = git(source, 'rev-parse', '--verify', 'HEAD^{commit}');
   clean(source);
   env.PROTEAN_QUALIFICATION_COMMIT = candidate;
