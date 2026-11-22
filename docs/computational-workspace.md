@@ -733,6 +733,6 @@ Horos 8.0.1 and Kosmos 9.2.0 source archives and their exact commits. The
 construction qualification, including remote archive transport. `describe-build` records
 the exact compiler, image, package and executable hashes for each platform.
 The [retaining installer](native-single-binary.md#saved-state-and-portability)
-ships with qualification archives. It never migrates old continuations or edits
+is `tools/native/install.mjs` in the source tree. It never migrates old continuations or edits
 their namespace. Building/qualifying this feature does not update an installed
 runtime, merge a PR or publish a release.

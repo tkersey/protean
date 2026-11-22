@@ -10,8 +10,6 @@ const Digest = state.Digest;
 pub const format: u32 = @import("native_options").state_format;
 
 pub fn digest(bytes: []const u8) Digest {
-    // Share the optimized standard-library primitive already linked for file
-    // identity. Every byte is still checked; the store owns admission and trust.
     var hash: hash_abi.State = undefined;
     hash_abi.protean_native_sha256_init(&hash);
     hash_abi.protean_native_sha256_update(&hash, bytes.ptr, bytes.len);
@@ -36,6 +34,14 @@ test "object digests retain SHA-256 across padding and large input boundaries" {
         var expected: Digest = undefined;
         std.crypto.hash.sha2.Sha256.hash(bytes[0..length], &expected, .{});
         try std.testing.expectEqualSlices(u8, &expected, &digest(bytes[0..length]));
+        const prefix = @min(length, 7);
+        var hash: hash_abi.State = undefined;
+        hash_abi.protean_native_sha256_init(&hash);
+        hash_abi.protean_native_sha256_update(&hash, bytes.ptr, prefix);
+        hash_abi.protean_native_sha256_update(&hash, bytes[prefix..length].ptr, length - prefix);
+        var streamed: Digest = undefined;
+        hash_abi.protean_native_sha256_final(&hash, &streamed);
+        try std.testing.expectEqual(expected, streamed);
     }
 }
 

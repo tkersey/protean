@@ -31,9 +31,11 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
         const Tasks = @import("task_queries.zig").Operations(Types, Self);
         const Programs = @import("workspace_programs.zig").Operations(Types, Self);
         pub fn compatibleApplication(self: *Self, value: state.Task) !void {
-            if (!same(value.application_id.bytes, Types.application_id) or
-                !same(&value.image.digest, &storage.digest(self.assets.image)))
+            if (!same(value.application_id.bytes, Types.application_id))
                 return error.IncompatibleProfile;
+            const cached = if (self.compiler_facts) |facts| facts.export_image_digest else null;
+            const image = cached orelse storage.digest(self.assets.image);
+            if (!same(&value.image.digest, &image)) return error.IncompatibleProfile;
             if ((self.application.controller != null) != (value.controller != null))
                 return error.IncompatibleProfile;
         }

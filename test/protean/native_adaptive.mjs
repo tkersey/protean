@@ -26,6 +26,15 @@ try {
     return JSON.parse(result.stdout);
   };
   const manifest = invoke('describe-build');
+  const expectedBackend = process.argv[6];
+  if (expectedBackend) {
+    assert.equal(manifest.artifact_zig_backend, expectedBackend);
+    const compiler = manifest.dependencies.sqlite.compiler;
+    assert.equal(compiler.family, 'clang');
+    assert.equal(compiler.zig_executable_sha256, manifest.compiler.executable_sha256);
+    for (const field of ['sqlite_object_sha256', 'posix_shim_object_sha256'])
+      assert.match(compiler[field], /^[0-9a-f]{64}$/);
+  }
   if (group === 'smoke' || group === 'all') {
     const home = join(app.data, 'host home'), snapshot = join(app.data, 'source snapshot');
     mkdirSync(home); mkdirSync(snapshot);

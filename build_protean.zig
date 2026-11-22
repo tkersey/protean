@@ -1,31 +1,7 @@
 const std = @import("std");
-const adaptive_owner_groups = [_][]const []const u8{
-    &.{ "adaptive_controls.", "adaptive_reports.", "adaptive_recovery." },
-    &.{"projection_recovery."},
-    &.{ "projection_failure_tests.", "projection_late_recovery." },
-    &.{ "projection owner authenticates", "projection receipts preserve" },
-    &.{
-        "projection required-current",
-        "projection selection rechecks",
-        "delegated projection binds",
-    },
-    &.{"constructed successor rejects"},
-    &.{ "delegated ordinary", "delegated projection answer" },
-};
-const workspace_execution_groups = [_][]const []const u8{
-    &.{"CTX-01"},
-    &.{"WORK-C07"},
-    &.{
-        "BUILD-",
-        "WORK-C03",
-        "WORK-06",
-        "WORK-08",
-        "exposure carries",
-        "workspace commands",
-        "deep recursive workspace",
-    },
-    &.{ "WORK-01", "AUT-07", "OWN-02" },
-    &.{ "collected history", "WORK-14", "delegated model interpretation" },
+const QualificationGroups = struct {
+    adaptive: []const []const []const u8,
+    workspace: []const []const []const u8,
 };
 const Graph = struct {
     b: *std.Build,
@@ -148,15 +124,21 @@ pub fn build(b: *std.Build) void {
     graph.nativeSteps();
     if (graph.native_enabled) graph.nativeBuild() else graph.missingNative();
     graph.pureChecks();
+    graph.localQualification();
 }
 
 const BuildGraph = struct {
     b: *std.Build,
+    groups: QualificationGroups = undefined,
     optimize: std.lang.Optimize = undefined,
     target: std.Build.ResolvedTarget = undefined,
     native_target: std.Build.ResolvedTarget = undefined,
     source: ?std.Build.LazyPath = undefined,
+    bootstrap_horos: bool = false,
     native_enabled: bool = undefined,
+    native_direct: bool = false,
+    recovery_probe: ?*std.Build.Step.Compile = null,
+    clang_inputs: std.Build.LazyPath = undefined,
     default_musl: bool = undefined,
     kosmos_source: std.Build.LazyPath = undefined,
     sqlite_source: std.Build.LazyPath = undefined,
@@ -174,7 +156,7 @@ const BuildGraph = struct {
     public_protean: *std.Build.Module = undefined,
     kosmos: *std.Build.Module = undefined,
     native_admission: *std.Build.Module = undefined,
-    host_environment: *std.Build.Module = undefined,
+    host_environment: NativeEnvironment = undefined,
     native_data: *std.Build.Module = undefined,
     native_contracts: *std.Build.Module = undefined,
     native_horos: *std.Build.Module = undefined,
@@ -191,6 +173,7 @@ const BuildGraph = struct {
     native_guard: *std.Build.Step.Run = undefined,
     g: Graph = undefined,
     native_graph: Graph = undefined,
+    fast: *std.Build.Step = undefined,
     check: *std.Build.Step = undefined,
     adaptive_image_step: *std.Build.Step = undefined,
     aggregate: *std.Build.Step = undefined,
@@ -224,6 +207,10 @@ const BuildGraph = struct {
         if (product_supported) {
             s.productBuild();
             s.recurrenceDriver();
+            if (s.native_direct) s.directHashCheck(s.b.step(
+                "check-native-direct-hash",
+                "Check the direct x86-64 SHA-256 fallback",
+            ));
             s.nativeSmoke();
             s.runtimeDiagnostics();
             s.httpsConsumer();
@@ -237,6 +224,12 @@ const BuildGraph = struct {
     }
 
     fn configure(s: *BuildGraph) void {
+        s.groups = std.json.parseFromSliceLeaky(
+            QualificationGroups,
+            s.b.allocator,
+            @embedFile("tools/native/qualification_groups.json"),
+            .{},
+        ) catch @panic("invalid qualification test groups");
         s.optimize = s.b.standardOptimizeOption(.{});
         s.target = s.b.standardTargetOptions(.{});
         s.source = s.b.option(
@@ -244,6 +237,24 @@ const BuildGraph = struct {
             "horos-source",
             "Authenticated immutable Horos source copy",
         );
+        if (s.source == null and s.b.pkg_hash.len == 0) {
+            const hash = @import("build.zig.zon").dependencies.horos.hash;
+            const entry = std.Build.package_map.get(hash);
+            if (entry == null or !entry.?.available) {
+                s.source = s.b.path(".protean-native/inputs/horos");
+                s.bootstrap_horos = true;
+            }
+        }
+        s.native_direct = s.b.option(
+            bool,
+            "native-direct",
+            "Use direct Zig code generation for the x86_64-linux-musl native product",
+        ) orelse false;
+        if (s.native_direct) {
+            const musl = s.target.query.isNative() or s.target.result.abi == .musl;
+            if (!linuxX86(s.target) or !musl)
+                @panic("native-direct requires the x86_64-linux-musl product target");
+        }
         s.native_enabled = s.b.option(
             bool,
             "native",
@@ -319,8 +330,6 @@ const BuildGraph = struct {
             }),
             .use_llvm = if (linuxX86(s.b.graph.host)) false else null,
         });
-        // Keep the driver on its existing backend and reuse the optimized primitive
-        // without linking SQLite or any dependency that this driver must first admit.
         const build_hash = s.b.addLibrary(.{
             .name = "protean-build-hash",
             .linkage = .static,
@@ -329,13 +338,29 @@ const BuildGraph = struct {
                 .target = s.b.graph.host,
                 .optimize = .safe,
             }),
-            .use_llvm = true,
+            .use_llvm = !s.native_direct or !linuxX86(s.b.graph.host),
         });
         s.host_tool.root_module.linkLibrary(build_hash);
     }
 
     fn admitSource(s: *BuildGraph) void {
         s.source_guard = s.b.addRunArtifact(s.host_tool);
+        if (s.bootstrap_horos) {
+            const setup = s.b.addRunArtifact(s.host_tool);
+            setup.setCwd(s.b.path("."));
+            setup.addArgs(&.{
+                "setup",
+                "conformance/protean/dependencies.lock.json",
+                "conformance/protean/native-dependencies.lock.json",
+                ".protean-native/inputs",
+            });
+            setup.addFileArg2(.zig_exe, .{ .make_absolute = true });
+            setup.addArg("--authoring-only");
+            if (s.b.graph.system_package_mode) setup.addArg("--offline");
+            setup.has_side_effects = true;
+            setup.expectExitCode(0);
+            s.source_guard.step.dependOn(&setup.step);
+        }
         s.source_guard.addArg("verify-horos");
         s.source_guard.addFileArg2(s.b.path("conformance/protean/dependencies.lock.json"), .{});
         if (s.source) |path| {
@@ -548,7 +573,9 @@ const BuildGraph = struct {
         });
         lint.dependOn(&format_check.step);
         lint.dependOn(&s.b.addSystemCommand(&.{ "sh", "tools/check_zig_paths.sh" }).step);
-        s.check.dependOn(lint);
+        s.fast = s.b.step("check", "Run focused authoring and bundled Clang checks");
+        s.fast.dependOn(lint);
+        s.check.dependOn(s.fast);
         const workspace_values = s.b.step(
             "check-workspace-values",
             "Check runtime-schema workspace value projection",
@@ -569,7 +596,7 @@ const BuildGraph = struct {
         const dialogue = s.g.module("test/protean/dialogue_probe.zig");
         dialogue.addImport("interaction", s.g.helper("interaction"));
         const authoring_tests = [_]*std.Build.Step.Compile{
-            s.g.testModule(s.check, s.g.module("test/authoring_tests.zig")),
+            s.g.testModule(s.fast, s.g.module("test/authoring_tests.zig")),
             s.g.testModule(s.check, s.g.module("src/test_root.zig")),
             s.g.testModule(
                 program_construction,
@@ -607,7 +634,11 @@ const BuildGraph = struct {
             });
             rejected.expect_errors = .{ .contains = negative[1] };
             rejected.step.dependOn(s.g.gate);
-            s.check.dependOn(&rejected.step);
+            const step = if (comptime std.mem.eql(u8, negative[0], "model_runtime_callback"))
+                s.fast
+            else
+                s.check;
+            step.dependOn(&rejected.step);
         }
         for ([_][]const u8{ "decode recursive", "encode recursive" }) |filter| {
             const root = s.g.module("test/protean/recursive_client_values.zig");
@@ -704,6 +735,7 @@ const BuildGraph = struct {
                 .optimize = s.optimize,
             }) },
         );
+        if (s.native_direct and linuxX86(s.b.graph.host)) runtime_emitter.use_llvm = false;
         runtime_emitter.root_module.addOptions("artifact_options", runtime_options);
         runtime_emitter.step.dependOn(&s.native_guard.step);
         const emit_runtime = s.b.addRunArtifact(runtime_emitter);
@@ -733,7 +765,7 @@ const BuildGraph = struct {
 
     fn hostEnvironment(s: *BuildGraph) void {
         s.host_environment = nativeEnvironment(
-            s.b,
+            s.host_tool,
             s.b.graph.host,
             s.optimize,
             s.kosmos,
@@ -742,6 +774,7 @@ const BuildGraph = struct {
             s.horos,
             s.protean,
             s.native_admission,
+            s.native_direct and linuxX86(s.b.graph.host),
             s.sqlite_source,
             &s.native_guard.step,
         );
@@ -809,8 +842,8 @@ const BuildGraph = struct {
                 }),
             );
         }
-        s.public_environment = if (host_target) s.host_environment else nativeEnvironment(
-            s.b,
+        const public = if (host_target) s.host_environment else nativeEnvironment(
+            s.host_tool,
             s.native_target,
             s.optimize,
             s.native_kosmos,
@@ -819,9 +852,12 @@ const BuildGraph = struct {
             s.native_horos,
             s.native_protean,
             s.native_admission,
+            s.native_direct,
             s.sqlite_source,
             &s.native_guard.step,
         );
+        s.public_environment = public.module;
+        s.clang_inputs = public.clang_inputs;
         // Executed native checks use the delivered ABI when it runs on this
         // host. This also shares its C library instead of compiling a GNU-only
         // SQLite copy solely for tests of a musl product.
@@ -836,7 +872,10 @@ const BuildGraph = struct {
             s.native_graph.contracts = s.native_contracts;
         }
         s.checked_kosmos = if (native_on_host) s.native_kosmos else s.kosmos;
-        s.checked_environment = if (native_on_host) s.public_environment else s.host_environment;
+        s.checked_environment = if (native_on_host)
+            s.public_environment
+        else
+            s.host_environment.module;
     }
 
     fn workspaceGeneral(s: *BuildGraph) void {
@@ -878,10 +917,10 @@ const BuildGraph = struct {
             if (workspace_group) |group| compilation_groups[@backingInt(group)] else &.{},
         );
         const groups = if (workspace_group) |group| switch (group) {
-            .execution => workspace_execution_groups[0..3],
-            .retention => workspace_execution_groups[3..4],
-            .history => workspace_execution_groups[4..5],
-        } else &workspace_execution_groups;
+            .execution => s.groups.workspace[0..3],
+            .retention => s.groups.workspace[3..4],
+            .history => s.groups.workspace[4..5],
+        } else s.groups.workspace;
         s.native_graph.runGrouped(s.workspace_general, workspace_general_tests, groups);
         if (linuxX86(s.b.graph.host)) workspace_general_tests.use_llvm = false;
         s.b.step("build-workspace-general-check", "Build the retained workspace test executable")
@@ -1003,6 +1042,8 @@ const BuildGraph = struct {
 
     fn publishNative(s: *BuildGraph) void {
         s.b.addNamedLazyPath("native-sqlite-source", s.sqlite_source);
+        s.b.addNamedLazyPath("native-clang-inputs", s.clang_inputs);
+        if (s.native_direct) s.b.addNamedLazyPath("native-direct", s.clang_inputs);
         s.b.installArtifact(s.host_tool);
         s.b.modules.put(
             s.b.allocator,
@@ -1039,6 +1080,8 @@ const BuildGraph = struct {
             .native_protean = s.native_protean,
             .sqlite_source = s.sqlite_source,
             .host_tool = s.host_tool,
+            .clang_inputs = s.clang_inputs,
+            .native_direct = s.native_direct,
         };
         s.adaptive_product = @import(
             "build_native.zig",
@@ -1063,16 +1106,34 @@ const BuildGraph = struct {
     fn recurrenceDriver(s: *BuildGraph) void {
         const root = s.b.allocator.create(std.Build.Module) catch @panic("out of memory");
         root.init(s.b, .{ .existing = s.adaptive_product.executable.root_module });
-        root.root_source_file = s.b.path("tools/evaluation/recurrence_entry.zig");
+        root.import_table = root.import_table.clone(s.b.allocator) catch @panic("out of memory");
+        const crash_backend: ?bool = if (linuxX86(s.b.graph.host)) s.optimize != .debug else null;
+        const shared = s.checked_environment == s.public_environment and
+            s.adaptive_product.executable.use_llvm == crash_backend;
+        root.root_source_file = if (shared)
+            s.b.path("test/protean/native_recovery_crash.zig")
+        else
+            s.b.path("tools/evaluation/recurrence_entry.zig");
+        if (shared) {
+            root.addImport("protean", s.native_protean);
+            root.addImport("horos", s.native_horos);
+            root.addImport("horos_data", s.native_data);
+            root.addImport("kosmos", s.native_kosmos);
+        }
+        root.addAnonymousImport("zig_test_runner", .{
+            .root_source_file = s.b.graph.path(.zig_lib, "compiler/test_runner.zig"),
+        });
         const executable = s.b.addTest(.{
             .name = "protean-recurrence-driver",
+            .filters = &.{"process-crash-controller-only"},
             .root_module = root,
             .test_runner = .{
                 .path = s.b.path("tools/evaluation/recurrence_driver.zig"),
                 .mode = .simple,
             },
-            .use_llvm = if (linuxX86(s.native_target)) true else null,
+            .use_llvm = s.adaptive_product.executable.use_llvm,
         });
+        if (shared) s.recovery_probe = executable;
         const install = s.b.addInstallArtifact(executable, .{});
         const driver = s.b.step(
             "recurrence-driver",
@@ -1084,6 +1145,7 @@ const BuildGraph = struct {
         check.addArgs(&.{ "node", "test/protean/recurrence_driver.mjs" });
         check.addFileArg2(executable.getEmittedBin(), .{ .make_absolute = true });
         check.addFileArg2(s.adaptive_application, .{ .make_absolute = true });
+        if (s.native_direct) s.directHashCheck(&check.step);
         s.b.step("check-recurrence-driver", "Check sealed capture and external crash recovery")
             .dependOn(&check.step);
         s.native_checks.dependOn(&check.step);
@@ -1097,6 +1159,22 @@ const BuildGraph = struct {
             "test/protean/request_profile.test.mjs",
         });
         s.native_owner_support.dependOn(&recurrence.step);
+    }
+
+    fn directHashCheck(s: *BuildGraph, check: *std.Build.Step) void {
+        const hash = s.b.createModule(.{
+            .root_source_file = s.b.path("runtime/native/hash.zig"),
+            .target = s.b.resolveTargetQuery(.{
+                .cpu_arch = .x86_64,
+                .cpu_model = .baseline,
+                .os_tag = .linux,
+                .abi = .musl,
+            }),
+            .optimize = s.optimize,
+            .strip = true,
+        });
+        const tests = s.native_graph.testModule(check, hash);
+        tests.use_llvm = false;
     }
 
     fn nativeSmoke(s: *BuildGraph) void {
@@ -1256,7 +1334,7 @@ const BuildGraph = struct {
                 "Qualify native " ++ group[0] ++ " contracts",
             );
             const tests = if (comptime std.mem.eql(u8, group[0], "adaptive"))
-                s.native_graph.testModuleGrouped(checks, suite, &adaptive_owner_groups, null)
+                s.native_graph.testModuleGrouped(checks, suite, s.groups.adaptive, null)
             else
                 s.native_graph.testModuleGrouped(checks, suite, &.{&.{".test"}}, null);
             if (linuxX86(s.b.graph.host)) tests.use_llvm = false;
@@ -1376,7 +1454,7 @@ const BuildGraph = struct {
         crash_module.addImport("protean_native", s.checked_environment);
         // Private history/Worker access stays in the test graph. The Node
         // controller owns process death and independent reopen.
-        const crash_probe = s.b.addTest(.{
+        const crash_probe = s.recovery_probe orelse s.b.addTest(.{
             .name = "protean-recovery-crash",
             .root_module = crash_module,
             .filters = &.{"process-crash-controller-only"},
@@ -1408,6 +1486,32 @@ const BuildGraph = struct {
         s.scheduler_benchmark.dependOn(&missing.step);
     }
 
+    fn localQualification(s: *BuildGraph) void {
+        if (s.b.option(std.Build.LazyPath, "clang-probe-source", "Header mutation fixture")) |src| {
+            @import("tools/native/clang.zig").probeStep(s.host_tool, src);
+        }
+        const clang = nativeCheckCommand(s.b);
+        clang.addArg("node");
+        clang.addFileArg2(s.b.path("test/protean/clang_inputs.mjs"), .{});
+        clang.addDirectoryArg2(s.b.graph.path(.local_cache, "clang-probe"), .{
+            .make_absolute = true,
+        });
+        clang.setCwd(s.b.path("."));
+        const clang_checks = s.b.step("check-clang-inputs", "Check bundled Clang header changes");
+        clang_checks.dependOn(&clang.step);
+        if (s.native_enabled) s.fast.dependOn(clang_checks);
+
+        const qualify = nodeCommand(s.b);
+        qualify.addArgs(&.{ "node", "tools/native/qualify.mjs" });
+        qualify.setCwd(s.b.path("."));
+        qualify.addDirectoryArg2(s.b.graph.path(.local_cache, ""), .{ .make_absolute = true });
+        qualify.addDirectoryArg2(s.b.graph.path(.global_cache, ""), .{ .make_absolute = true });
+        qualify.addArg(if (s.b.graph.system_package_mode) "offline" else "online");
+        qualify.addPassthruArgs();
+        qualify.has_side_effects = true;
+        s.b.step("qualify", "Run the complete local host qualification").dependOn(&qualify.step);
+    }
+
     fn pureChecks(s: *BuildGraph) void {
         const pure = nativeCheckCommand(s.b);
         pure.addArgs(&.{
@@ -1415,17 +1519,22 @@ const BuildGraph = struct {
             "--test",
             "test/protean/values.test.mjs",
             "test/protean/qualification_tests.test.mjs",
+            "test/protean/qualification_process.test.mjs",
         });
         s.check.dependOn(&pure.step);
         s.aggregate.dependOn(s.check);
         s.b.step("check-authoring-core", "Check retained authoring contracts").dependOn(s.check);
-        s.b.step("check", "Check Protean authoring").dependOn(s.aggregate);
         s.b.default_step = s.aggregate;
     }
 };
 
+const NativeEnvironment = struct {
+    module: *std.Build.Module,
+    clang_inputs: std.Build.LazyPath,
+};
+
 fn nativeEnvironment(
-    b: *std.Build,
+    host_tool: *std.Build.Step.Compile,
     target: std.Build.ResolvedTarget,
     optimize: std.lang.Optimize,
     kosmos: *std.Build.Module,
@@ -1434,9 +1543,11 @@ fn nativeEnvironment(
     horos: *std.Build.Module,
     protean: *std.Build.Module,
     admission: *std.Build.Module,
+    direct: bool,
     sqlite_source: std.Build.LazyPath,
     gate: *std.Build.Step,
-) *std.Build.Module {
+) NativeEnvironment {
+    const b = host_tool.step.owner;
     const options = b.addOptions();
     options.addOption(
         []const u8,
@@ -1457,7 +1568,6 @@ fn nativeEnvironment(
     // C has a stable ABI here. Compile the large SQLite translation unit once
     // for this target, rather than again inside every executable and test root.
     const translated_module = translated.createModule();
-    const c_library = nativeLibrary(b, target, optimize, sqlite_source, gate);
     const module = b.createModule(.{
         .root_source_file = b.path("runtime/native/root.zig"),
         .target = target,
@@ -1475,8 +1585,9 @@ fn nativeEnvironment(
         },
     });
     module.addOptions("native_options", options);
-    module.linkLibrary(c_library);
-    return module;
+    const library = nativeLibrary(host_tool, target, optimize, sqlite_source, gate, direct);
+    module.linkLibrary(library.library);
+    return .{ .module = module, .clang_inputs = library.clang_inputs };
 }
 
 // Keep nested Node qualifiers on the build's selected toolchain and prefix.
@@ -1516,36 +1627,68 @@ fn linuxX86(target: std.Build.ResolvedTarget) bool {
 }
 
 fn nativeLibrary(
-    b: *std.Build,
+    host_tool: *std.Build.Step.Compile,
     target: std.Build.ResolvedTarget,
     optimize: std.lang.Optimize,
     sqlite_source: std.Build.LazyPath,
     gate: *std.Build.Step,
-) *std.Build.Step.Compile {
-    const c_module = b.createModule(.{
+    direct: bool,
+) struct { library: *std.Build.Step.Compile, clang_inputs: std.Build.LazyPath } {
+    const b = host_tool.step.owner;
+    const native = @import("build_native.zig");
+    const clang = @import("tools/native/clang.zig");
+    const sql_sources = b.addWriteFiles();
+    _ = sql_sources.addCopyFile(sqlite_source.path(b, "sqlite3.c"), "sqlite3.c");
+    _ = sql_sources.addCopyFile(sqlite_source.path(b, "sqlite3.h"), "sqlite3.h");
+    sql_sources.step.dependOn(gate);
+    const sqlite = clang.stageSources(host_tool, sql_sources, optimize, "sqlite3");
+    const shim_sources = b.addWriteFiles();
+    const shim = shim_sources.addCopyFile(b.path("runtime/native/native_c.c"), "native_c.c");
+    const header = shim_sources.addCopyFile(b.path("runtime/native/native_c.h"), "native_c.h");
+    const shim_stage = if (optimize == .debug)
+        clang.stageSources(host_tool, shim_sources, optimize, "native_c")
+    else
+        null;
+    const shim_source = if (shim_stage) |stage| stage.path(b, "native_c.c") else shim;
+    const shim_header = if (shim_stage) |stage| stage.path(b, "native_c.h") else header;
+    const config = clang.configuration(host_tool, target);
+    const sql_obj = clang.object(
+        config,
+        target,
+        optimize,
+        sqlite.path(b, "sqlite3.c"),
+        null,
+        native.sqliteFlags(optimize),
+        "sqlite3",
+    );
+    const shim_obj = clang.object(
+        config,
+        target,
+        optimize,
+        shim_source,
+        sqlite,
+        native.shimFlags(optimize),
+        "native_c",
+    );
+    const inputs = b.addWriteFiles();
+    _ = inputs.addCopyFile(shim_source, "native_c.c");
+    _ = inputs.addCopyFile(shim_header, "native_c.h");
+    const module = b.createModule(.{
         .root_source_file = b.path("runtime/native/hash.zig"),
         .target = target,
         .optimize = optimize,
         .strip = optimize != .debug,
         .link_libc = true,
     });
-    c_module.addIncludePath(sqlite_source);
-    c_module.addCSourceFile(.{
-        .file = sqlite_source.path(b, "sqlite3.c"),
-        .flags = @import("build_native.zig").sqliteFlags(optimize),
-    });
-    c_module.addCSourceFile(
-        .{
-            .file = b.path("runtime/native/native_c.c"),
-            .flags = &.{ "-std=c99", "-D_POSIX_C_SOURCE=200809L" },
-        },
-    );
-    const c_library = b.addLibrary(.{
+    _ = inputs.addCopyFile(sql_obj, "sqlite3.o");
+    _ = inputs.addCopyFile(shim_obj, "native_c.o");
+    module.addObjectFile(sql_obj);
+    module.addObjectFile(shim_obj);
+    const library = b.addLibrary(.{
         .name = "protean-native-c",
         .linkage = .static,
-        .root_module = c_module,
-        .use_llvm = true,
+        .root_module = module,
+        .use_llvm = !direct,
     });
-    c_library.step.dependOn(gate);
-    return c_library;
+    return .{ .library = library, .clang_inputs = inputs.getDirectory() };
 }

@@ -45,6 +45,16 @@ The default native inputs are `.protean-native/inputs/kosmos` and
 `-Dhoros-source` overrides receive the same admission checks. Pure authoring
 consumers can select `-Dnative=false`; they still authenticate Horos.
 
+For an x86-64 Linux musl product, a downstream dependency can set
+`.@"native-direct" = true` to select Zig’s direct x86-64 backend. The embedding
+build selects `.use_llvm = false` for its own Linux Zig tests and compile steps.
+Zig’s bundled Clang compiles the authenticated SQLite amalgamation and the
+POSIX shim for the product target. On Apple Silicon, Zig uses LLVM for the
+multithreaded macOS product and the same bundled Clang for C.
+The `describe-build` manifest identifies the Zig executable that supplied
+Clang and gives the SHA-256 digest of each compiled C object under
+`dependencies.sqlite.compiler`.
+
 `addNativeSystem(b, dependency, options)` is exported by `build.zig`. A caller
 supplies an executable name, an environment source, and either:
 
@@ -149,7 +159,9 @@ zig build -Doptimize=safe \
 The product targets are macOS arm64 and Linux x86-64 musl. The Linux executable
 is statically linked; macOS uses system libSystem. Native manifests contain no
 build paths and do not claim to authenticate their enclosing binary. At runtime,
-`describe-build` separately hashes the executing artifact. `licenses` exposes
+`describe-build` hashes the executing artifact and reports its compiler-provided backend
+in `artifact_zig_backend`. Custom entries can obtain the same JSON from
+`discovery.Application.describeBuild`. `licenses` exposes
 the required Protean, Horos, Kosmos, Zig, SQLite, and applicable musl notices.
 
 ## Operate a task
@@ -417,8 +429,8 @@ default executable:
 node tools/native/install.mjs zig-out/bin/protean "$HOME/.local"
 ```
 
-Qualification archives include the same helper as `install.mjs`; from an
-extracted archive run `node install.mjs ./protean "$HOME/.local"`.
+CI does not publish product archives; install an executable you built from a
+checkout of the qualified commit.
 
 Its JSON output names `previous` and `current` executable paths. Keep the previous
 path with the corresponding state-directory location, and use it for the old
@@ -460,48 +472,22 @@ Zig 0.17.1. Use native macOS checks for local feedback on Apple silicon; do not
 reproduce required Linux CI through Rosetta, QEMU, or an emulated local container.
 Cross-compilation and local emulation do not substitute for the Linux CI result.
 Preserve execution tracing, user/mount/PID isolation, every required assertion,
-and the existing per-job and aggregate 600-second limits. Reuse compiled inputs
-only under their exact input-aware cache key, rebuild on a miss, and always
-execute the selected tests. Do not automatically run cold/warm qualification pairs.
+and the 600-second limit for each qualification run and the complete workflow.
 
 `check-protean` checks reusable authoring, compile-time rejections, and independent
 wire fixtures. `check-native` checks native owners plus the adaptive and HTTPS
 peers. The peers run copied binaries under OS execution/file boundaries, using
 controlled provider replies, real transport, kills/restarts, cancellation, tool
 construction/reuse, and independently altered archives. No paid model calls run.
-The complete aggregate remains `check-native`. CI separates authoring/HTTPS,
-owner/recovery, general workspace, runtime/custody workspace, correspondence,
-native control/workspace deployment, four runtime scenario groups and an independent downstream
-build. All 21 workspace tests remain in `check-workspace-programs`. Owner tests
-and crash/reopen checks remain in `check-native-owner`, with separate
-adaptive-controller, task-ownership and support targets for CI scheduling. The terminal
-gate requires source accounting and every qualification lane within 600 seconds.
-Compiler caches contain complete outputs for exact dependency locks and are
-checked by Zig on reuse. Deployment lanes save completed compiler work before
-running scenarios, so a scenario timeout does not discard the build cache.
-Completed deployment inputs also use an exact-match cache for the Git build inputs
-(excluding audited top-level prose, while retaining embedded skill Markdown),
-installed compiler executable/library/license bytes and modes, OS/architecture,
-safe mode and product/peer profile. Every deployment fixture, dependency
-authentication and independent downstream build still runs. This artifact cache
-contains compiled inputs only; every selected test and deployment scenario
-executes before receiving qualification credit.
-Rerunning all jobs replaces that run's prior named result artifacts with the new
-results. A partial job rerun does not establish full workflow timing.
-A cache-assisted pass does not establish the cold-build latency.
-The packaged adaptive peer runs its independent controller/recovery, retained
-workspace and remaining workspace scenarios in separate state, snapshot and HTTPS
-fixtures. CI separates retained-program reuse/foreign rejection into
-`native-workspace`; `native` retains control/recovery, reverse/disabled workspace
-cases and the offline demo. Every group must finish with its original assertions.
-Source accounting runs in the authoring lane, keeping the matrix at twenty
-concurrent jobs. Both native lanes enter the final executable-identity gate.
-The guest-cut mobility trace permits ordinary owner scheduling between exposed
-ports; the outer-clone trace keeps explicit scheduling for its unfinished-state
-witness. All retention, branch, transfer, response and cleanup checks remain.
-The additional runtime suite allows a result poll to wait up to 120 seconds behind
-synchronous specialization or placement; other RPCs keep their existing limits.
-This does not extend the ten-minute job or workflow limits.
+
+Required verification is the essential set run by `zig build qualify`. It
+includes TigerStyle, `check-protean` and `check-native-https`, the packaged
+product's smoke and placement checks, and the direct x86-64 product on Linux. An
+independent downstream build must match the product's identity. CI runs those
+groups in four parallel hosted lanes and every lane builds from source; see
+[CI](../.github/CI.md). `check-native`, `check-native-owner`, the workspace
+suites, `check-workspace-semantics` and `check-recurrence-driver` remain
+diagnostics. They do not gate a candidate.
 
 `check-native-recovery-crash`, included in `check-native`, kills the owner process
 at 16 original-acquisition and receipt-lookup boundaries. Two fresh processes

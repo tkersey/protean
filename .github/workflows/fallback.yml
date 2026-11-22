@@ -1,0 +1,38 @@
+name: Self-hosted qualification fallback
+on:
+  workflow_run:
+    workflows: [Zig 0.17 qualification]
+    types: [completed]
+permissions:
+  actions: write
+  contents: read
+jobs:
+  dispatch:
+    if: >-
+      ${{ github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.event != 'workflow_dispatch' &&
+      github.event.workflow_run.head_repository.full_name == github.repository }}
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 5
+    steps:
+      - name: Re-run on the Mac's macOS runner when hosted runners never started
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          jobs=$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" \
+            --jq '"\(.total_count) \([.jobs[] | select((.runner_id // 0) != 0 or (.steps | length) > 0)] | length)"')
+          read -r total started <<<"$jobs"
+          if [ "$total" -eq 0 ] || [ "$started" -gt 0 ]; then
+            echo "$started of $total hosted jobs started; the result belongs to the candidate."
+            exit 0
+          fi
+          current=$(gh api "repos/$REPO/commits/$HEAD_BRANCH" --jq .sha)
+          if [ "$current" != "$HEAD_SHA" ]; then
+            echo "$HEAD_BRANCH moved to $current; its own run qualifies it."
+            exit 0
+          fi
+          echo "None of $total hosted jobs started; dispatching macOS qualification of $HEAD_SHA."
+          gh workflow run macos.yml --repo "$REPO" --ref "$HEAD_BRANCH"

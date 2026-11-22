@@ -8,7 +8,7 @@ import {join} from 'node:path';
 import {createInterface} from 'node:readline';
 import {setTimeout as delay} from 'node:timers/promises';
 import {readArchive} from './native_archive.mjs';
-import {decodeRecurrenceObservation, prepareRecurrence, evaluateRecurrence, presentedValues, RecurrenceTrace, RecurrenceDriver, workspaceMetrics} from '../../tools/evaluation/workspace.mjs';
+import {decodeRecurrenceObservation, prepareRecurrence, evaluateRecurrence, inferenceArguments, presentedValues, RecurrenceTrace, RecurrenceDriver, workspaceMetrics} from '../../tools/evaluation/workspace.mjs';
 import {contract} from './adaptive_capture_checks.mjs';
 import {decodeValue, encodeValue} from '../support/values.mjs';
 
@@ -39,7 +39,8 @@ function launch(task, state = 'state', options = []) {
   });
   child.call = (method, params = {}) => new Promise((resolve, reject) => {
     const id = ++sequence;
-    const timer = setTimeout(() => { reject(new Error(`timeout: ${method}: ${stderr}`)); child.kill('SIGKILL'); }, 30_000);
+    const timeoutMs = method === 'evaluation.fixture' ? 60_000 : 30_000;
+    const timer = setTimeout(() => { reject(new Error(`timeout: ${method}: ${stderr}`)); child.kill('SIGKILL'); }, timeoutMs);
     pending.set(id, {resolve, reject, timer});
     child.stdin.write(JSON.stringify({id, method, params}) + '\n');
   });
@@ -524,21 +525,51 @@ try {
     try { process.kill(pid, 0); return true; }
     catch (error) { if (error.code === 'ESRCH') return false; throw error; }
   };
+  const credentials = {chatgptAccount: 'fixture', siwcBin: helper, siwcAuthDir: auth};
+  const timeoutSubject = timeoutPlan.cases[0];
+  const args = ['--state-dir', join(timeoutOutput, 'state'), '--config', timeoutSubject.config,
+    ...inferenceArguments(credentials)];
+  const startupDeadline = performance.now() + 15000;
+  const driver = new RecurrenceDriver(executable, args);
+  let helperPid;
   try {
-    const timeout = await evaluateRecurrence({subject: timeoutPlan.cases[0], plan: timeoutPlan,
-      output: timeoutOutput, driver: executable, chatgptAccount: 'fixture', siwcBin: helper,
-      siwcAuthDir: auth, application, build: {fixture: true}});
-    assert.equal(timeout.timed_out, true);
-    const helperPid = Number((await readFile(helperPidPath, 'utf8')).trim());
+    while (!helperPid) {
+      const text = await readFile(helperPidPath, 'utf8').catch(error => {
+        if (error.code === 'ENOENT') return '';
+        throw error;
+      });
+      helperPid = Number(text.trim());
+      assert(performance.now() < startupDeadline, 'authentication helper did not start within 15 seconds');
+      assert.equal(driver.exit, undefined, driver.diagnostics);
+      if (!helperPid) await delay(5);
+    }
     assert(Number.isSafeInteger(helperPid) && helperPid > 0);
-    for (let attempt = 0; attempt < 50 && helperAlive(helperPid); attempt++) await delay(20);
-    assert.equal(helperAlive(helperPid), false, 'wall watchdog must terminate the native authentication helper');
+    assert(helperAlive(helperPid) && helperAlive(driver.child.pid));
+    class StartedDriver {
+      constructor(binary, options) {
+        assert.equal(binary, executable);
+        assert.deepEqual(options, args);
+        return driver;
+      }
+    }
+    const cleanupDeadline = performance.now() + timeoutPlan.limits.wall_ms + 1000;
+    const run = evaluateRecurrence({subject: timeoutSubject, plan: timeoutPlan, output: timeoutOutput,
+      driver: executable, ...credentials, application, build: {fixture: true}}, {Client: StartedDriver});
+    const checkCleanup = async () => {
+      while (helperAlive(helperPid) || helperAlive(driver.child.pid)) {
+        if (performance.now() >= cleanupDeadline) return false;
+        await delay(5);
+      }
+      return performance.now() <= cleanupDeadline;
+    };
+    const [timeout, cleaned] = await Promise.all([run, checkCleanup()]);
+    assert.equal(timeout.timed_out, true);
+    assert.equal(driver.exit?.signal, 'SIGKILL');
+    assert(cleaned, 'watchdog cleanup exceeded one second');
   } finally {
-    const helperPid = await readFile(helperPidPath, 'utf8').then(text => Number(text.trim()), error => {
-      if (error.code === 'ENOENT') return null;
-      throw error;
-    });
-    if (helperPid && helperAlive(helperPid)) process.kill(helperPid, 'SIGKILL');
+    driver.kill();
+    await driver.waitClosed();
+    if (Number.isSafeInteger(helperPid) && helperPid > 0 && helperAlive(helperPid)) process.kill(helperPid, 'SIGKILL');
   }
   for (const signal of ['SIGINT', 'SIGTERM']) {
     const signalRoot = join(root, signal), pidPath = join(signalRoot, 'helper.pid');

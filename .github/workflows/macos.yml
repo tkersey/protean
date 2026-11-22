@@ -1,0 +1,44 @@
+name: macOS fallback qualification
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  macos:
+    name: macOS fallback
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '26.9.0'
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: '0.17.1'
+          mirror: https://zigmirror.com
+          use-tool-cache: true
+          use-cache: false
+      - name: Qualify the essential macOS set
+        run: |
+          if [ -n "${PROTEAN_CI_CACHE:-}" ]; then
+            export ZIG_GLOBAL_CACHE_DIR="$PROTEAN_CI_CACHE/zig-global" ZIG_LOCAL_CACHE_DIR="$PROTEAN_CI_CACHE/zig-local"
+          fi
+          zig build qualify
+      - name: Require completion within ten minutes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          if [ "$RUN_ATTEMPT" != 1 ]; then
+            echo 'Qualification requires the first attempt of its run.'
+            exit 1
+          fi
+          elapsed=$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID" --jq '(now - (.created_at | fromdate)) | floor')
+          echo "Complete workflow from trigger through qualification: ${elapsed}s (maximum 600s)" | tee -a "$GITHUB_STEP_SUMMARY"
+          test "$elapsed" -le 600
