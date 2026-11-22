@@ -57,7 +57,7 @@ function checkout(directory, candidate) {
     rmSync(work, {recursive: true, force: true});
     git(directory, '-c', 'init.defaultBranch=qualification', 'init', '--quiet', '--template=', '--', work);
   }
-  git(work, 'fetch', '--quiet', '--no-tags', '--', source, '+HEAD:refs/qualification/candidate');
+  git(work, 'fetch', '--quiet', '--no-tags', '--update-shallow', '--', source, '+HEAD:refs/qualification/candidate');
   assert.equal(git(work, 'rev-parse', 'refs/qualification/candidate'), candidate, 'source HEAD moved');
   // Committed bytes, not the caller's line-ending or filter configuration.
   mkdirSync(join(work, '.git', 'info'), {recursive: true});

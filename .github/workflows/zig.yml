@@ -91,7 +91,12 @@ jobs:
             /usr/bin/bwrap --unshare-user --ro-bind / / /usr/bin/true
           fi
       - name: Qualify ${{ matrix.groups }}
-        run: zig build qualify -- --group "${{ matrix.groups }}"
+        run: |
+          # Self-hosted slots provide a persistent cache that setup-zig does not know about.
+          if [ -n "${PROTEAN_CI_CACHE:-}" ]; then
+            export ZIG_GLOBAL_CACHE_DIR="$PROTEAN_CI_CACHE/zig-global" ZIG_LOCAL_CACHE_DIR="$PROTEAN_CI_CACHE/zig-local"
+          fi
+          zig build qualify -- --group "${{ matrix.groups }}"
   native:
     name: native
     needs: [qualify, tiger-style]

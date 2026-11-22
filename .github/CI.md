@@ -43,7 +43,10 @@ dispatch with `mac_backup=true` also covers a hosted queue that never starts.
 
 The Mac runners are ephemeral x86-64 Linux containers under Rosetta, one job
 each, started by per-slot launch agents. Run enough slots for TigerStyle and the
-four lanes to proceed in parallel; each container starts with cold caches.
+four lanes to proceed in parallel. Each slot mounts its own persistent cache
+directory and advertises it as `PROTEAN_CI_CACHE`; qualification then keeps
+Zig's global and local caches there instead of in the ephemeral workspace.
+Slots never share a cache, so no lock crosses a VM boundary.
 
 ## Coverage deliberately reduced
 
