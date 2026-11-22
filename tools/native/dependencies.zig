@@ -568,11 +568,8 @@ fn sourceAt(
 ) ![]const u8 {
     const destination = try c.join(&.{ parent, name });
     if (try exists(c, destination)) {
-        // A managed copy left by an earlier lock is replaced, not reported as tampering.
-        if (verifySource(c, destination, item, false)) |_| return destination else |err| {
-            std.log.warn("replacing {s} after {s}", .{ destination, @errorName(err) });
-            try Dir.cwd().deleteTree(c.io, destination);
-        }
+        try verifySource(c, destination, item, false);
+        return destination;
     }
     const transport = try c.join(&.{
         parent,
@@ -623,11 +620,8 @@ fn sourceAt(
 fn sqliteAt(c: Context, parent: []const u8, lock_path: []const u8, offline: bool) !void {
     const destination = try c.join(&.{ parent, "sqlite" });
     if (try exists(c, destination)) {
-        // A managed copy left by an earlier lock is replaced, not reported as tampering.
-        if (verifySqlite(c, destination, lock_path)) |_| return else |err| {
-            std.log.warn("replacing {s} after {s}", .{ destination, @errorName(err) });
-            try Dir.cwd().deleteTree(c.io, destination);
-        }
+        _ = try verifySqlite(c, destination, lock_path);
+        return;
     }
     const selected = try field(try c.json(lock_path), "sqlite");
     const expected = try field(selected, "archive");

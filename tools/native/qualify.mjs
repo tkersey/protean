@@ -67,7 +67,9 @@ function checkout(directory, candidate) {
     // Committed bytes, not the caller's line-ending or filter configuration.
     mkdirSync(join(work, '.git', 'info'), {recursive: true});
     writeFileSync(join(work, '.git', 'info', 'attributes'), '* -text -eol -filter -ident\n');
-    git(work, 'clean', '-ffd');
+    // Ignored state is disposable here: stale or partial inputs must not outlive their run.
+    // Zig's package directory stays, so offline runs keep their fetched packages.
+    git(work, 'clean', '-ffdx', '-e', '/zig-pkg/');
     git(work, 'checkout', '--quiet', '--force', '--detach', candidate);
     assert.equal(git(work, 'rev-parse', 'HEAD'), candidate);
     clean(work);
@@ -75,7 +77,7 @@ function checkout(directory, candidate) {
   try { prepare(); }
   catch (error) {
     // An interrupted run can leave locks or partial state; rebuild the slot once.
-    if (error.message === 'source HEAD moved') throw error;
+    if (error.message === 'source HEAD moved' || error.signal) throw error;
     console.warn('Rebuilding qualification checkout:', error.message.split('\n')[0]);
     rmSync(work, {recursive: true, force: true});
     prepare();

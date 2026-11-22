@@ -10,9 +10,12 @@ function signalGroup(pid, signal) {
   catch (error) { if (error.code === 'ESRCH' || error.code === 'EPERM') return false; throw error; }
 }
 
+// lstart text depends on time zone and locale; registration and comparison pin both.
+const psEnvironment = {PATH: '/usr/bin:/bin', TZ: 'UTC', LC_ALL: 'C'};
+
 // Start time of a live process, or '' once it has exited.
 function started(pid) {
-  try { return execFileSync('/bin/ps', ['-o', 'lstart=', '-p', String(pid)], {encoding: 'utf8'}).trim(); }
+  try { return execFileSync('/bin/ps', ['-o', 'lstart=', '-p', String(pid)], {encoding: 'utf8', env: psEnvironment}).trim(); }
   catch { return ''; }
 }
 
@@ -22,7 +25,7 @@ export function spawnQualificationGroup(command, args, options,
   if (!registration) return spawn(command, args, detached);
   const base = registration + '/' + prefix;
   // The registration records the group leader's start time, so a reused pid is never mistaken for it.
-  const child = spawn('/bin/sh', ['-c', '/bin/ps -o lstart= -p $$ > "$1$$" && test -s "$1$$" || exit 125; shift; exec "$@"',
+  const child = spawn('/bin/sh', ['-c', 'TZ=UTC LC_ALL=C /bin/ps -o lstart= -p $$ > "$1$$" && test -s "$1$$" || exit 125; shift; exec "$@"',
     'qualification', base, command, ...args], detached);
   if (child.pid) child.once('close', () => {
     const path = base + child.pid;

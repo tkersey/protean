@@ -117,3 +117,24 @@ test('a registration whose pid now leads an unrelated group is neither reported 
     process.kill(-unrelated.pid, 'SIGKILL');
   }
 });
+
+test('a helper registered under another time zone is still reported and reaped', async () => {
+  const api = new URL('../../tools/native/qualification_process.mjs', import.meta.url).href;
+  const directory = mkdtempSync(join(tmpdir(), 'protean-zone-group-'));
+  const record = join(directory, 'pid');
+  const script = `
+    import {writeFileSync} from 'node:fs';
+    import {spawnQualificationGroup} from ${JSON.stringify(api)};
+    const helper = spawnQualificationGroup('sleep', ['30'], {stdio: 'ignore', env: {...process.env, TZ: 'Pacific/Kiritimati'}});
+    helper.unref();
+    await new Promise(resolve => setTimeout(resolve, 300));
+    writeFileSync(${JSON.stringify(record)}, String(helper.pid));`;
+  try {
+    await assert.rejects(runQualificationCommand(process.execPath, ['--input-type=module', '-e', script],
+      {deadline: performance.now() + 10000, cwd: tmpdir(), stdio: 'ignore'}), /left live processes/);
+    const pid = Number(readFileSync(record, 'utf8'));
+    assert.throws(() => process.kill(-pid, 0), {code: 'ESRCH'});
+  } finally {
+    rmSync(directory, {recursive: true, force: true});
+  }
+});

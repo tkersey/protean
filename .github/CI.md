@@ -4,8 +4,7 @@ The required workflow must complete in **one attempt within 600 seconds of its
 trigger**. The budget includes runner queueing, setup, acquisition, compilation,
 every selected test, TigerStyle, and the terminal gate. The terminal `native`
 gate measures from the run's `created_at`, rejects `run_attempt != 1`, and
-requires TigerStyle and all four qualification lanes to succeed, or, for a
-self-hosted fallback run, the macOS qualification job.
+requires TigerStyle and all four qualification lanes to succeed.
 
 Pull requests and main pushes run on GitHub-hosted Linux x86-64 runners with
 exact Zig 0.17.1 and safe optimization.
@@ -34,26 +33,24 @@ the product. Full local qualification makes the same comparison within one run.
 
 ## Self-hosted fallback
 
-When GitHub-hosted runners never start a run's jobs, the
+When none of a hosted run's jobs received a runner or ran a step, the
 [fallback workflow](workflows/fallback.yml) runs on the Mac's self-hosted macOS
-runner. It acts only when no job of the hosted run received a runner or ran a
-step, and the branch still points at the run's commit. It then dispatches the
-same workflow with `mac_backup=true` and `hosted_run` set to that run. A hosted
-job that started and failed keeps its result; the fallback does not replace it.
-`workflow_run` uses the workflow from the default branch. A manual dispatch can
-cover a hosted queue that never starts, with `hosted_run` naming that run. The
-gate of a `mac_backup` run verifies that `hosted_run` is the same workflow and
-commit and that none of its jobs started.
+runner. If the branch still points at that run's commit, it dispatches the same
+workflow with `mac_backup=true`. It ignores manual dispatches and runs from other
+repositories. `workflow_run` uses the workflow from the default branch. A manual
+dispatch with `mac_backup=true` can cover a hosted queue that never starts.
 
 A `mac_backup` run replaces TigerStyle and the Linux lanes with one job that runs
 the complete local macOS `zig build qualify` on the self-hosted runner: TigerStyle
 and its launcher fixtures, authoring and the bundled-Clang witness, the LLVM
 product with its smoke and placement checks, and the downstream consumer with
-its identity comparison. The same terminal gate requires it to finish within 600
-seconds. It does not exercise Linux x86-64 or the direct backend; the next
-hosted run does. The runner keeps a persistent cache directory, advertised as
-`PROTEAN_CI_CACHE`, for Zig's global and local caches. It executes the dispatched
-commit directly on the Mac as its owner.
+its identity comparison. Its terminal check is named `macOS fallback`, not
+`native`, and requires the job to finish within 600 seconds. It never replaces
+or hides a hosted result. It does not exercise Linux x86-64 or the direct
+backend; the next hosted run does. The runner keeps a persistent cache directory,
+advertised as `PROTEAN_CI_CACHE`, for Zig's global and local caches. It executes
+the dispatched commit directly on the Mac as its owner. Its first run with an
+empty cache can exceed ten minutes.
 
 A Linux container under Rosetta could not fit the Linux lanes in 600 seconds:
 its emulated compiler took 422 seconds to build the product alone.

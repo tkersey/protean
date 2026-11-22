@@ -10,10 +10,6 @@ on:
         description: Qualify on the Mac's self-hosted macOS runner instead of GitHub-hosted Linux
         type: boolean
         default: false
-      hosted_run:
-        description: With mac_backup, the same-commit hosted run none of whose jobs started
-        type: string
-        default: ''
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -137,7 +133,8 @@ jobs:
           fi
           zig build qualify
   native:
-    name: native
+    # A fallback run reports its own check, so it never stands in for the hosted gate.
+    name: ${{ github.event_name == 'workflow_dispatch' && inputs.mac_backup && 'macOS fallback' || 'native' }}
     needs: [qualify, tiger-style, macos]
     if: ${{ always() }}
     runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.mac_backup && fromJSON('["self-hosted","macOS","ARM64"]') || 'ubuntu-24.04' }}
@@ -159,23 +156,10 @@ jobs:
           TIGER_STYLE: ${{ needs.tiger-style.result }}
           MACOS: ${{ needs.macos.result }}
           MAC_BACKUP: ${{ github.event_name == 'workflow_dispatch' && inputs.mac_backup }}
-          HOSTED_RUN: ${{ inputs.hosted_run }}
           IDENTITIES: ${{ runner.temp }}/identities
         run: |
           if [ "$MAC_BACKUP" = true ]; then
             test "$MACOS" = success
-            # macOS stands in only for a same-commit hosted run that never started.
-            if ! [[ "$HOSTED_RUN" =~ ^[0-9]+$ ]]; then
-              echo 'mac_backup requires hosted_run: the hosted run whose jobs never started.'
-              exit 1
-            fi
-            test "$(gh api "repos/$GH_REPO/actions/runs/$HOSTED_RUN" --jq '.head_sha + " " + .path')" = "$GITHUB_SHA .github/workflows/zig.yml"
-            jobs=$(gh api "repos/$GH_REPO/actions/runs/$HOSTED_RUN/jobs?per_page=100" \
-              --jq '"\(.total_count) \([.jobs[] | select((.runner_id // 0) != 0 or (.steps | length) > 0)] | length)"')
-            read -r total started <<<"$jobs"
-            echo "Hosted run $HOSTED_RUN: $started of $total jobs started"
-            test "$total" -gt 0
-            test "$started" -eq 0
           else
             test "$QUALIFICATION" = success
             test "$TIGER_STYLE" = success
