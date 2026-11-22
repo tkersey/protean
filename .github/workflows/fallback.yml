@@ -20,11 +20,12 @@ jobs:
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
         run: |
-          # A job GitHub never assigned to a runner has no runner and no steps.
-          unstarted=$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" \
-            --jq '[.jobs[] | select(.conclusion == "failure" and (.runner_id // 0) == 0 and (.steps | length) == 0)] | length')
-          if [ "$unstarted" -eq 0 ]; then
-            echo 'Hosted runners started every job; the failure is the candidate'"'"'s.'
+          # Fall back only when no hosted job started: then no hosted result exists to stand in for.
+          jobs=$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" \
+            --jq '"\(.total_count) \([.jobs[] | select((.runner_id // 0) != 0 or (.steps | length) > 0)] | length)"')
+          read -r total started <<<"$jobs"
+          if [ "$total" -eq 0 ] || [ "$started" -gt 0 ]; then
+            echo "$started of $total hosted jobs started; the result belongs to the candidate."
             exit 0
           fi
           current=$(gh api "repos/$REPO/commits/$HEAD_BRANCH" --jq .sha)
@@ -32,5 +33,5 @@ jobs:
             echo "$HEAD_BRANCH moved to $current; its own run qualifies it."
             exit 0
           fi
-          echo "$unstarted jobs never started on hosted runners; dispatching macOS qualification of $HEAD_SHA."
-          gh workflow run zig.yml --repo "$REPO" --ref "$HEAD_BRANCH" -f mac_backup=true
+          echo "None of $total hosted jobs started; dispatching macOS qualification of $HEAD_SHA."
+          gh workflow run zig.yml --repo "$REPO" --ref "$HEAD_BRANCH" -f mac_backup=true -f hosted_run="$RUN_ID"

@@ -1499,7 +1499,8 @@ const BuildGraph = struct {
         clang.setCwd(s.b.path("."));
         const clang_checks = s.b.step("check-clang-inputs", "Check bundled Clang header changes");
         clang_checks.dependOn(&clang.step);
-        s.fast.dependOn(clang_checks);
+        // Without native C there is no bundled-Clang build to witness or to guard.
+        if (s.native_enabled) s.fast.dependOn(clang_checks);
 
         const qualify = nodeCommand(s.b);
         qualify.addArgs(&.{ "node", "tools/native/qualify.mjs" });

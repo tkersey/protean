@@ -50,6 +50,8 @@ if (process.platform === 'darwin') {
     if (lstatSync(path, {throwIfNoEntry: false})?.isFile()) prefix.push('--ro-bind', path, path);
   prefix.push('--bind', scratch, sandboxPath(scratch));
   if (!cache.startsWith(scratch + '/')) prefix.push('--bind', cache, cache);
+  // Later binds win. Keep the candidate read-only when it lives inside the writable cache.
+  if (root.startsWith(cache + '/')) prefix.push('--ro-bind', root, root);
 } else throw new Error('unsupported downstream qualification platform');
 
 function run(executable, args, cwd = scratch, {failure = false, diagnostic, timeout = 300000} = {}) {
@@ -200,6 +202,8 @@ async function verify() {
     installedExecution = {admission_revision: task.revision, execution_revision: current.revision, cancellation_revision: cancelled.revision, elapsed_ms: performance.now() - executionStarted};
     console.error(`downstream installed execution: ${Math.round(installedExecution.elapsed_ms)} ms`);
   } finally { await client.close(); }
+  // CI compares this identity with the product built in another lane.
+  if (process.env.PROTEAN_DOWNSTREAM_IDENTITY) writeFileSync(process.env.PROTEAN_DOWNSTREAM_IDENTITY, JSON.stringify(identity));
   console.log(JSON.stringify({downstream: 'public addNativeSystem', node_free_acquisition_build_install: true, commit, package: packageHash, target: manifest.target, program: manifest.program_sha256, identity, installed_execution: installedExecution, elapsed_seconds: (performance.now() - started) / 1000}));
 }
 

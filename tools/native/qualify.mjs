@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
-import {constants, copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync} from 'node:fs';
+import {copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync} from 'node:fs';
 import {availableParallelism, totalmem} from 'node:os';
 import {basename, dirname, join, resolve} from 'node:path';
 import {runQualificationCommand} from './qualification_process.mjs';
@@ -45,6 +45,10 @@ function sharedDeadline() {
   return started + budget - age;
 }
 const deadline = sharedDeadline();
+// Elapsed time is reported from the same origin as the deadline: the zig build invocation.
+const origin = deadline - budget;
+const identityKeys = ['program_sha256', 'application_assets_sha256', 'dependencies', 'compiler', 'target',
+  'artifact_zig_backend'];
 const git = (cwd, ...args) => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-C', cwd, ...args],
   {env, encoding: 'utf8', timeout: Math.max(1, Math.ceil(Math.min(budget, deadline - performance.now())))}).trimEnd();
 const clean = cwd => assert.equal(git(cwd, 'status', '--porcelain', '--untracked-files=all',
@@ -52,20 +56,30 @@ const clean = cwd => assert.equal(git(cwd, 'status', '--porcelain', '--untracked
 
 function checkout(directory, candidate) {
   const work = join(directory, 'source');
-  // Own every object: the source can be replaced at the same path between runs.
-  if (!existsSync(join(work, '.git', 'HEAD')) || existsSync(join(work, '.git', 'objects', 'info', 'alternates'))) {
+  const prepare = () => {
+    // Own every object: the source can be replaced at the same path between runs.
+    if (!existsSync(join(work, '.git', 'HEAD')) || existsSync(join(work, '.git', 'objects', 'info', 'alternates'))) {
+      rmSync(work, {recursive: true, force: true});
+      git(directory, '-c', 'init.defaultBranch=qualification', 'init', '--quiet', '--template=', '--', work);
+    }
+    git(work, 'fetch', '--quiet', '--no-tags', '--update-shallow', '--', source, '+HEAD:refs/qualification/candidate');
+    assert.equal(git(work, 'rev-parse', 'refs/qualification/candidate'), candidate, 'source HEAD moved');
+    // Committed bytes, not the caller's line-ending or filter configuration.
+    mkdirSync(join(work, '.git', 'info'), {recursive: true});
+    writeFileSync(join(work, '.git', 'info', 'attributes'), '* -text -eol -filter -ident\n');
+    git(work, 'clean', '-ffd');
+    git(work, 'checkout', '--quiet', '--force', '--detach', candidate);
+    assert.equal(git(work, 'rev-parse', 'HEAD'), candidate);
+    clean(work);
+  };
+  try { prepare(); }
+  catch (error) {
+    // An interrupted run can leave locks or partial state; rebuild the slot once.
+    if (error.message === 'source HEAD moved') throw error;
+    console.warn('Rebuilding qualification checkout:', error.message.split('\n')[0]);
     rmSync(work, {recursive: true, force: true});
-    git(directory, '-c', 'init.defaultBranch=qualification', 'init', '--quiet', '--template=', '--', work);
+    prepare();
   }
-  git(work, 'fetch', '--quiet', '--no-tags', '--update-shallow', '--', source, '+HEAD:refs/qualification/candidate');
-  assert.equal(git(work, 'rev-parse', 'refs/qualification/candidate'), candidate, 'source HEAD moved');
-  // Committed bytes, not the caller's line-ending or filter configuration.
-  mkdirSync(join(work, '.git', 'info'), {recursive: true});
-  writeFileSync(join(work, '.git', 'info', 'attributes'), '* -text -eol -filter -ident\n');
-  git(work, 'clean', '-ffd');
-  git(work, 'checkout', '--quiet', '--force', '--detach', candidate);
-  assert.equal(git(work, 'rev-parse', 'HEAD'), candidate);
-  clean(work);
   return work;
 }
 
@@ -76,7 +90,11 @@ function seedArchives(work) {
   for (const file of [`horos-${lock.boundary.commit}.tar.gz`, `kosmos-${lock.world.commit}.tar.gz`,
     native.sqlite.archive.root + '.zip']) {
     const origin = join(source, inputs, file), target = join(work, inputs, file);
-    if (!existsSync(target) && existsSync(origin)) copyFileSync(origin, target, constants.COPYFILE_EXCL);
+    if (existsSync(target) || !existsSync(origin)) continue;
+    // A seed interrupted mid-copy must not leave a partial archive at the final path.
+    const partial = target + '.partial-' + process.pid;
+    copyFileSync(origin, partial);
+    renameSync(partial, target);
   }
 }
 
@@ -135,6 +153,7 @@ if (listing) {
 }
 
 let lease, pending = [], passed = 0, skipped = 0;
+const ran = new Set();
 try {
   const candidate = git(source, 'rev-parse', '--verify', 'HEAD^{commit}');
   clean(source);
@@ -160,7 +179,14 @@ try {
       deadline, allowedExitCodes: conditional ? [0, 77] : [0]});
     if (code === 77) { skipped++; console.log('Skipped', name, '(launcher inputs unchanged)'); }
     else { passed++; console.log('Passed', name, seconds(performance.now() - start)); }
+    ran.add(name);
     pending.shift();
+  }
+  const identityPath = process.env.PROTEAN_PRODUCT_IDENTITY;
+  if (identityPath && (ran.has('product') || ran.has('native-build-and-tests'))) {
+    // CI compares this product's identity with the independently built downstream consumer.
+    const manifest = JSON.parse(execFileSync(join(lease.path, 'bin/protean'), ['describe-build'], {encoding: 'utf8'}));
+    writeFileSync(identityPath, JSON.stringify(Object.fromEntries(identityKeys.map(key => [key, manifest[key]]))));
   }
   clean(work);
   assert.equal(git(work, 'rev-parse', 'HEAD'), candidate, 'qualification checkout changed');
@@ -168,12 +194,13 @@ try {
   lease = undefined;
   controller.signal.throwIfAborted();
   assert(performance.now() < deadline, 'deadline exceeded');
-  console.log(selection ? 'Selected group passed:' : 'Qualified', selection ?? candidate);
+  console.log(selection ? 'Selected groups passed:' : 'Qualified', selection?.join(', ') ?? candidate);
 } catch (error) {
   console.error(error.message);
   console.error('Incomplete qualification. Remaining groups:', pending.join(', '));
   process.exitCode = 1;
 } finally {
   lease?.release();
-  console.log('Passed', passed, 'groups, skipped', skipped, 'in', seconds(performance.now() - started));
+  console.log('Passed', passed, 'groups, skipped', skipped, 'in', seconds(performance.now() - origin),
+    'since zig build started');
 }

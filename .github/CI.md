@@ -4,7 +4,8 @@ The required workflow must complete in **one attempt within 600 seconds of its
 trigger**. The budget includes runner queueing, setup, acquisition, compilation,
 every selected test, TigerStyle, and the terminal gate. The terminal `native`
 gate measures from the run's `created_at`, rejects `run_attempt != 1`, and
-requires TigerStyle and all four qualification lanes to succeed.
+requires TigerStyle and all four qualification lanes to succeed, or, for a
+self-hosted fallback run, the macOS qualification job.
 
 Pull requests and main pushes run on GitHub-hosted Linux x86-64 runners with
 exact Zig 0.17.1 and safe optimization.
@@ -26,19 +27,23 @@ groups as local qualification, against a private checkout of the commit.
 | `direct` | `direct-smoke` | Build the product with direct Zig x86-64 code generation and Zig’s bundled Clang for SQLite and the POSIX shim, run the split SHA-256 vectors against the direct fallback, and run the same deployment smoke. |
 | `downstream` | `downstream` | Independently acquire, authenticate, package, build, install and execute the public `addNativeSystem` consumer; reject altered Horos and Kosmos inputs. |
 
-Lanes do not exchange artifacts. Full local qualification additionally requires
-the downstream consumer's program, application-assets, dependency, compiler and
-target identities to match the product it builds.
+The `native` and `downstream` lanes each upload a small build-identity file. The
+terminal gate requires the independently built downstream product's program,
+application-assets, dependency, compiler, target and backend identities to match
+the product. Full local qualification makes the same comparison within one run.
 
 ## Self-hosted fallback
 
 When GitHub-hosted runners never start a run's jobs, the
 [fallback workflow](workflows/fallback.yml) runs on the Mac's self-hosted macOS
-runner. It confirms that failed jobs never received a runner and that the branch
-still points at the run's commit, then dispatches the same workflow with
-`mac_backup=true`. A failed check on a hosted runner does not trigger the
-fallback. `workflow_run` uses the workflow from the default branch. A manual
-dispatch with `mac_backup=true` also covers a hosted queue that never starts.
+runner. It acts only when no job of the hosted run received a runner or ran a
+step, and the branch still points at the run's commit. It then dispatches the
+same workflow with `mac_backup=true` and `hosted_run` set to that run. A hosted
+job that started and failed keeps its result; the fallback does not replace it.
+`workflow_run` uses the workflow from the default branch. A manual dispatch can
+cover a hosted queue that never starts, with `hosted_run` naming that run. The
+gate of a `mac_backup` run verifies that `hosted_run` is the same workflow and
+commit and that none of its jobs started.
 
 A `mac_backup` run replaces TigerStyle and the Linux lanes with one job that runs
 the complete local macOS `zig build qualify` on the self-hosted runner: TigerStyle

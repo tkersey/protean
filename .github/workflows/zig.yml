@@ -10,6 +10,10 @@ on:
         description: Qualify on the Mac's self-hosted macOS runner instead of GitHub-hosted Linux
         type: boolean
         default: false
+      hosted_run:
+        description: With mac_backup, the same-commit hosted run none of whose jobs started
+        type: string
+        default: ''
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -51,10 +55,12 @@ jobs:
             groups: authoring-https
           - lane: native
             groups: native-smoke,native-placement
+            identity: PROTEAN_PRODUCT_IDENTITY
           - lane: direct
             groups: direct-smoke
           - lane: downstream
             groups: downstream
+            identity: PROTEAN_DOWNSTREAM_IDENTITY
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     env:
@@ -62,6 +68,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
@@ -93,7 +100,17 @@ jobs:
             /usr/bin/bwrap --unshare-user --ro-bind / / /usr/bin/true
           fi
       - name: Qualify ${{ matrix.groups }}
-        run: zig build qualify -- --group "${{ matrix.groups }}"
+        run: |
+          if [ -n "${{ matrix.identity }}" ]; then export "${{ matrix.identity }}=$RUNNER_TEMP/identity.json"; fi
+          zig build qualify -- --group "${{ matrix.groups }}"
+      - name: Retain the build identity for comparison
+        if: matrix.identity
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: identity-${{ matrix.lane }}
+          path: ${{ runner.temp }}/identity.json
+          if-no-files-found: error
+          retention-days: 1
   macos:
     name: Qualification / macos-arm64
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.mac_backup }}
@@ -126,6 +143,12 @@ jobs:
     runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.mac_backup && fromJSON('["self-hosted","macOS","ARM64"]') || 'ubuntu-24.04' }}
     timeout-minutes: 5
     steps:
+      - name: Collect build identities
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.mac_backup) && needs.qualify.result == 'success' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: identity-*
+          path: ${{ runner.temp }}/identities
       - name: Require complete qualification within ten minutes
         env:
           GH_TOKEN: ${{ github.token }}
@@ -136,12 +159,35 @@ jobs:
           TIGER_STYLE: ${{ needs.tiger-style.result }}
           MACOS: ${{ needs.macos.result }}
           MAC_BACKUP: ${{ github.event_name == 'workflow_dispatch' && inputs.mac_backup }}
+          HOSTED_RUN: ${{ inputs.hosted_run }}
+          IDENTITIES: ${{ runner.temp }}/identities
         run: |
           if [ "$MAC_BACKUP" = true ]; then
             test "$MACOS" = success
+            # macOS stands in only for a same-commit hosted run that never started.
+            if ! [[ "$HOSTED_RUN" =~ ^[0-9]+$ ]]; then
+              echo 'mac_backup requires hosted_run: the hosted run whose jobs never started.'
+              exit 1
+            fi
+            test "$(gh api "repos/$GH_REPO/actions/runs/$HOSTED_RUN" --jq '.head_sha + " " + .path')" = "$GITHUB_SHA .github/workflows/zig.yml"
+            jobs=$(gh api "repos/$GH_REPO/actions/runs/$HOSTED_RUN/jobs?per_page=100" \
+              --jq '"\(.total_count) \([.jobs[] | select((.runner_id // 0) != 0 or (.steps | length) > 0)] | length)"')
+            read -r total started <<<"$jobs"
+            echo "Hosted run $HOSTED_RUN: $started of $total jobs started"
+            test "$total" -gt 0
+            test "$started" -eq 0
           else
             test "$QUALIFICATION" = success
             test "$TIGER_STYLE" = success
+            product=$(jq -S . "$IDENTITIES/identity-native/identity.json")
+            downstream=$(jq -S . "$IDENTITIES/identity-downstream/identity.json")
+            jq -e 'length == 6 and all(.[]; . != null)' <<<"$product" >/dev/null
+            if [ "$product" != "$downstream" ]; then
+              echo 'The independent downstream build does not match the product identity.'
+              diff <(echo "$product") <(echo "$downstream") || true
+              exit 1
+            fi
+            echo 'The independent downstream build matches the product identity.'
           fi
           if [ "$RUN_ATTEMPT" != 1 ]; then
             echo 'Qualification requires the first attempt of its run.'

@@ -1,12 +1,19 @@
-import {spawn} from 'node:child_process';
-import {existsSync, mkdtempSync, readdirSync, renameSync, rmSync} from 'node:fs';
+import {execFileSync, spawn} from 'node:child_process';
+import {existsSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
 
 function signalGroup(pid, signal) {
   try { process.kill(-pid, signal); return true; }
-  catch (error) { if (error.code === 'ESRCH') return false; throw error; }
+  // A group this user cannot signal is not one this qualification spawned.
+  catch (error) { if (error.code === 'ESRCH' || error.code === 'EPERM') return false; throw error; }
+}
+
+// Start time of a live process, or '' once it has exited.
+function started(pid) {
+  try { return execFileSync('/bin/ps', ['-o', 'lstart=', '-p', String(pid)], {encoding: 'utf8'}).trim(); }
+  catch { return ''; }
 }
 
 export function spawnQualificationGroup(command, args, options,
@@ -14,7 +21,8 @@ export function spawnQualificationGroup(command, args, options,
   const detached = {...options, detached: true};
   if (!registration) return spawn(command, args, detached);
   const base = registration + '/' + prefix;
-  const child = spawn('/bin/sh', ['-c', ': > "$1$$" && test -f "$1$$" || exit 125; shift; exec "$@"',
+  // The registration records the group leader's start time, so a reused pid is never mistaken for it.
+  const child = spawn('/bin/sh', ['-c', '/bin/ps -o lstart= -p $$ > "$1$$" && test -s "$1$$" || exit 125; shift; exec "$@"',
     'qualification', base, command, ...args], detached);
   if (child.pid) child.once('close', () => {
     const path = base + child.pid;
@@ -28,15 +36,37 @@ export function spawnQualificationGroup(command, args, options,
   return child;
 }
 
-function liveGroups(root, directory, supervisorsOnly = false) {
-  const registrations = readdirSync(directory, {recursive: true, withFileTypes: true});
-  const groups = new Set([root]);
-  for (const entry of registrations) {
-    if (!entry.isFile()) continue;
-    if (entry.name.startsWith('supervisor-')) groups.add(Number(entry.name.slice('supervisor-'.length)));
-    else if (!supervisorsOnly) groups.add(Number(entry.name));
+function registrations(directory) {
+  // Nested scopes are sealed or removed concurrently; a vanished entry is simply gone.
+  const found = [];
+  let entries;
+  try { entries = readdirSync(directory, {withFileTypes: true}); }
+  catch (error) { if (error.code === 'ENOENT') return found; throw error; }
+  for (const entry of entries) {
+    const path = directory + '/' + entry.name;
+    if (entry.isDirectory()) found.push(...registrations(path));
+    else if (entry.isFile()) found.push({name: entry.name, path});
   }
-  return [...groups].filter(pid => Number.isSafeInteger(pid) && pid > 1 && signalGroup(pid, 0));
+  return found;
+}
+
+function liveGroups(root, directory, supervisorsOnly = false) {
+  const groups = new Map([[root, null]]);
+  for (const {name, path} of registrations(directory)) {
+    const supervisor = name.startsWith('supervisor-');
+    if (supervisorsOnly && !supervisor) continue;
+    let recorded;
+    try { recorded = readFileSync(path, 'utf8').trim(); }
+    catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+    groups.set(Number(supervisor ? name.slice('supervisor-'.length) : name), recorded);
+  }
+  return [...groups].filter(([pid, recorded]) => {
+    if (!Number.isSafeInteger(pid) || pid <= 1 || !signalGroup(pid, 0)) return false;
+    if (recorded === null) return true;
+    // A pid is not reused while its group exists, so a departed leader still identifies our group.
+    const current = started(pid);
+    return current === '' || current === recorded;
+  }).map(([pid]) => pid);
 }
 
 async function terminate(root, directory) {
