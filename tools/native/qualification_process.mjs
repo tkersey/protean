@@ -26,7 +26,7 @@ export function spawnQualificationGroup(command, args, options,
   const base = registration + '/' + prefix;
   // The registration records the group leader's start time, so a reused pid is never mistaken for it.
   // It appears complete or not at all; a sealed scope makes the rename fail before the command runs.
-  const child = spawn('/bin/sh', ['-c', 'TZ=UTC LC_ALL=C /bin/ps -o lstart= -p $$ > "$1$$.new" && test -s "$1$$.new" && mv "$1$$.new" "$1$$" || exit 125; shift; exec "$@"',
+  const child = spawn('/bin/sh', ['-c', 'TZ=UTC LC_ALL=C /bin/ps -o lstart= -p $$ > "$1$$.new" && test -s "$1$$.new" && /bin/mv "$1$$.new" "$1$$" || { echo "qualification: cannot register process group $$ in $1" >&2; exit 125; }; shift; exec "$@"',
     'qualification', base, command, ...args], detached);
   if (child.pid) child.once('close', () => {
     const path = base + child.pid;
@@ -55,7 +55,7 @@ function registrations(directory) {
 }
 
 function liveGroups(root, directory, supervisorsOnly = false) {
-  const groups = new Map([[root, null]]);
+  const groups = new Map([[root.pid, root.started || null]]);
   for (const {name, path} of registrations(directory)) {
     const supervisor = name.startsWith('supervisor-');
     if (supervisorsOnly && !supervisor) continue;
@@ -105,10 +105,12 @@ export async function runQualificationCommand(command, args, {
     renameSync(directory, closing);
     scope = closing;
   }
-  let child, timer, abort, cleanupFailed = false;
+  let child, root, timer, abort, cleanupFailed = false;
   try {
     child = spawnQualificationGroup(command, args, {cwd, stdio,
       env: {...env, PROTEAN_QUALIFICATION_GROUPS: directory}}, inherited ?? null, 'supervisor-');
+    // The root group is identified like every registered group once its leader has exited.
+    if (child.pid) root = {pid: child.pid, started: started(child.pid)};
     const result = await new Promise((resolve, reject) => {
       child.once('error', reject);
       child.once('close', (code, killedBy) => {
@@ -121,12 +123,12 @@ export async function runQualificationCommand(command, args, {
     });
     signal?.throwIfAborted();
     seal();
-    if (liveGroups(child.pid, scope).length) throw new Error('qualification command left live processes');
+    if (liveGroups(root, scope).length) throw new Error('qualification command left live processes');
     if (performance.now() >= deadline) throw new Error('deadline exceeded');
     return result;
   } catch (error) {
     if (child?.pid) {
-      try { seal(); await terminate(child.pid, scope); }
+      try { seal(); await terminate(root, scope); }
       catch (failure) {
         cleanupFailed = true;
         throw new Error(`${error.message}; cleanup in ${scope} failed: ${failure.message}`, {cause: failure});
