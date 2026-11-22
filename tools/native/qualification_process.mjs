@@ -49,7 +49,7 @@ function registrations(directory) {
 }
 
 function liveGroups(root, directory, supervisorsOnly = false) {
-  const groups = new Map([[root.pid, root.started || null]]);
+  const groups = new Map([[root.pid, root.started || (root.exited ? null : undefined)]]);
   for (const {name, path} of registrations(directory)) {
     const supervisor = name.startsWith('supervisor-');
     if (supervisorsOnly && !supervisor) continue;
@@ -60,12 +60,21 @@ function liveGroups(root, directory, supervisorsOnly = false) {
   }
   return [...groups].filter(([pid, recorded]) => {
     if (!Number.isSafeInteger(pid) || pid <= 1 || !signalGroup(pid, 0)) return false;
+    if (recorded === undefined) return true;
     const current = started(pid);
     return current === '' || current === recorded;
   }).map(([pid]) => pid);
 }
 
 async function terminate(root, directory) {
+  try { await reap(root, directory); }
+  catch (error) {
+    if (!root.exited) signalGroup(root.pid, 'SIGKILL');
+    throw error;
+  }
+}
+
+async function reap(root, directory) {
   for (const pid of liveGroups(root, directory, true)) signalGroup(pid, 'SIGTERM');
   const grace = performance.now() + 250;
   let groups = liveGroups(root, directory);
@@ -101,7 +110,11 @@ export async function runQualificationCommand(command, args, {
   try {
     child = spawnQualificationGroup(command, args, {cwd, stdio,
       env: {...env, PROTEAN_QUALIFICATION_GROUPS: directory}}, inherited ?? null, 'supervisor-');
-    if (child.pid) root = {pid: child.pid, started: started(child.pid)};
+    if (child.pid) {
+      root = {pid: child.pid, started: null, exited: false};
+      child.once('exit', () => { root.exited = true; });
+      try { root.started = started(child.pid); } catch {}
+    }
     const result = await new Promise((resolve, reject) => {
       child.once('error', reject);
       child.once('close', (code, killedBy) => {
