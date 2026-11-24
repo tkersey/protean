@@ -5,7 +5,7 @@ export const scanContract = `Classify a finite scan at the declared identity and
 
 export const taskContract = `${scanContract}
 
-Use the terminal report summary for your answer. Return exactly the JSON fields kind ("interface-repair.answer.v1"), case_id, domain_identity, domain_revision (both subject fields are canonical unsigned decimal strings), outcome ("counterexample", "incomplete", or "exhausted_declared_domain"), support (an array of canonical workspace references to evidence you received), and explanation (a string). Cite evidence for the declaration and conclusions about the visits. For a counterexample cite the witnessed mismatch. For exhaustion account for the whole universe. For incomplete identify the missing premise. The following concise explanations can be checked automatically when true: "Unknown domain.", "Invalid visit identity.", "Invalid visit revision.", "Visit outside domain.", or "Missing successful coverage of member N." with its exact unsigned member number. Other explanations are retained for adjudication.`;
+Use the terminal report summary for your answer. Return exactly the JSON fields kind ("interface-repair.answer.v1"), case_id, domain_identity, domain_revision (both subject fields are canonical unsigned decimal strings), outcome ("counterexample", "incomplete", or "exhausted_declared_domain"), support (an array of canonical workspace references to evidence you received), and explanation (a string). Cite evidence for the declaration and conclusions about the visits. For a counterexample cite the witnessed mismatch. For exhaustion account for the whole universe. For incomplete identify the missing premise. For exhaustion, "The declared members have successful matching visits." is automatically checkable. For a counterexample, use "Member N disagrees with observed value M." with the witnessed unsigned values. For incomplete, checkable explanations include "Unknown domain.", "Invalid visit identity.", "Invalid visit revision.", "Visit outside domain.", and "Missing successful coverage of member N." Use canonical unsigned decimal numbers for N and M. Other explanations are retained for adjudication.`;
 
 export const candidateContract = `This is directed interface repair. The complete and partial development scans produce the same inadequate Boolean but require different conclusions. Construct a new ordinary pure ProjectionInput(ScanEvidence) -> ProjectionResult(U) with one computed block addressed to the supplied consumer. Use program.build with source_records, execute on the canonical input, select its result and inspect the next request. Nominate your program through the terminal report summary as exactly {"kind":"interface-repair.candidate.v1","status":"candidate","program":<workspace program reference>,"diagnosis":"..."} or use status "no_candidate" and program null. No specific payload layout is required.`;
 
@@ -175,26 +175,50 @@ export function canonicalEvidence(specimen, sourceRefs) {
   return [[BigInt(domain.identity), BigInt(domain.revision), domain.known, domain.members.map(BigInt)], encodedVisits];
 }
 
+function sameMultiset(left, right) {
+  if (!Array.isArray(left) || left.length !== right.length) return false;
+  const remaining = [...right];
+  for (const value of left) {
+    const at = remaining.findIndex(other => isDeepStrictEqual(value, other));
+    if (at < 0) return false;
+    remaining.splice(at, 1);
+  }
+  return true;
+}
+
+function sameScanFacts(evidence, canonical) {
+  if (!Array.isArray(evidence) || evidence.length !== 2) return false;
+  const [domain, visits] = evidence, [declared, observed] = canonical;
+  return Array.isArray(domain) && domain.length === 4 && isDeepStrictEqual(domain.slice(0, 3), declared.slice(0, 3)) &&
+    sameMultiset(domain[3], declared[3]) && sameMultiset(visits, observed);
+}
+
 export function inspectProjection(specimen, sourceRefs, schemaKind, payload) {
-  if (schemaKind !== 'ScanEvidence' && schemaKind !== 'ScanOutcome') return {semantic_judgment: 'unestablished', paths: []};
+  if (schemaKind !== 'ScanEvidence' && schemaKind !== 'ScanOutcome')
+    return {semantic_judgment: 'unestablished', schema_judgment: null, exact_evidence_preservation: null, paths: []};
   const expected = assessScan(specimen), canonical = canonicalEvidence(specimen, sourceRefs);
-  let correct = false, paths = expected.paths;
-  if (schemaKind === 'ScanEvidence') correct = isDeepStrictEqual(payload, canonical);
-  else if (outcomes[payload?.tag] === expected.outcome) {
-    if (expected.outcome === exhausted) correct = isDeepStrictEqual(payload.value, canonical);
-    else if (expected.outcome === incomplete) {
-      const reason = !expected.domain.known ? 0 : expected.invalid.length ? 2 : 3;
-      correct = isDeepStrictEqual(payload.value, [reason, canonical]);
-    } else {
-      const {visits} = readScan(specimen);
-      const i = canonical[1].findIndex(visit => isDeepStrictEqual(visit, payload.value));
-      if (i >= 0 && expected.witnesses.some(witness => isDeepStrictEqual(witness, visits[i]))) {
-        correct = true;
-        paths = ['scan.json', visits[i].path];
-      }
+  let supported = false, paths = expected.paths, exact = null;
+  if (schemaKind === 'ScanEvidence' || payload?.tag === 1 || payload?.tag === 2) {
+    const evidence = schemaKind === 'ScanEvidence' ? payload : payload.tag === 1 ? payload.value : payload.value?.[1];
+    exact = isDeepStrictEqual(evidence, canonical);
+    supported = exact || sameScanFacts(evidence, canonical);
+    if (schemaKind === 'ScanOutcome') {
+      const reason = payload.value?.[0];
+      const trueReason = expected.domain.known ?
+        (reason === 2 && expected.invalid.length > 0) || (reason === 3 && expected.missing.length > 0) : reason === 0;
+      supported = supported && outcomes[payload.tag] === expected.outcome &&
+        (payload.tag !== 2 || trueReason);
+    }
+  } else if (payload?.tag === 0 && expected.outcome === counterexample) {
+    const {visits} = readScan(specimen);
+    const i = canonical[1].findIndex(visit => isDeepStrictEqual(visit, payload.value));
+    if (i >= 0 && expected.witnesses.some(witness => isDeepStrictEqual(witness, visits[i]))) {
+      supported = true;
+      paths = ['scan.json', visits[i].path];
     }
   }
-  return {semantic_judgment: correct ? 'supported' : 'incorrect', paths: correct ? paths : []};
+  return {semantic_judgment: supported ? 'supported' : 'unestablished', schema_judgment: supported ? 'supported' : 'incorrect',
+    exact_evidence_preservation: exact, paths: supported ? paths : []};
 }
 
 export function collisionProbe(left, right) {
@@ -207,18 +231,29 @@ export function collisionProbe(left, right) {
   return {distinction_preserved: distinct, semantic_judgment: distinct ? 'unestablished' : 'lost_distinction'};
 }
 
-function checkExplanation(explanation, expected) {
-  const statement = explanation.trim().replace(/\.$/, '').toLowerCase();
-  if (statement === 'unknown domain') return !expected.domain.known;
-  if (statement === 'invalid visit identity') return expected.domain.known && expected.invalid.includes('identity');
-  if (statement === 'invalid visit revision') return expected.domain.known && expected.invalid.includes('revision');
-  if (statement === 'visit outside domain') return expected.domain.known && expected.invalid.includes('membership');
-  const match = /^missing successful coverage of member ([0-9]+)$/.exec(statement);
-  if (match) return expected.domain.known && expected.missing.includes(match[1]);
-  return null;
+function checkExplanation(text, expected, files) {
+  const statement = text.trim().replace(/\.$/, '').toLowerCase();
+  if (statement === 'the declared members have successful matching visits')
+    return {outcome: exhausted, verified: expected.domain.known && expected.missing.length === 0};
+  const mismatch = /^member ([0-9]+) disagrees with observed value ([0-9]+)$/.exec(statement);
+  if (mismatch) {
+    const witnesses = expected.witnesses.filter(visit => visit.member === mismatch[1] && files[visit.path] === mismatch[2]);
+    return {outcome: counterexample, verified: expected.domain.known && witnesses.length > 0, witnesses};
+  }
+  let verified;
+  if (statement === 'unknown domain') verified = !expected.domain.known;
+  else if (statement === 'invalid visit identity') verified = expected.domain.known && expected.invalid.includes('identity');
+  else if (statement === 'invalid visit revision') verified = expected.domain.known && expected.invalid.includes('revision');
+  else if (statement === 'visit outside domain') verified = expected.domain.known && expected.invalid.includes('membership');
+  else {
+    const missing = /^missing successful coverage of member ([0-9]+)$/.exec(statement);
+    if (!missing) return {outcome: null, verified: null};
+    verified = expected.domain.known && expected.missing.includes(missing[1]);
+  }
+  return {outcome: incomplete, verified};
 }
 
-export function gradeAnswer(summary, specimen, exposure) {
+export function gradeAnswer(summary, specimen, exposure, evidenceComplete = exposure != null) {
   const expected = assessScan(specimen);
   let answer;
   try { answer = parseAnswer(summary); } catch (error) {
@@ -231,37 +266,44 @@ export function gradeAnswer(summary, specimen, exposure) {
     errors.push('wrong_subject');
   if (answer.outcome !== expected.outcome) errors.push('wrong_outcome');
   const outcome_correct = errors.length === 0, paths = new Set();
-  let unadjudicatedPayload = false;
+  let unadjudicatedPayload = false, allCitationsInsufficient = answer.support.length > 0;
   if (!answer.support.length) errors.push('missing_support');
   if (exposure == null) errors.push('unverified_exposure');
   else for (const cited of answer.support) {
     const matches = exposure.filter(row => isDeepStrictEqual(row.ref, cited));
-    if (!matches.length) errors.push('unexposed_support');
+    if (!matches.length) errors.push(evidenceComplete ? 'unexposed_support' : 'unverified_exposure');
+    if (!matches.length || matches.some(row => !row.known_lossy && row.semantic_judgment !== 'incorrect'))
+      allCitationsInsufficient = false;
     for (const match of matches) {
       for (const path of match.paths) paths.add(path);
       if (match.semantic_judgment === 'unestablished' && !match.known_lossy) unadjudicatedPayload = true;
     }
   }
   const missingEvidence = [];
-  let explanation_verified = null;
+  const explanation = checkExplanation(answer.explanation, expected, specimen.files);
+  if (explanation.verified === null) errors.push('unadjudicated_explanation');
+  else if (!explanation.verified) errors.push('incorrect_explanation');
+  else if (explanation.outcome !== answer.outcome) errors.push('irrelevant_explanation');
   if (exposure != null && !paths.has('scan.json')) missingEvidence.push('unsupported_declaration');
   if (answer.outcome === counterexample && exposure != null) {
-    if (!expected.witnesses.some(witness => paths.has(witness.path))) missingEvidence.push('unsupported_witness');
+    if (!(explanation.witnesses ?? expected.witnesses).some(witness => paths.has(witness.path)))
+      missingEvidence.push('unsupported_witness');
   } else if (answer.outcome === exhausted && exposure != null) {
     if (!expected.domain.known || expected.domain.members.some(member =>
       !expected.covered[member]?.some(path => paths.has(path)))) missingEvidence.push('unsupported_coverage');
     if (expected.paths.some(path => !paths.has(path))) missingEvidence.push('unexamined_visit');
   } else if (answer.outcome === incomplete && expected.outcome === incomplete) {
-    explanation_verified = checkExplanation(answer.explanation, expected);
-    if (explanation_verified !== true) errors.push(explanation_verified === null ?
-      'unadjudicated_explanation' : 'incorrect_explanation');
     if (exposure != null && expected.domain.known && expected.valid_visit_paths.some(path => !paths.has(path)))
       missingEvidence.push('unexamined_visit');
   }
-  if (missingEvidence.length) errors.push(...(unadjudicatedPayload ? ['unadjudicated_payload'] : missingEvidence));
+  if (missingEvidence.length) {
+    if (unadjudicatedPayload) errors.push('unadjudicated_payload');
+    else if (!evidenceComplete && !allCitationsInsufficient) errors.push('unverified_exposure');
+    else errors.push(...missingEvidence);
+  }
   const supported = !errors.length || (errors.every(error =>
     error === 'unverified_exposure' || error === 'unadjudicated_explanation' || error === 'unadjudicated_payload') ? null : false);
-  return {answer, outcome_correct, supported, explanation_verified,
+  return {answer, outcome_correct, supported, explanation_verified: explanation.verified,
     unsupported_exhaustion: answer.outcome !== exhausted ? false : supported === null ? null : !supported,
     errors: [...new Set(errors)]};
 }

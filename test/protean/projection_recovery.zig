@@ -1209,6 +1209,30 @@ test "directed repair admission exposes only the executable lossy dependency clo
     try std.testing.expectEqual(.complete, diagnostic.phase);
 }
 
+test "directed repair distinguishes observable computed data from hidden payload differences" {
+    const sources = @import("interface_repair_sources");
+    const a = std.testing.allocator;
+    const Result = wc.ProjectionResult(u64);
+    const schema = try native.values.schemaBytes(Result, a);
+    defer a.free(schema);
+    const consumer: wc.Ref = .{ .kind = .observation, .id = .{ .bytes = "observed consumer" } };
+    for ([_][]const wc.PresentationBlock{ &.{}, &.{.{ .computed = .{} }} }) |blocks| {
+        for ([_]u64{ 1, 2 }) |payload| {
+            const result = try contracts.encodeOwned(Result, a, .{
+                .proposal = .{ .consumer = consumer, .blocks = .{ .items = blocks } },
+                .value = payload,
+            });
+            defer a.free(result);
+            if (blocks.len == 0) {
+                try std.testing.expectError(
+                    error.ProjectionResultRejected,
+                    sources.requireComputed(a, consumer, schema, result),
+                );
+            } else try sources.requireComputed(a, consumer, schema, result);
+        }
+    }
+}
+
 test "directed repair canonical inputs use acquired values and retain missing observations" {
     const sources = @import("interface_repair_sources");
     const Owner = struct {

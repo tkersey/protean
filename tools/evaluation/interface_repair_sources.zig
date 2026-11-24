@@ -144,6 +144,21 @@ pub fn projectionInput(a: Allocator, consumer: wc.Ref, evidence: example.ScanEvi
     return native.json.canonical(a, decoded.value);
 }
 
+pub fn requireComputed(
+    a: Allocator,
+    consumer: wc.Ref,
+    schema: []const u8,
+    bytes: []const u8,
+) !void {
+    var decoded = try native.projection_proposal.decodeResult(a, schema, bytes);
+    defer decoded.deinit();
+    const proposal = decoded.header;
+    if (proposal.consumer.kind != .observation or
+        !std.mem.eql(u8, proposal.consumer.id.bytes, consumer.id.bytes) or
+        proposal.blocks.items.len != 1 or proposal.blocks.items[0] != .computed)
+        return error.ProjectionResultRejected;
+}
+
 fn sourcePath(path: []const u8) bool {
     if (!std.mem.startsWith(u8, path, "r-") or path.len == 2) return false;
     for (path[2..]) |b| if (!std.ascii.isAlphanumeric(b) and b != '-') return false;

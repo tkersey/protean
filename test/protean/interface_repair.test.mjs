@@ -16,9 +16,13 @@ function edit(specimen, fn) {
 }
 function report(specimen, changes = {}) {
   const expected = assessScan(specimen);
+  const witness = expected.witnesses[0];
+  const explanation = expected.outcome === complete ? 'The declared members have successful matching visits.' :
+    expected.outcome === mismatch ? `Member ${witness.member} disagrees with observed value ${specimen.files[witness.path]}.` :
+    'Unknown domain.';
   return JSON.stringify({kind: 'interface-repair.answer.v1', case_id: specimen.case_id,
     domain_identity: expected.domain.identity, domain_revision: expected.domain.revision, outcome: expected.outcome,
-    support: [sourceRef(100)], explanation: 'The cited observation supports this conclusion.', ...changes});
+    support: [sourceRef(100)], explanation, ...changes});
 }
 const exposure = specimen => [{ref: sourceRef(100), paths: assessScan(specimen).paths}];
 
@@ -120,6 +124,10 @@ test('a cited generic presentation leaves support open until its meaning or inde
   assert.equal(grade(specimen, {support:[sourceRef(100)]}).supported, false);
   assert.equal(grade(specimen, {support:[result, sourceRef(102)]}).supported, false);
   assert.equal(grade(specimen, {support:[]}, null).supported, false);
+  assert.equal(gradeAnswer(report(specimen), specimen, [], false).supported, null);
+  assert.equal(gradeAnswer(report(specimen), specimen, exposure(specimen), false).supported, true);
+  assert.equal(gradeAnswer(report(specimen, {outcome:partial}), specimen, [], false).supported, false);
+  assert.equal(gradeAnswer(report(specimen, {support:[result]}), specimen, [{...generic, known_lossy:true}], false).supported, false);
   assert.equal(grade(specimen, {support:[result, sourceRef(100)]}, [generic, ...exposure(specimen)]).supported, true);
   assert.equal(grade(hole, {outcome:complete}).unsupported_exhaustion, true);
   assert.equal(grade(specimen, {domain_identity:'0'}).unsupported_exhaustion, true);
@@ -146,6 +154,42 @@ test('incomplete explanations are independently checked and unknown claims stay 
   assert.ok(gradeAnswer(answer, mixed, [{ref: sourceRef(100), paths:Object.keys(mixed.files)}]).supported);
 });
 
+test('every outcome requires a relevant explanation independently checked against its cited facts', () => {
+  const specimens = [corpus.development[0], corpus.transfer[4], corpus.development[1]];
+  for (const specimen of specimens) {
+    const grade = explanation => gradeAnswer(report(specimen, {explanation}), specimen, exposure(specimen));
+    const falsePremise = grade('Unknown domain.');
+    assert.equal(falsePremise.outcome_correct, true);
+    assert.equal(falsePremise.supported, false);
+    assert.equal(falsePremise.explanation_verified, false);
+    assert.ok(falsePremise.errors.includes('incorrect_explanation'));
+    const explanation = 'I inspected the scan and drew this conclusion.';
+    const open = grade(explanation);
+    assert.equal(open.supported, null);
+    assert.equal(open.explanation_verified, null);
+    assert.equal(open.answer.explanation, explanation);
+    assert.deepEqual(open.errors, ['unadjudicated_explanation']);
+  }
+  const [full, conflict, partial] = specimens;
+  assert.equal(gradeAnswer(report(full, {explanation:'Unknown domain.'}), full, exposure(full)).unsupported_exhaustion, true);
+  assert.equal(gradeAnswer(report(partial, {explanation:'The declared members have successful matching visits.'}),
+    partial, exposure(partial)).explanation_verified, false);
+  const incidental = gradeAnswer(report(conflict, {explanation:'The declared members have successful matching visits.'}),
+    conflict, exposure(conflict));
+  assert.equal(incidental.explanation_verified, true);
+  assert.deepEqual(incidental.errors, ['irrelevant_explanation']);
+  const two = edit(full, ({visits}, files) => {
+    visits.push({...visits[0], path:'r-one'}, {...visits[1], path:'r-two'});
+    files['r-one'] = '8';
+    files['r-two'] = '9';
+  });
+  const grade = (explanation, paths) => gradeAnswer(report(two, {explanation}), two,
+    [{ref:sourceRef(100), paths:['scan.json', ...paths]}]);
+  assert.ok(grade('Member 2 disagrees with observed value 9.', ['r-two']).supported);
+  assert.ok(grade('Member 2 disagrees with observed value 9.', ['r-one']).errors.includes('unsupported_witness'));
+  assert.ok(grade('Member 2 disagrees with observed value 8.', ['r-two']).errors.includes('incorrect_explanation'));
+});
+
 test('schema-specific checking requires exact subject, observed bytes and ancestry-bearing references', () => {
   const example = corpus.transfer[0], sources = refs(example), canonical = canonicalEvidence(example, sources);
   assert.ok(canonical[0][0] > BigInt(Number.MAX_SAFE_INTEGER));
@@ -153,16 +197,38 @@ test('schema-specific checking requires exact subject, observed bytes and ancest
   for (const mutate of [value => value[0][0]++, value => value[0][1]++, value => value[1][0][4]++,
     value => { value[1][0][5] = [3, sourceRef(1234).id]; }]) {
     const altered = structuredClone(canonical); mutate(altered);
-    assert.equal(inspectProjection(example, sources, 'ScanEvidence', altered).semantic_judgment, 'incorrect');
-    assert.equal(inspectProjection(example, sources, 'ScanOutcome', {tag:1,value:altered}).semantic_judgment, 'incorrect');
+    for (const [schema, payload] of [['ScanEvidence', altered], ['ScanOutcome', {tag:1, value:altered}]]) {
+      const judgment = inspectProjection(example, sources, schema, payload);
+      assert.equal(judgment.exact_evidence_preservation, false);
+      assert.equal(judgment.schema_judgment, 'incorrect');
+      assert.equal(judgment.semantic_judgment, 'unestablished');
+      assert.deepEqual(judgment.paths, []);
+    }
   }
   const specimen = corpus.transfer[4], map = refs(specimen), evidence = canonicalEvidence(specimen, map);
   const witness = evidence[1].find(visit => visit[2] !== visit[4]);
   assert.equal(inspectProjection(specimen, map, 'ScanOutcome', {tag:0,value:witness}).semantic_judgment, 'supported');
-  assert.equal(inspectProjection(specimen, map, 'ScanOutcome', {tag:0,value:evidence[1].at(-1)}).semantic_judgment, 'incorrect');
+  assert.equal(inspectProjection(specimen, map, 'ScanOutcome', {tag:0,value:evidence[1].at(-1)}).schema_judgment, 'incorrect');
   const failed = corpus.transfer[9], failing = canonicalEvidence(failed, refs(failed));
   assert.deepEqual(failing[1].at(-1).slice(3), [false, 0n, [3, refs(failed)['scan.json'].id]]);
   assert.equal(inspectProjection(failed, refs(failed), 'ScanOutcome', {tag:2,value:[3,failing]}).semantic_judgment, 'supported');
+});
+
+test('full evidence in a different order supports the same facts and records its loss of exact preservation', () => {
+  const specimen = corpus.transfer[3], map = refs(specimen);
+  const canonical = canonicalEvidence(specimen, map), permuted = structuredClone(canonical);
+  permuted[0][3].reverse();
+  permuted[1].reverse();
+  const exact = inspectProjection(specimen, map, 'ScanEvidence', canonical);
+  assert.equal(exact.exact_evidence_preservation, true);
+  for (const [schema, payload] of [['ScanEvidence', permuted], ['ScanOutcome', {tag:1,value:permuted}]]) {
+    assert.deepEqual(inspectProjection(specimen, map, schema, payload), {
+      semantic_judgment:'supported', schema_judgment:'supported', exact_evidence_preservation:false, paths:exact.paths});
+  }
+  const changed = structuredClone(permuted);
+  changed[1][0] = changed[1].find(visit => visit[2] !== changed[1][0][2]);
+  assert.deepEqual(inspectProjection(specimen, map, 'ScanEvidence', changed), {
+    semantic_judgment:'unestablished', schema_judgment:'incorrect', exact_evidence_preservation:false, paths:[]});
 });
 
 test('same-consumer probe can falsify a generic payload but differing bytes do not certify it', () => {

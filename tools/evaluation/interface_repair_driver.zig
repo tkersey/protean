@@ -22,10 +22,13 @@ const Plan = struct {
     condition: Condition,
     files: C.Vector(struct { path: C.Utf8, sha256: C.Text(64) }, null),
     source_sha256: C.Text(64),
+    program_sha256: ?C.Text(64),
 };
 
 pub const Session = struct {
     expected: ?[32]u8 = null,
+    source_path: ?[]const u8 = null,
+    task: ?[16]u8 = null,
     started: bool = false,
     ready: bool = false,
     fixture_used: bool = false,
@@ -44,6 +47,7 @@ pub const Session = struct {
         worker: *native.testing.Worker,
         a: Allocator,
         params: Json.Value,
+        selection_only: bool,
     ) !Json.Value {
         const expected = self.expected orelse return error.BootstrapNotEnabled;
         if (self.started) return error.InitialCutRequired;
@@ -52,7 +56,11 @@ pub const Session = struct {
         const task = try native.client.identifier(16, try field(params, "task_id"));
         const descriptor = try Json.text(try field(params, "descriptor"));
         if (!std.meta.eql(expected, native.testing.digest(descriptor))) return error.ChangedPlan;
-        const source = try Json.text(try field(params, "source"));
+        const supplied = try field(params, "source");
+        const source = if (self.source_path) |path| blk: {
+            if (supplied != .null) return error.ChangedProgram;
+            break :blk try std.Io.Dir.cwd().readFileAlloc(service.io, path, a, .unlimited);
+        } else try Json.text(supplied);
         var decoded = try Json.parseAsset(a, descriptor, descriptor.len);
         defer decoded.deinit();
         const plan = try native.values.fromJson(Plan, a, decoded.value);
@@ -61,24 +69,9 @@ pub const Session = struct {
         try validatePlan(a, plan, source, env);
         try requireCut(service, a, task, plan);
         self.started = true;
+        self.task = task;
         if (plan.phase == .downstream) self.downstream_task = task;
-        if (plan.condition == .ordinary) {
-            var ordinary: Bootstrap = .{
-                .a = a,
-                .service = service,
-                .task = task,
-                .snapshot = try snapshotRef(a, service.profile.bytes),
-            };
-            const scan = try sources.acquireScan(a, &ordinary);
-            var output = try ordinary.evidence(scan);
-            const absent = [_][]const u8{
-                "program", "input_schema", "output_schema", "consumer", "input",
-                "work",    "result",       "view",          "paired",
-            };
-            for (absent) |name| try Json.put(a, &output, name, .null);
-            self.ready = true;
-            return output;
-        }
+        if (plan.condition == .ordinary) return self.ordinary(service, a, task);
         env.initial_selection = .{ .task = task };
         errdefer env.initial_selection = null;
         const read = try initialConsumer(service, worker, a, task);
@@ -90,17 +83,32 @@ pub const Session = struct {
             .interface = read.interface,
             .consumer = read.reference,
         };
-        const output = try self.buildAndSelect(&run, env, plan.phase, source);
-        if (plan.phase != .diagnostic) {
-            for (0..16384) |_| {
-                if (try stepSetup(service, worker, a, task, true)) {
-                    env.initial_selection = null;
-                    self.ready = true;
-                    return output;
-                }
-            }
-            return error.InitialHandoffMissing;
-        }
+        const output = try self.buildAndSelect(&run, env, plan, source);
+        if (plan.phase != .diagnostic and !selection_only)
+            try self.prepare(service, worker, a);
+        return output;
+    }
+
+    fn ordinary(self: *@This(), service: *Service, a: Allocator, task: [16]u8) !Json.Value {
+        var run: Bootstrap = .{
+            .a = a,
+            .service = service,
+            .task = task,
+            .snapshot = try snapshotRef(a, service.profile.bytes),
+        };
+        const scan = try sources.acquireScan(a, &run);
+        var output = try run.evidence(scan);
+        const absent = [_][]const u8{
+            "program", "input_schema", "output_schema", "consumer", "input",
+            "work",    "result",       "view",          "paired",
+        };
+        for (absent) |name| try Json.put(a, &output, name, .null);
+        const key = try receiptKey(a, self.expected.?, "ordinary");
+        const manifest = try run.acquireAt("scan.json", key) orelse
+            return error.MissingScanDeclaration;
+        if (!std.mem.eql(u8, manifest.reference.id.bytes, scan.sources[0].id.bytes))
+            return error.ChangedSnapshot;
+        self.ready = true;
         return output;
     }
 
@@ -108,7 +116,7 @@ pub const Session = struct {
         self: *@This(),
         run: *Bootstrap,
         env: *environment.State,
-        phase: Phase,
+        plan: Plan,
         source: []const u8,
     ) !Json.Value {
         const a = run.a;
@@ -119,16 +127,17 @@ pub const Session = struct {
         } } });
         const program = try ref(a, built, "program");
         const schema = try ref(a, built, "input_schema");
+        try run.admitProgram(program, plan);
         var output = try run.project(program, schema, .primary);
         try Json.put(a, &output, "program", try field(built, "program"));
         try Json.put(a, &output, "input_schema", try field(built, "input_schema"));
         try Json.put(a, &output, "output_schema", try field(built, "result_schema"));
         try Json.put(a, &output, "consumer", try native.values.toJson(wc.Ref, a, run.consumer.?));
-        try Json.put(a, &output, "paired", if (phase == .diagnostic)
+        try Json.put(a, &output, "paired", if (plan.phase == .diagnostic)
             try run.project(program, schema, .paired)
         else
             .null);
-        try self.activate(run, env, phase, &output);
+        try self.activate(run, env, plan.phase, &output);
         return output;
     }
 
@@ -141,7 +150,7 @@ pub const Session = struct {
     ) !void {
         if (phase == .diagnostic) return Json.put(run.a, output, "view", .null);
         const result = try ref(run.a, output.*, "result");
-        const key = try selectionKey(run.a, self.expected.?, phase);
+        const key = try receiptKey(run.a, self.expected.?, @tagName(phase));
         const authorized: native.workspace.Authorized = .{
             .command = .{ .context = .{ .select = .{ .projected = result } } },
             .consumer = run.interface,
@@ -154,9 +163,7 @@ pub const Session = struct {
             authorized,
             null,
         );
-        if (reply.disposition == .rejected) return error.ProjectionSelectionRejected;
-        const bytes = reply.observation_json.bytes;
-        const selected = (try Json.parseAsset(run.a, bytes, bytes.len)).value;
+        const selected = try observation(run.a, reply, authorized.command);
         const view = try ref(run.a, selected, "view");
         const input = try ref(run.a, output.*, "input");
         const program = try ref(run.a, output.*, "program");
@@ -167,28 +174,70 @@ pub const Session = struct {
             .program = program.id.bytes[0..64].*,
             .result = result.id.bytes[0..64].*,
         };
+        self.bind(env);
+        try Json.put(run.a, output, "view", try field(selected, "view"));
+    }
+
+    fn bind(self: *@This(), env: *environment.State) void {
         const bound = &self.selected.?;
         env.initial_selection = .{
-            .task = run.task,
+            .task = bound.task,
             .view = .{ .kind = .view, .id = .{ .bytes = &bound.view } },
             .program = .{ .kind = .program, .id = .{ .bytes = &bound.program } },
             .result = .{ .kind = .value, .id = .{ .bytes = &bound.result } },
         };
-        try Json.put(run.a, output, "view", try field(selected, "view"));
+    }
+
+    pub fn prepare(
+        self: *@This(),
+        service: *Service,
+        worker: *native.testing.Worker,
+        a: Allocator,
+    ) !void {
+        const selected = self.selected orelse return error.BootstrapRequired;
+        const env: *environment.State = @ptrCast(@alignCast(service.profile.environment.?));
+        const view = try native.client.identifier(32, Json.string(&selected.view));
+        self.bind(env);
+        defer env.initial_selection = null;
+        var handoff = try capturedInitialContext(service, a, selected.task, view);
+        if (handoff == .pending or handoff == .not_sent) {
+            for (0..16384) |_| {
+                if (try stepSetup(service, worker, a, selected.task, true)) break;
+            } else return error.InitialHandoffMissing;
+            handoff = try capturedInitialContext(service, a, selected.task, view);
+        }
+        switch (handoff) {
+            .ready => self.ready = true,
+            .pending => return error.InitialHandoffMissing,
+            .rejected => |reason| return switch (reason) {
+                .oversized => error.ProjectionPreparationOversized,
+                .stale => error.ProjectionPreparationStale,
+                .invalid => error.ProjectionPreparationInvalid,
+                .unavailable => error.ProjectionPreparationUnavailable,
+            },
+            .unknown => return error.InitialPreparationUnknown,
+            .not_sent => return error.InitialPreparationNotSent,
+        }
     }
 
     pub fn restore(self: *@This(), service: *Service, a: Allocator, task: [16]u8) !void {
         const digest = self.expected orelse return;
-        var parent = try service.task(a, task);
-        defer parent.deinit();
-        if (parent.value.inference_attempts != 0 or parent.value.terminal()) return;
+        self.task = task;
+        const ordinary_key = try receiptKey(a, digest, "ordinary");
+        if (try service.operationLookup(a, ordinary_key)) |found| {
+            var receipt = found;
+            defer receipt.deinit();
+            _ = try receiptObject(receipt.value, task, .value);
+            self.started = true;
+            self.downstream_task = task;
+            self.ready = true;
+            return;
+        }
         for ([_]Phase{ .author, .downstream }) |phase| {
-            const key = try selectionKey(a, digest, phase);
+            const key = try receiptKey(a, digest, @tagName(phase));
             var receipt = (try service.operationLookup(a, key)) orelse continue;
             defer receipt.deinit();
-            if (!std.meta.eql(receipt.value.task, task) or receipt.value.method != .workspace or
-                receipt.value.workspace_kind != .view) return error.InvalidBootstrapReceipt;
-            const id = receipt.value.workspace orelse return error.InvalidBootstrapReceipt;
+            const id = try receiptObject(receipt.value, task, .view);
             const store = &service.namespace.store;
             const custody = try native.workspace.custodyId(a, task, id);
             const record = (try store.recordBytes(a, "workspace_view", custody, task)) orelse
@@ -197,9 +246,8 @@ pub const Session = struct {
             defer view.deinit();
             const run = view.value.description.projection orelse
                 return error.InvalidBootstrapReceipt;
-            if (!try capturedInitialContext(service, a, task, id)) return;
             self.started = true;
-            self.ready = true;
+            self.ready = try capturedInitialContext(service, a, task, id) == .ready;
             if (phase == .downstream) self.downstream_task = task;
             self.selected = .{
                 .task = task,
@@ -213,13 +261,31 @@ pub const Session = struct {
     }
 };
 
-fn selectionKey(a: Allocator, digest: [32]u8, phase: Phase) ![]u8 {
+fn receiptObject(
+    receipt: State.Receipt,
+    task: [16]u8,
+    kind: @FieldType(wc.Ref, "kind"),
+) ![32]u8 {
+    if (!std.meta.eql(receipt.task, task) or receipt.method != .workspace or
+        receipt.workspace_kind != kind) return error.InvalidBootstrapReceipt;
+    return receipt.workspace orelse error.InvalidBootstrapReceipt;
+}
+
+fn receiptKey(a: Allocator, digest: [32]u8, label: []const u8) ![]u8 {
     return std.fmt.allocPrint(a, "interface-repair-{s}-{s}", .{
-        @tagName(phase), &std.fmt.bytesToHex(digest, .lower),
+        label, &std.fmt.bytesToHex(digest, .lower),
     });
 }
 
-fn capturedInitialContext(service: *Service, a: Allocator, task: [16]u8, view: [32]u8) !bool {
+const Handoff = union(enum) {
+    pending,
+    ready,
+    rejected: types.ProjectionRejectionCode,
+    unknown,
+    not_sent,
+};
+
+fn capturedInitialContext(service: *Service, a: Allocator, task: [16]u8, view: [32]u8) !Handoff {
     const store = &service.namespace.store;
     var rows = try store.database.prepare(
         "SELECT o.body FROM records r JOIN objects o ON o.digest=r.body " ++
@@ -228,28 +294,85 @@ fn capturedInitialContext(service: *Service, a: Allocator, task: [16]u8, view: [
     );
     defer rows.deinit();
     const expected = std.fmt.bytesToHex(view, .lower);
+    var first: ?struct { cut: u64, occurrence: [32]u8 } = null;
     while (try rows.step() == .row) {
         var attempt = try C.decodeOwned(State.Attempt, a, try rows.bytes(0));
         defer attempt.deinit();
         if (!std.mem.eql(u8, attempt.value.capability.bytes, types.prepare_identity)) continue;
-        const captured = (try store.recordBytes(a, "capture", attempt.value.id, task)) orelse
-            continue;
-        var capture = try C.decodeOwned(State.Capture, a, captured);
-        defer capture.deinit();
-        const prepared = attempt.value.prepared orelse continue;
-        if (!std.meta.eql(prepared, capture.value.request) or capture.value.response == null or
-            capture.value.disposition != .complete) continue;
-        const bytes = try store.object(a, prepared, null);
-        var product = try C.decodeOwned(types.PreparationProduct, a, bytes);
-        defer product.deinit();
-        const bound = switch (product.value.result) {
-            .ready => |ready| if (ready.request.plan.research) |r| r.view else continue,
-            .projection_rejected => |rejected| rejected.view,
-            .rejected => continue,
-        };
-        if (bound.kind == .view and std.mem.eql(u8, bound.id.bytes, &expected)) return true;
+        const cut = attempt.value.preparation_cut orelse return error.InvalidBootstrapReceipt;
+        if (first) |prior| if (cut >= prior.cut) continue;
+        first = .{ .cut = cut, .occurrence = attempt.value.occurrence };
     }
-    return false;
+    const initial = first orelse return .pending;
+    const retained = (try store.recordBytes(a, "occurrence", initial.occurrence, task)) orelse
+        return error.InvalidBootstrapReceipt;
+    var occurrence = try C.decodeOwned(native.testing.occurrence.Occurrence, a, retained);
+    defer occurrence.deinit();
+    const id = switch (occurrence.value.state) {
+        .ready => return .pending,
+        .dispatching, .unknown => return .unknown,
+        .not_sent => return .not_sent,
+        .captured => |v| v.id,
+        .settled_reply => |v| v.attempt,
+        .admitted => |v| switch (v) {
+            .reply => |reply| reply.attempt,
+            .cancelled => return error.InitialPreparationFailed,
+        },
+        .awaiting => return error.InitialPreparationFailed,
+    };
+    const bytes = (try store.recordBytes(a, "attempt", id, task)) orelse
+        return error.InvalidBootstrapReceipt;
+    var attempt = try C.decodeOwned(State.Attempt, a, bytes);
+    defer attempt.deinit();
+    if (!std.meta.eql(attempt.value.occurrence, initial.occurrence))
+        return error.InvalidBootstrapReceipt;
+    return captureOutcome(service, a, task, id, attempt.value.prepared, &expected);
+}
+
+fn captureOutcome(
+    service: *Service,
+    a: Allocator,
+    task: [16]u8,
+    attempt: [32]u8,
+    request: ?State.Reference,
+    expected: []const u8,
+) !Handoff {
+    const store = &service.namespace.store;
+    const captured = (try store.recordBytes(a, "capture", attempt, task)) orelse return .pending;
+    var capture = try C.decodeOwned(State.Capture, a, captured);
+    defer capture.deinit();
+    switch (capture.value.disposition) {
+        .unknown => return .unknown,
+        .definitely_not_sent => return .not_sent,
+        .complete => {},
+    }
+    const prepared = request orelse return error.InvalidBootstrapReceipt;
+    const response = capture.value.response orelse return error.InvalidBootstrapReceipt;
+    if (!std.meta.eql(prepared, capture.value.request)) return error.InvalidBootstrapReceipt;
+    const proof = try store.object(a, response, null);
+    var checked = try C.decodeOwned(types.PreparationCapture, a, proof);
+    defer checked.deinit();
+    if (!std.meta.eql(prepared.digest, checked.value.prepared))
+        return error.InvalidBootstrapReceipt;
+    const bytes = try store.object(a, prepared, null);
+    var product = try C.decodeOwned(types.PreparationProduct, a, bytes);
+    defer product.deinit();
+    const bound = switch (product.value.result) {
+        .ready => |ready| blk: {
+            if (ready.request.plan.prior != null) return error.InvalidBootstrapReceipt;
+            const research = ready.request.plan.research orelse
+                return error.InvalidBootstrapReceipt;
+            break :blk research.view;
+        },
+        .projection_rejected => |rejected| rejected.view,
+        .rejected => return error.InitialPreparationFailed,
+    };
+    if (bound.kind != .view or !std.mem.eql(u8, bound.id.bytes, expected))
+        return error.InvalidBootstrapReceipt;
+    return if (product.value.result == .ready)
+        .ready
+    else
+        .{ .rejected = product.value.result.projection_rejected.code };
 }
 
 fn field(value: Json.Value, name: []const u8) !Json.Value {
@@ -280,6 +403,9 @@ fn validatePlan(
         .lower,
     ), plan.source_sha256.bytes)) return error.ChangedProgram;
     if (plan.condition == .ordinary and source.len != 0) return error.ConditionViolation;
+    const candidate = plan.phase != .author and plan.condition == .repair;
+    if (candidate != (plan.program_sha256 != null)) return error.ChangedExecutable;
+    if (plan.program_sha256) |id| _ = try native.client.identifier(32, Json.string(id.bytes));
     const fixed = plan.phase == .author;
     const intrinsic: ?sources.Seed = if (fixed) .lossy else switch (plan.condition) {
         .@"fixed-lossy" => .lossy,
@@ -367,7 +493,11 @@ fn stepSetup(
     accept_preparation: bool,
 ) !bool {
     const next = try service.pump(a);
-    if (next != .work) return false;
+    switch (next) {
+        .work => {},
+        .progressed => return false,
+        .idle, .waiting => return error.InitialSetupBlocked,
+    }
     const work = next.work;
     const name = work.entry.declaration.identity;
     const prepared = accept_preparation and std.mem.eql(u8, name, types.prepare_identity);
@@ -377,12 +507,70 @@ fn stepSetup(
         try service.notSent(a, work);
         return error.UnexpectedSetupWork;
     }
-    try worker.start(work, service.profile.authority, service.profile.environment);
+    worker.start(work, service.profile.authority, service.profile.environment) catch |err| {
+        try service.notSent(a, work);
+        return err;
+    };
     while (!worker.finished()) try service.io.sleep(.fromMilliseconds(1), .awake);
     try worker.join();
     defer worker.release() catch |err| std.debug.panic("bootstrap worker: {t}", .{err});
-    try service.completeWork(a, work, worker.result orelse return error.MissingWorkerResult);
+    const result = worker.result orelse return error.MissingWorkerResult;
+    try service.completeWork(a, work, result);
+    switch (result) {
+        .acquired => {},
+        .failure => |err| return err,
+        .unknown => return error.InitialPreparationUnknown,
+        .not_sent, .not_sent_with_reason => return error.InitialPreparationNotSent,
+        .rederived => return error.UnexpectedSetupWork,
+    }
     return prepared;
+}
+
+fn observation(a: Allocator, reply: wc.Reply, command: wc.Command) !Json.Value {
+    const bytes = reply.observation_json.bytes;
+    const value = (try Json.parseAsset(a, bytes, bytes.len)).value;
+    if (reply.disposition != .rejected) return value;
+    const code = try Json.text(try field(value, "error"));
+    switch (command) {
+        .program => {
+            if (Json.get(value, "phase")) |phase| {
+                const stages = enum { preflight, authority, compilation, interface, relation };
+                if (std.meta.stringToEnum(stages, try Json.text(phase)) != null)
+                    return error.ProjectionBuildRejected;
+            }
+        },
+        .work => {
+            const invalid = enum { InvalidRuntime, InvalidInput, InvalidValue };
+            if (std.meta.stringToEnum(invalid, code) != null) return error.ProjectionStartRejected;
+        },
+        .context => |context| if (context == .select) {
+            const invalid = enum {
+                InvalidProjection,
+                InvalidProjectionSchema,
+                InvalidSourceSlice,
+                InvalidConsumer,
+                ConsumerMismatch,
+                StaleConsumer,
+            };
+            if (std.meta.stringToEnum(invalid, code) != null)
+                return error.ProjectionSelectionRejected;
+        },
+        .placement => unreachable,
+    }
+    std.debug.print("bootstrap {t}: {s}\n", .{ std.meta.activeTag(command), code });
+    return error.BootstrapOwnerRejected;
+}
+
+pub fn programPure(service: *Service, a: Allocator, d: native.workspace.ProgramArtifact) !bool {
+    if (d.controller != null or d.exposures.items.len != 0 or d.ports.items.len != 0) return false;
+    const store = &service.namespace.store;
+    const source = try store.object(a, d.source, null);
+    const image = try store.object(a, d.image, null);
+    native.program_construction.requirePure(a, d.source_kind, source, image) catch |err| {
+        if (err == error.ImpureSlice or err == error.ImpureProjection) return false;
+        return err;
+    };
+    return true;
 }
 
 const Bootstrap = struct {
@@ -404,25 +592,15 @@ const Bootstrap = struct {
     fn command(self: *@This(), operation: wc.Command) !Json.Value {
         const id_value = try self.id(self.a);
         const reply = try self.service.workspaceCommand(self.a, id_value, self.task, operation);
-        if (reply.disposition == .rejected) return switch (operation) {
-            .program => error.ProjectionBuildRejected,
-            .work => error.ProjectionStartRejected,
-            .context => |ctx| if (ctx == .select)
-                error.ProjectionSelectionRejected
-            else
-                error.ProjectionInputRejected,
-            .placement => unreachable,
-        };
-        return (try Json.parseAsset(
-            self.a,
-            reply.observation_json.bytes,
-            reply.observation_json.bytes.len,
-        )).value;
+        return observation(self.a, reply, operation);
     }
 
     pub fn acquireFile(self: *@This(), path: []const u8) !?sources.Acquired {
+        return self.acquireAt(path, try self.id(self.a));
+    }
+
+    fn acquireAt(self: *@This(), path: []const u8, operation: []const u8) !?sources.Acquired {
         const a = self.a;
-        const operation = try self.id(self.a);
         const reply = try Commands.workspaceCommandFrom(self.service, a, operation, self.task, .{
             .command = .{ .context = .{ .materialize = .{
                 .input = .{ .snapshot = .{
@@ -457,6 +635,43 @@ const Bootstrap = struct {
         };
     }
 
+    fn admitProgram(self: *@This(), ref_value: wc.Ref, plan: Plan) !void {
+        const a = self.a;
+        const program_id = try native.client.identifier(32, Json.string(ref_value.id.bytes));
+        if (plan.program_sha256) |expected| {
+            if (!std.mem.eql(u8, expected.bytes, ref_value.id.bytes))
+                return error.ChangedExecutable;
+        }
+        var program = try self.service.workspaceProgram(a, self.task, program_id);
+        defer program.deinit();
+        const d = program.value.description;
+        if (d.source_kind != .source_records) return error.ProjectionBuildRejected;
+        const store = &self.service.namespace.store;
+        if (!try programPure(self.service, a, d)) return error.ProjectionBuildRejected;
+        const input = try native.values.schemaBytes(wc.ProjectionInput(sources.ScanEvidence), a);
+        if (!std.meta.eql(d.input_schema.digest, native.testing.digest(input)))
+            return error.ProjectionInputRejected;
+        const output = try store.object(a, d.result_schema, null);
+        const header = native.testing.workspace_observers.fieldSchema(a, output, 0) catch |err| {
+            if (err == error.InvalidObserverInterface) return error.ProjectionResultRejected;
+            return err;
+        };
+        const expected = try native.values.schemaBytes(wc.ProjectionProposal, a);
+        if (!std.mem.eql(u8, header, expected)) return error.ProjectionResultRejected;
+    }
+
+    fn checkResult(self: *@This(), result: wc.Ref) !void {
+        const a = self.a;
+        const store = &self.service.namespace.store;
+        const result_id = try native.client.identifier(32, Json.string(result.id.bytes));
+        const object = try store.object(a, try store.objectReference(result_id, null), null);
+        var artifact = try C.decodeOwned(native.workspace.ValueArtifact, a, object);
+        defer artifact.deinit();
+        const schema = try store.object(a, artifact.value.schema, null);
+        const bytes = try store.object(a, artifact.value.value, null);
+        try sources.requireComputed(a, self.consumer.?, schema, bytes);
+    }
+
     fn project(
         self: *@This(),
         program: wc.Ref,
@@ -483,6 +698,7 @@ const Bootstrap = struct {
         } } });
         const work = try ref(self.a, started, "work");
         const result = try self.complete(work);
+        try self.checkResult(result);
         var output = try self.evidence(scan);
         try Json.put(self.a, &output, "input", try native.values.toJson(wc.Ref, self.a, input));
         try Json.put(self.a, &output, "work", try native.values.toJson(wc.Ref, self.a, work));
@@ -520,8 +736,9 @@ const Bootstrap = struct {
                     .lower,
                 )),
             } };
-            if (current.value.terminal() or current.value.current_port != null)
+            if (current.value.outcome_kind == .failed or current.value.current_port != null)
                 return error.ProjectionWorkFailed;
+            if (current.value.outcome_kind == .cancelled) return error.BootstrapWorkCancelled;
             _ = try self.service.workspacePump(scratch, try self.id(scratch), self.task, .{
                 .expected = .{
                     .work = work,

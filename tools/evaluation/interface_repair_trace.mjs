@@ -1,7 +1,7 @@
 import {createHash} from 'node:crypto';
 import {isDeepStrictEqual as equal} from 'node:util';
 import {contract} from '../../test/protean/adaptive_capture_checks.mjs';
-import {decodeSchema, decodeValue, encodeSchema} from '../../test/support/values.mjs';
+import {decodeSchema, decodeValue, encodeSchema, ValueCodecError} from '../../test/support/values.mjs';
 import {physicalProviderAttempt} from './workspace.mjs';
 import {assessScan, canonicalEvidence, collisionProbe, inspectProjection, parseCandidate} from './interface_repair.mjs';
 
@@ -20,6 +20,34 @@ const scanTypes = [
 ];
 const inputSchemaId = schemaId([...scanTypes, {product: [7, 0]}], scanTypes.length);
 const scanSchemas = new Map([[schemaId(scanTypes, 0), 'ScanEvidence'], [schemaId(scanTypes, 10), 'ScanOutcome']]);
+const proposalSchemaId = schemaId([{product: [1, 4]}, {product: [2, 3]}, scanTypes[8], {bounded_text: 64},
+  {seq: 5}, {sum: [1, 6, 7, 9]}, {product: []}, {product: [1, 8, 8]}, 'u64', 'text'], 0);
+
+function payloadSchema(descriptor) {
+  const fields = descriptor.types[descriptor.root].product;
+  return fields?.length === 2 && schemaId(descriptor.types, fields[0]) === proposalSchemaId ?
+    schemaId(descriptor.types, fields[1]) : null;
+}
+
+export function inspectProjectionResult(descriptor, bytes) {
+  const schema = payloadSchema(descriptor);
+  if (!schema) return {inspection_error: 'InvalidProjectionSchema'};
+  try {
+    const [proposal, value] = decodeValue(descriptor, bytes);
+    const computed = proposal[1].some(b => b.tag === 1);
+    return {consumer: proposal[0], has_computed_block: computed, one_computed_block: computed && proposal[1].length === 1,
+      schema, value, payload: renderedValue(value)};
+  } catch (error) {
+    if (!(error instanceof ValueCodecError || error instanceof RangeError)) throw error;
+    return {schema, inspection_error: error.code ?? 'ValueCapacity'};
+  }
+}
+
+export function diagnosticPresentation(presentation, expectedConsumer) {
+  const error = presentation.inspection_error ?? (!equal(presentation.consumer, expectedConsumer) ? 'ConsumerMismatch' :
+    presentation.one_computed_block ? null : 'ExpectedOneComputedBlock');
+  return error ? {inspection_error: error} : {inspection_error: null, payload: presentation.payload};
+}
 
 function inventory(archive, kind, schema) {
   return archive.manifest[6].filter(row => row[0] === kind).map(([, id, body]) => {
@@ -40,13 +68,9 @@ function material(archive, program) {
 function acquisitions(archive, values, specimen, receipt, manifestPath = 'scan.json') {
   const refs = Object.create(null), visits = JSON.parse(specimen.files['scan.json']).visits;
   if (!values.size) return refs;
-  const pinned = JSON.parse(archive.object(archive.task.profile)).snapshot;
+  const {pinned, excluded, files} = repairSnapshot(archive);
   const snapshotRef = [pinned.digest, BigInt(pinned.bytes)];
-  const snapshotSchema = {root: 0, types: [{product: [1, 2, 3]}, 'u32', 'u64', {seq: 4},
-    {product: [5, 6, 8]}, 'text', {array: {element: 7, length: 32}}, 'u8', 'bytes']};
-  const [, excluded, entries] = decodeValue(snapshotSchema, archive.object(snapshotRef));
-  const files = new Map(entries.map(([path, hash, bytes]) => [path, {hash: hex(hash), bytes: Buffer.from(bytes)}]));
-  if (excluded !== 0n || files.size !== entries.length) return refs;
+  if (excluded !== 0n) return refs;
   for (const path of ['scan.json', ...visits.map(v => v.path)]) {
     const bytes = specimen.files[path], file = files.get(path === 'scan.json' ? manifestPath : path);
     if (file ? typeof bytes !== 'string' || sha(bytes) !== file.hash || !file.bytes.equals(Buffer.from(bytes)) :
@@ -74,7 +98,7 @@ function acquisitions(archive, values, specimen, receipt, manifestPath = 'scan.j
 function canonicalRun(values, inputRef, specimen, sourceRefs, actual) {
   const paths = ['scan.json', ...JSON.parse(specimen.files['scan.json']).visits.map(v => v.path)
     .filter(path => Object.hasOwn(specimen.files, path))];
-  if (paths.some(path => !sourceRefs[path]) || !equal(actual[1], canonicalEvidence(specimen, sourceRefs))) return false;
+  if (!actual || paths.some(path => !sourceRefs[path]) || !equal(actual[1], canonicalEvidence(specimen, sourceRefs))) return false;
   const todo = [digest(inputRef)], ancestry = new Set();
   while (todo.length) {
     const id = todo.pop();
@@ -83,6 +107,15 @@ function canonicalRun(values, inputRef, specimen, sourceRefs, actual) {
     for (const source of values.get(id)?.raw[4][1] ?? []) todo.push(digest(source));
   }
   return paths.every(path => ancestry.has(sourceRefs[path].id));
+}
+
+function scanInput(archive, input) {
+  if (digest(input.raw[3][1]) !== inputSchemaId) return null;
+  try { return typed(archive, input.raw[3][1], input.raw[3][2]); }
+  catch (error) {
+    if (error instanceof ValueCodecError) return null;
+    throw error;
+  }
 }
 
 function controllerAttempts(archive, application) {
@@ -103,7 +136,7 @@ function controllerAttempts(archive, application) {
     const confirmed = bound && capture[5] === 0 && response && response[0] >= 200 && response[0] < 300 && response[7] === 2;
     rows.push({id, occurrence: hex(raw[2]), prepared_sha256: preparedId,
       capture_sha256: bound && captured ? digest(captured) : null, selected_view: digest(some(prepared[3])),
-      preparation_cut: some(raw[12])?.toString() ?? null,
+      preparation_cut: some(raw[12])?.toString() ?? null, request_body_bytes: prepared[2].length,
       delivery: confirmed ? 'confirmed' : physical ? 'unknown' : 'not_sent',
       body: JSON.parse(Buffer.from(prepared[2]).toString())});
   }
@@ -131,7 +164,7 @@ function interactions(archive, application, observations, attempts) {
 }
 
 function actionsAt(interaction) {
-  if (!interaction.previous) return [];
+  if (interaction.previous?.delivery !== 'confirmed') return [];
   return interaction.results.flatMap(pending => {
     const action = interaction.result_actions.find(row => row.call_id === pending.call_id)?.action;
     if (!action || pending.output.tag !== 'workspace') return [];
@@ -145,11 +178,35 @@ function actionsAt(interaction) {
 function authored(programs, actions, bootstrap, nomination) {
   if (nomination?.status !== 'candidate' || same(bootstrap?.program, nomination.program)) return null;
   const program = programs.get(nomination.program.id);
-  if (!program || program.raw[3][2] !== 0) return null;
+  if (!program) return null;
   return actions.find(({action, command, reply, observation}) => action.tag === 'program' &&
     command.tag === 'build' && command.value.source_kind === 'source_records' && reply.disposition === 'admitted' &&
-    same(reply.program, nomination.program) && same(observation.program, nomination.program) && same(observation.source, ref('source', digest(program.raw[3][1]))) &&
+    same(reply.program, nomination.program) && same(observation.program, nomination.program) &&
+    observation.source_kind === 'source_records' && same(observation.source, ref('source', digest(program.raw[3][1]))) &&
+    ['input', 'result', 'failure'].every((name, i) =>
+      same(observation[name + '_schema'], ref('schema', digest(program.raw[3][6 + i])))) &&
     (command.value.source.tag !== 'json_text' || sha(command.value.source.value) === digest(program.raw[3][1])));
+}
+
+function incompatibleBuild(archive, build, program, observations, uses) {
+  const d = program.raw[3], command = build.command.value;
+  if (d[2] !== 0 || command.role !== 'computation' || some(d[12])) return 'IncompatibleProgramRole';
+  if (command.exposures.length || d[10].length) return 'ExposedProgram';
+  if (digest(d[6]) !== inputSchemaId) return 'InvalidInputSchema';
+  if (!payloadSchema(decodeSchema(archive.object(d[7])))) return 'InvalidProjectionSchema';
+  const observed = observations.flatMap(o => o.records ?? []).find(r => r.kind === 'workspace_program' &&
+    r.body === program.body && typeof r.pure === 'boolean');
+  if (observed) return observed.pure ? null : 'ImpureProjection';
+  if (uses.some(u => same(u.program, build.reply.program))) return null;
+  const {module} = JSON.parse(archive.object(d[1]));
+  if (module.functions[module.entry].effects.length) return 'ImpureProjection';
+  return module.effects.some(effect => effect.external) ? 'PurityUnestablished' : null;
+}
+
+function matchesFrozen(actual, candidate) {
+  return actual && candidate && same(actual.program, candidate.program) &&
+    ['source_sha256', 'image_sha256', 'input_schema_sha256', 'result_schema_sha256', 'failure_schema_sha256']
+      .every(key => actual[key] === candidate[key]) && actual.source_b64 === candidate.source_b64;
 }
 
 function publicAttempt(row) {
@@ -190,54 +247,58 @@ function execution(archive, programs, values, specimen, sourceRefs, programRef, 
       hex(work[8]) !== digest(programRef) || !equal(some(work[16]), inputRef) ||
       !equal(some(work[29]), resultRef) || !equal(some(work[28]), result.raw[3][2]) ||
       !equal(work[15], input.raw[3][2]) || !equal(program.raw[3][6], input.raw[3][1]) ||
-      !equal(program.raw[3][7], result.raw[3][1])) return null;
-  const actual = typed(archive, input.raw[3][1], input.raw[3][2]);
-  const output = typed(archive, result.raw[3][1], result.raw[3][2]);
+      !equal(program.raw[3][7], result.raw[3][1]) || some(work[5]) ||
+      digest(input.raw[3][1]) !== inputSchemaId) return null;
+  const actual = scanInput(archive, input);
+  if (!actual) return null;
   const descriptor = decodeSchema(archive.object(result.raw[3][1]));
-  const payloadRoot = descriptor.types[descriptor.root].product[1];
-  const payloadSchema = schemaId(descriptor.types, payloadRoot);
-  const schemaKind = scanSchemas.get(payloadSchema) ?? 'other';
-  const proof = digest(input.raw[3][1]) === inputSchemaId && equal(actual[0], output[0][0]) &&
-    canonicalRun(values, inputRef, specimen, sourceRefs, actual);
-  const semantic = proof ? inspectProjection(specimen, sourceRefs, schemaKind, output[1]) :
+  const presented = inspectProjectionResult(descriptor, archive.object(result.raw[3][2]));
+  const schemaKind = scanSchemas.get(presented.schema) ?? 'other';
+  const proof = canonicalRun(values, inputRef, specimen, sourceRefs, actual);
+  const semantic = proof && presented.has_computed_block && equal(presented.consumer, actual[0]) ?
+    inspectProjection(specimen, sourceRefs, schemaKind, presented.value) :
     {semantic_judgment: 'unestablished', paths: []};
-  return {program, actual, output, payloadSchema, schemaKind, proof, semantic};
+  return {program, actual, presented, schemaKind, proof, semantic};
 }
 
-function projectionUse(archive, view, programs, values, specimen, sourceRefs, attempts, actions, lossySourceDigest) {
+function projectionUse(archive, view, programs, values, specimen, sourceRefs, attempts, actions, lossySourceDigest, build) {
   const p = some(view.raw[3][3]);
   if (!p) return null;
   const [resultRef, workRef, programRef, inputRef] = p;
   const work = decodeValue(archive.schemas.get('workspace_work'), archive.object(workRef));
   const result = execution(archive, programs, values, specimen, sourceRefs, programRef, inputRef, resultRef, work);
   if (!result) return null;
-  const {actual, output, payloadSchema, schemaKind, proof, semantic} = result;
+  const {actual, presented, schemaKind, proof, semantic} = result;
   const observed = decodeValue(archive.schemas.get('workspace_reply'), archive.object(p[4]));
   if (!equal(actual[0], [12, hex(observed[0])]) || !equal(observed[1], archive.task.id) ||
+      (!presented.inspection_error && !equal(actual[0], presented.consumer)) ||
       observed[4].tag !== 0 || observed[4].value.tag !== 7) return null;
   const resultReference = ref('value', digest(resultRef)), viewReference = ref('view', digest(view.raw[2]));
-  const selection = actions.find(({action, command, reply, observation}) => action.tag === 'context' &&
-    command.tag === 'select' && command.value.tag === 'projected' && same(command.value.value, resultReference) &&
-    reply.disposition === 'observed' && same(reply.selected_view, viewReference) && same(observation.view, viewReference));
-  const started = actions.find(({action, command, reply, observation}) => {
+  const started = actions.find(({action, command, reply, observation, cut}) => {
     const operation = action.tag === 'work' ? command :
       action.tag === 'placement' && command.tag === 'control' ? command.value.command : null;
     return operation?.tag === 'start' && reply.disposition === 'observed' &&
+      (!build || !same(build.reply.program, operation.value.program) || BigInt(cut) > BigInt(build.cut)) &&
       same(operation.value.program, ref('program', digest(programRef))) &&
       same(observation.work, ref('work', hex(work[1])));
   });
+  const selection = actions.find(({action, command, reply, observation, cut}) => action.tag === 'context' &&
+    command.tag === 'select' && command.value.tag === 'projected' && same(command.value.value, resultReference) &&
+    (!started || BigInt(cut) > BigInt(started.cut)) && reply.disposition === 'observed' &&
+    same(reply.selected_view, viewReference) && same(observation.view, viewReference));
   const exposures = attempts.filter(row => row.selected_view === viewReference.id).map(row => {
     const material = selectedPresentation(row.selected_view, row.body);
     const blocks = material?.blocks ?? [];
-    const rendered = blocks.some(b => b?.kind === 'computed' && same(b.result, resultReference) &&
-      b.schema_identity === payloadSchema && equal(b.value, renderedValue(output[1])));
-    return {...publicAttempt(row), rendered, input_index: material?.index ?? null};
+    const rendered = presented.has_computed_block === true && blocks.some(b => b?.kind === 'computed' && same(b.result, resultReference) &&
+      b.schema_identity === presented.schema && equal(b.value, presented.payload));
+    return {...publicAttempt(row), rendered, one_computed_block: rendered && blocks.length === 1, input_index: material?.index ?? null};
   });
   return {view: viewReference, program: ref('program', digest(programRef)), input: ref('value', digest(inputRef)),
     result: resultReference, work: ref('work', hex(work[1])), consumer: ref('observation', actual[0][1]),
-    canonical_input: proof, payload: renderedValue(output[1]), payload_schema_sha256: payloadSchema, schema_kind: schemaKind,
+    canonical_input: proof, payload: presented.payload, payload_schema_sha256: presented.schema ?? null, schema_kind: schemaKind,
+    inspection_error: presented.inspection_error ?? null,
     known_lossy: digest(result.program.raw[3][1]) === lossySourceDigest,
-    ...semantic, one_computed_block: output[0][1].length === 1 && output[0][1][0].tag === 1,
+    ...semantic, one_computed_block: presented.one_computed_block ?? null,
     model_start: started ? {attempt_id: started.attempt_id, call_id: started.call_id, cut: started.cut} : null,
     model_select: selection ? {attempt_id: selection.attempt_id, call_id: selection.call_id, cut: selection.cut} : null,
     exposures};
@@ -257,108 +318,304 @@ function bindReport(archive, observations, interactions, summary) {
   return null;
 }
 
-function decisionSupport(archive, application, specimen, sourceRefs, values, interactions, uses, producer) {
+export function confirmedApplication(uses, candidate, buildCut, reportAttempts) {
+  if (!candidate) return null;
+  let selected = null;
+  for (const use of uses) {
+    if (!same(use.program, candidate.program) || !use.canonical_input || !use.model_start || !use.model_select ||
+        BigInt(use.model_start.cut) <= BigInt(buildCut) || BigInt(use.model_select.cut) <= BigInt(use.model_start.cut)) continue;
+    for (const exposure of use.exposures) {
+      if (!reportAttempts.has(exposure.id) || exposure.delivery !== 'confirmed' || !exposure.rendered ||
+          exposure.preparation_cut === null || BigInt(exposure.preparation_cut) < BigInt(use.model_select.cut)) continue;
+      const one = use.one_computed_block === true && exposure.one_computed_block === true;
+      if (selected && (selected.one_computed_block && !one || selected.one_computed_block === one &&
+          BigInt(selected.exposure.preparation_cut) <= BigInt(exposure.preparation_cut))) continue;
+      const {view, program, input, work, result, consumer, model_start, model_select} = use;
+      selected = {view, program, input, work, result, consumer, model_start, model_select, exposure, one_computed_block: one};
+    }
+  }
+  return selected;
+}
+
+function repairSnapshot(archive) {
+  const pinned = JSON.parse(archive.object(archive.task.profile)).snapshot;
+  const schema = {root: 0, types: [{product: [1, 2, 3]}, 'u32', 'u64', {seq: 4},
+    {product: [5, 6, 8]}, 'text', {array: {element: 7, length: 32}}, 'u8', 'bytes']};
+  const [version, excluded, entries] = decodeValue(schema, archive.object([pinned.digest, BigInt(pinned.bytes)]));
+  const files = new Map(entries.map(([path, hash, bytes]) => [path, {hash: hex(hash), bytes: Buffer.from(bytes)}]));
+  if (version !== 2 || files.size !== entries.length || [...files.values()].some(file => file.hash !== sha(file.bytes)))
+    throw new Error('Invalid repair snapshot');
+  return {pinned, excluded, files};
+}
+
+function coverRange(pages, key, start, end, total) {
+  const ranges = pages.get(key) ?? [];
+  ranges.push([start, end]);
+  ranges.sort((a, b) => a[0] - b[0]);
+  let covered = 0;
+  for (const [lo, hi] of ranges) {
+    if (lo > covered) break;
+    covered = Math.max(covered, hi);
+  }
+  pages.set(key, ranges);
+  return covered === total;
+}
+
+function pageRange(page, bytes) {
+  const start = page?.offset, end = page?.next_offset;
+  if (typeof page?.text !== 'string' || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) ||
+      start < 0 || end < start || end > bytes.length || page.total_bytes !== bytes.length ||
+      !bytes.subarray(start, end).equals(Buffer.from(page.text))) return null;
+  return [start, end];
+}
+
+function receivedOutput(attempt, callId) {
+  const items = attempt.body.input.filter(item => item.type === 'function_call_output' && item.call_id === callId);
+  if (items.length !== 1) return null;
+  const output = items[0].output;
+  if (typeof output === 'string') return output;
+  return output?.length === 1 && output[0].type === 'input_text' ? output[0].text : null;
+}
+
+export function decisionSupport(archive, application, specimen, sourceRefs, values, interactions, uses, producer) {
   const exposure = [], routes = [], unresolved = [];
   if (!producer) return {exposure, routes, unresolved};
   const history = interactions.filter(i => i.controller_id === producer.controller_id &&
     i.controller_epoch === producer.controller_epoch && BigInt(i.event_cut) <= BigInt(producer.event_cut) &&
     i.attempt?.delivery === 'confirmed');
-  const visibleAttempts = new Set(history.map(i => i.attempt.id));
-  for (const use of uses) {
-    const requests = use.exposures.filter(e => visibleAttempts.has(e.id) && e.delivery === 'confirmed' && e.rendered);
-    if (requests.length) exposure.push({ref: use.result, paths: use.paths, semantic_judgment: use.semantic_judgment,
-      known_lossy: use.known_lossy, schema_sha256: use.payload_schema_sha256, value: use.payload, requests: requests.map(e => ({
-        attempt_id: e.id, prepared_sha256: e.prepared_sha256, input_index: e.input_index}))});
+  const {pinned, excluded, files} = repairSnapshot(archive);
+  const visits = JSON.parse(specimen.files['scan.json']).visits;
+  const relevant = new Set(['scan.json', ...visits.map(v => v.path)]);
+  const present = path => relevant.has(path) && files.has(path) && Object.hasOwn(specimen.files, path) &&
+    files.get(path).bytes.equals(Buffer.from(specimen.files[path]));
+  const absent = path => relevant.has(path) && excluded === 0n && !files.has(path) && !Object.hasOwn(specimen.files, path);
+  const byValue = new Map(), bySource = new Map(), handles = new Map(), pages = new Map(), completePaths = new Set();
+  const missing = new Set(), presented = new Set(), partialComputations = new Map();
+  const remember = (value, path) => handles.set(value.kind + value.id, {value, path});
+  const credit = (value, paths) => exposure.push({ref: value, paths: [...paths]});
+  for (const row of values.values()) {
+    const raw = row.raw, origin = some(raw[4][4]);
+    if (raw[4][0] !== 2 || !origin) continue;
+    const [snapshot, path, hash, start, end, size] = origin;
+    if (!present(path) || digest(snapshot) !== hex(pinned.digest) || snapshot[1] !== BigInt(pinned.bytes)) continue;
+    const file = files.get(path);
+    if (hex(hash) !== file.hash || size !== BigInt(file.bytes.length) || start > end || end > size) continue;
+    const text = typed(archive, raw[3][1], raw[3][2]);
+    if (typeof text !== 'string' || !file.bytes.subarray(Number(start), Number(end)).equals(Buffer.from(text))) continue;
+    const value = ref('value', digest(raw[2])), source = ref('source', digest(raw[3][3]));
+    const item = {path, start: Number(start), end: Number(end), text, value, source};
+    byValue.set(value.id, item);
+    bySource.set(source.id, item);
   }
-  const sourcePaths = new Map(Object.entries(sourceRefs).map(([path, value]) => [value.id, path]));
-  const pages = new Map();
-  const seen = new Set();
-  const see = (kind, path, i, cited) => {
-    const key = [kind, i.interaction_id, path, cited?.kind, cited?.id].join('/');
-    if (seen.has(key)) return;
-    seen.add(key);
-    routes.push({kind, path, interaction_id: i.interaction_id, attempt_id: i.attempt.id});
-    if (cited) exposure.push({ref: cited, paths: [path]});
+  const marked = new Set();
+  const note = (list, kind, i, extra = {}) => {
+    const row = {kind, interaction_id: i.interaction_id, attempt_id: i.attempt.id, ...extra};
+    const key = JSON.stringify(row);
+    if (!marked.has(key)) { marked.add(key); list.push(row); }
+  };
+  const markSource = (i, kind, path, start, end) => {
+    const total = files.get(path).bytes.length;
+    note(routes, kind, i, {path});
+    if (coverRange(pages, 'file:' + path, start, end, total)) completePaths.add(path);
+  };
+  const computation = new Map();
+  for (const use of uses) {
+    if (use.canonical_input) computation.set(use.input.id, {input: true, use});
+    computation.set(use.result.id, {input: false, use});
+  }
+  const embedded = use => {
+    if (use.semantic_judgment !== 'supported') return;
+    let rows;
+    if (use.schema_kind === 'ScanEvidence') rows = use.payload[1];
+    else if (use.schema_kind === 'ScanOutcome') {
+      const {tag, value} = use.payload;
+      rows = tag === 0 ? [value] : tag === 1 ? value[1] : value[1][1];
+    }
+    if (!rows) return;
+    for (const row of rows) {
+      const acquisition = row[5], item = acquisition?.[0] === 3 && byValue.get(acquisition[1]);
+      if (!item || !same(item.value, sourceRefs[item.path]) || !use.paths.includes(item.path)) continue;
+      if (row[3] && item.path !== 'scan.json' && row[4] === specimen.files[item.path])
+        credit(item.value, [item.path]);
+      remember(item.value, item.path);
+    }
+  };
+  const preview = (i, kind, wanted, page, source) => {
+    const item = wanted?.kind === 'source' ? bySource.get(wanted.id) : wanted?.kind === 'value' && byValue.get(wanted.id);
+    const computed = !item && wanted?.kind === 'value' && computation.get(wanted.id);
+    if (!item && !computed) { note(unresolved, kind, i, {ref: wanted}); return; }
+    let text;
+    if (item) text = wanted.kind === 'source' ? specimen.files[item.path] : JSON.stringify(item.text);
+    else {
+      const raw = values.get(wanted.id)?.raw;
+      if (!raw) { note(unresolved, kind, i, {ref: wanted}); return; }
+      try { text = JSON.stringify(renderedValue(typed(archive, raw[3][1], raw[3][2]))); }
+      catch (error) {
+        if (error.code !== 'ValueCapacity') throw error;
+        note(unresolved, kind, i, {ref: wanted}); return;
+      }
+    }
+    const bytes = Buffer.from(text), range = pageRange(page, bytes);
+    if (!range) { note(unresolved, kind, i, {ref: wanted}); return; }
+    const [start, end] = range;
+    const complete = coverRange(pages, wanted.kind + wanted.id, start, end, bytes.length);
+    if (item) {
+      if (wanted.kind === 'source' || item.start === 0 && item.end === files.get(item.path).bytes.length)
+        remember(wanted, item.path);
+      if (same(source, item.source)) remember(source, item.path);
+      note(routes, kind, i, {path: item.path});
+      if (wanted.kind === 'source') markSource(i, kind, item.path, start, end);
+      else if (complete) markSource(i, kind, item.path, item.start, item.end);
+      return;
+    }
+    const {input, use} = computed;
+    const alreadyShown = !input && presented.has(use.result.id);
+    if (complete) partialComputations.delete(wanted.id);
+    if (alreadyShown) {
+      if (!use.one_computed_block) note(unresolved, kind, i, {ref: wanted});
+    } else if (!complete) partialComputations.set(wanted.id, {kind, i, wanted});
+    else if (input || use.semantic_judgment === 'supported') note(routes, kind, i, {ref: wanted});
+    else note(unresolved, kind, i, {ref: wanted});
+    if (complete && (input || use.semantic_judgment === 'supported')) {
+      credit(wanted, input ? [...relevant] : use.paths);
+      if (input) embedded({schema_kind: 'ScanEvidence', semantic_judgment: 'supported',
+        paths: [...relevant], payload: renderedValue(canonicalEvidence(specimen, sourceRefs))});
+      else embedded(use);
+    }
   };
   for (const i of history) {
-    for (const block of selectedPresentation(i.attempt.selected_view, i.attempt.body)?.blocks ?? []) {
-      const value = block.value_reference, path = value && sourcePaths.get(value.id);
-      if (path && block.kind === 'acquisition' && block.value === specimen.files[path])
-        see('presented_source', path, i, value);
+    for (const use of uses) {
+      const request = use.exposures.find(e => e.id === i.attempt.id && e.delivery === 'confirmed' && e.rendered);
+      if (!request) continue;
+      presented.add(use.result.id);
+      exposure.push({ref: use.result, paths: use.paths, semantic_judgment: use.semantic_judgment,
+        known_lossy: use.known_lossy, schema_sha256: use.payload_schema_sha256, value: use.payload,
+        requests: [{attempt_id: request.id, prepared_sha256: request.prepared_sha256, input_index: request.input_index}]});
+      embedded(use);
     }
-    for (const {action, command, reply, observation} of actionsAt(i)) {
-      if (action.tag === 'work' && reply.disposition === 'observed') {
-        const results = command.tag === 'collect' ? observation : command.tag === 'wait' ? observation.works : [observation];
-        for (const item of Array.isArray(results) ? results : []) {
-          const use = uses.find(u => same(u.result, item.result));
-          if (use && item.result_preview?.text) unresolved.push({kind: 'work_result_preview', ref: use.result});
+    const selection = selectedPresentation(i.attempt.selected_view, i.attempt.body);
+    for (const block of selection?.blocks ?? []) {
+      if (block.kind === 'computed' && uses.some(use => same(block.result, use.result) &&
+          use.exposures.some(e => e.id === i.attempt.id && e.rendered) &&
+          equal(block.value, use.payload) && block.schema_identity === use.payload_schema_sha256)) continue;
+      const val = block.value_reference;
+      const item = val?.kind === 'value' && byValue.get(val.id);
+      if (item && block.kind === (item.source ? 'acquisition' : 'judgment')) {
+        const full = Buffer.from(item.text);
+        const start = block.slice ? Number(block.slice.offset) : 0;
+        const end = block.slice ? start + Number(block.slice.length) : full.length;
+        if (Number.isSafeInteger(start) && Number.isSafeInteger(end) && start >= 0 && end >= start &&
+            end <= full.length && typeof block.value === 'string' && full.subarray(start, end).equals(Buffer.from(block.value))) {
+          if (item.start === 0 && item.end === files.get(item.path).bytes.length) remember(val, item.path);
+          markSource(i, 'presented_source', item.path, item.start + start, item.start + end);
+          continue;
         }
       }
-      if (action.tag !== 'context') continue;
-      if (command.tag === 'materialize' && command.value.input.tag === 'snapshot') {
-        const path = command.value.input.value.path;
-        if (reply.disposition === 'rejected' && observation.error === 'SourceMissing' &&
-            !Object.hasOwn(specimen.files, path)) see('missing_read', path, i, null);
-        if (reply.disposition === 'observed' && Object.hasOwn(specimen.files, path)) {
-          const value = sourceRefs[path], preview = observation.preview;
-          const complete = same(value, observation.value) && preview?.complete === true &&
-            preview.text === JSON.stringify(specimen.files[path]);
-          see('snapshot_acquisition', path, i, complete ? value : null);
-        }
-      }
-      if (command.tag !== 'expand' || reply.disposition !== 'observed') continue;
-      const wanted = command.value.reference;
-      let path;
-      if (wanted.kind === 'value') path = sourcePaths.get(wanted.id);
-      else if (wanted.kind === 'source') path = Object.keys(sourceRefs).find(key => {
-        return digest(values.get(sourceRefs[key].id)?.raw[3][3]) === wanted.id;
-      });
-      if (!path && wanted.kind === 'value' && values.has(wanted.id)) {
-        const raw = values.get(wanted.id).raw;
-        const value = typed(archive, raw[3][1], raw[3][2]);
-        const use = uses.find(u => same(u.input, wanted) || same(u.result, wanted));
-        const paths = use && same(use.input, wanted) && use.canonical_input ? assessScan(specimen).paths :
-          use && same(use.result, wanted) && use.semantic_judgment === 'supported' ? use.paths : null;
-        if (paths && observation.complete === true && equal(renderedValue(value), JSON.parse(observation.text))) {
-          for (const path of paths) see('expanded_computation', path, i, wanted);
-        } else unresolved.push({kind: 'other_value_expansion', ref: wanted});
-      }
-      if (!path) continue;
-      const text = wanted.kind === 'value' ? JSON.stringify(specimen.files[path]) : specimen.files[path];
-      const bytes = Buffer.from(text), offset = BigInt(observation.offset), end = BigInt(observation.next_offset);
-      if (offset > end || end > BigInt(bytes.length) || BigInt(observation.total_bytes) !== BigInt(bytes.length) ||
-          !Buffer.from(observation.text).equals(bytes.subarray(Number(offset), Number(end)))) continue;
-      see('expansion', path, i, null);
-      const ranges = pages.get(wanted.id) ?? [];
-      ranges.push([Number(offset), Number(end)]);
-      pages.set(wanted.id, ranges);
-      let covered = 0;
-      for (const [start, stop] of ranges.sort((a,b) => a[0] - b[0])) {
-        if (start > covered) break;
-        covered = Math.max(covered, stop);
-      }
-      if (covered === bytes.length) see('complete_expansion', path, i, wanted);
+      note(unresolved, 'other_selected_block', i);
     }
+    if (!selection && i.attempt.selected_view) note(unresolved, 'unverified_selected_view', i);
+    const actions = actionsAt(i);
     for (const pending of i.results) {
-      if (pending.output.tag !== 'work') continue;
+      const output = receivedOutput(i.attempt, pending.call_id);
+      if (pending.output.tag === 'workspace') {
+        const entry = actions.find(a => a.call_id === pending.call_id);
+        if (!entry || !output) { note(unresolved, 'unconfirmed_workspace_output', i); continue; }
+        const {action, command, reply, observation} = entry;
+        let rendered;
+        try { rendered = JSON.parse(output); } catch {}
+        if (rendered?.disposition !== reply.disposition || !equal(rendered.observation, observation)) {
+          note(unresolved, 'unconfirmed_workspace_output', i); continue;
+        }
+        if (action.tag === 'context' && command.tag === 'materialize') {
+          const input = command.value.input, path = input.tag === 'snapshot' && input.value.path;
+          if (path && reply.disposition === 'rejected' && observation.error === 'SourceMissing' && absent(path)) {
+            note(routes, 'missing_read', i, {path}); missing.add(path);
+          }
+          if (reply.disposition !== 'observed') continue;
+          const wanted = observation.value;
+          if (!wanted || !same(reply.evidence, wanted)) { note(unresolved, 'unbound_value_preview', i); continue; }
+          if (path && byValue.get(wanted.id)?.path !== path) { note(unresolved, 'unbound_acquisition', i); continue; }
+          if (input.tag === 'value' && input.value.tag === 'reference') {
+            const origin = input.value.value;
+            if (!same(origin, wanted)) {
+              const original = values.get(origin.id)?.raw, alias = values.get(wanted.id)?.raw;
+              if (!original || !alias || origin.kind !== 'value' || wanted.kind !== 'value' ||
+                  alias[4][0] !== 3 || !alias[4][1].some(parent => digest(parent) === origin.id) ||
+                  !equal(original[3][1], alias[3][1]) || !equal(original[3][2], alias[3][2])) {
+                note(unresolved, 'unbound_alias', i); continue;
+              }
+              if (byValue.has(origin.id)) byValue.set(wanted.id, {...byValue.get(origin.id), value: wanted, source: null});
+              if (computation.has(origin.id)) computation.set(wanted.id, computation.get(origin.id));
+            }
+          }
+          preview(i, path ? 'snapshot_acquisition' : 'materialized_value', wanted, observation.preview, observation.source);
+        } else if (action.tag === 'context' && command.tag === 'expand' && reply.disposition === 'observed')
+          preview(i, 'expansion', command.value.reference, observation);
+        else if ((action.tag === 'work' || action.tag === 'placement' && command.tag === 'control') && reply.disposition === 'observed') {
+          const op = action.tag === 'work' ? command : command.value.command;
+          const items = op.tag === 'wait' ? observation.works : op.tag === 'collect' ? observation : [observation];
+          if (!Array.isArray(items)) { note(unresolved, 'unverified_work_output', i); continue; }
+          for (const item of items) {
+            if (item.result_preview) preview(i, 'work_result_preview', item.result, item.result_preview);
+            else if (item.result) note(unresolved, 'unverified_work_preview', i);
+          }
+        } else if (reply.disposition === 'observed' && !(action.tag === 'context' && command.tag === 'inspect' &&
+            !command.value.consumer)) note(unresolved, 'other_workspace_output', i);
+        continue;
+      }
+      if (pending.output.tag !== 'work') {
+        note(unresolved, 'other_tool_output', i); continue;
+      }
       const object = pending.output.value;
       const artifact = decodeValue(contract(application, 'WorkArtifact'), archive.object([object.digest, BigInt(object.bytes)]));
-      if (artifact[0] !== 2 || hex(artifact[1]) !== i.task_id || artifact[6].tag !== 1) continue;
-      const [, result] = artifact[6].value;
-      if (result.tag === 1 && !Object.hasOwn(specimen.files, result.value)) see('missing_read', result.value, i, null);
-      if (result.tag !== 0) continue;
-      const [, path, hash, start, end, size, content] = result.value;
-      if (!Object.hasOwn(specimen.files, path) || hash !== sha(specimen.files[path]) ||
-          size !== BigInt(Buffer.byteLength(specimen.files[path])) ||
-          !Buffer.from(content).equals(Buffer.from(specimen.files[path]).subarray(Number(start), Number(end)))) continue;
-      see('ordinary_read', path, i, null);
+      const result = artifact[6];
+      if (i.previous?.delivery !== 'confirmed' || artifact[0] !== 2 || hex(artifact[1]) !== i.task_id ||
+          artifact[4] !== pending.call_id || output !== artifact[8]) {
+        note(unresolved, 'unconfirmed_work_output', i); continue;
+      }
+      let rendered;
+      if (result.tag === 0 || result.tag === 1) {
+        try { rendered = JSON.parse(output); } catch { note(unresolved, 'unverified_work_text', i); continue; }
+      }
+      if (result.tag === 0) {
+        const [[prefix, after], [entries, truncated, next]] = result.value;
+        const ordered = [...files].filter(([path]) => path.startsWith(prefix) && path > after)
+          .sort(([a], [b]) => Buffer.from(a).compare(Buffer.from(b)));
+        const expected = ordered.slice(0, 32).map(([path, file]) => [path, BigInt(file.bytes.length)]);
+        const listing = {entries: entries.map(([path, bytes]) => ({path, bytes: String(bytes)})), truncated, next};
+        if (!equal(entries, expected) || !equal(rendered, listing) ||
+            truncated !== (ordered.length > 32) || next !== (truncated ? expected.at(-1)[0] : '')) {
+          note(unresolved, 'unbound_listing', i); continue;
+        }
+        for (const path of relevant) {
+          if (!path.startsWith(prefix) || path <= after || truncated && path > next) continue;
+          note(routes, 'snapshot_listing', i, {path});
+          if (absent(path)) missing.add(path);
+        }
+      } else if (result.tag === 1) {
+        const [[requestedPath], read] = result.value;
+        if (read.tag === 1 && relevant.has(requestedPath)) {
+          if (read.value === requestedPath && absent(requestedPath) && equal(rendered, {tag: 'missing', value: requestedPath})) {
+            note(routes, 'missing_read', i, {path: requestedPath}); missing.add(requestedPath);
+          } else note(unresolved, 'unbound_missing_read', i);
+        }
+        if (read.tag !== 0) continue;
+        const [snapshot, path, hash, start, end, size, text] = read.value;
+        const file = files.get(path);
+        const found = {snapshot: [...snapshot], path, sha256: hash, start: String(start), end: String(end), file_bytes: String(size), content: text};
+        if (!present(path) || path !== requestedPath || hex(snapshot) !== hex(pinned.digest) ||
+            !equal(rendered, {tag: 'found', value: found}) ||
+            hash !== file.hash || size !== BigInt(file.bytes.length) || start > end || end > size ||
+            !Buffer.from(text).equals(file.bytes.subarray(Number(start), Number(end)))) {
+          note(unresolved, 'unbound_read', i); continue;
+        }
+        markSource(i, 'ordinary_read', path, Number(start), Number(end));
+      } else note(unresolved, 'other_work_output', i);
     }
   }
-  const missing = new Set(routes.filter(r => r.kind === 'missing_read').map(r => r.path));
-  for (const row of exposure) {
-    if (same(row.ref, sourceRefs['scan.json']) && row.paths.includes('scan.json'))
-      row.paths.push(...JSON.parse(specimen.files['scan.json']).visits.map(v => v.path).filter(p => missing.has(p)));
-  }
+  for (const {kind, i, wanted} of partialComputations.values()) note(unresolved, kind, i, {ref: wanted});
+  for (const {value, path} of handles.values()) if (completePaths.has(path))
+    credit(value, path === 'scan.json' ? [path, ...missing] : [path]);
   return {exposure, routes, unresolved};
 }
 
@@ -372,7 +629,9 @@ export function adjudicateRepairTrace({archive, application, observations = [], 
   const attempts = controllerAttempts(archive, application);
   const history = interactions(archive, application, observations, attempts);
   const producer = bindReport(archive, observations, history, summary);
-  const actions = history.flatMap(actionsAt);
+  const reportHistory = producer ? history.filter(i => i.controller_id === producer.controller_id &&
+    i.controller_epoch === producer.controller_epoch && BigInt(i.event_cut) <= BigInt(producer.event_cut)) : [];
+  const actions = (producer ? reportHistory : history).flatMap(actionsAt);
   const proposed = producer && nomination ? parseCandidate(summary) : null;
   const builds = actions.filter(a => a.action.tag === 'program' && a.command.tag === 'build').map(a => ({
     attempt_id: a.attempt_id, call_id: a.call_id, cut: a.cut, source_kind: a.command.value.source_kind,
@@ -381,39 +640,41 @@ export function adjudicateRepairTrace({archive, application, observations = [], 
     attempt_id: a.attempt_id, call_id: a.call_id, cut: a.cut, selection: a.command.value,
     disposition: a.reply.disposition, view: a.reply.selected_view, rejection: a.observation.error ?? null}));
   const build = proposed && equal(proposed, nomination) && authored(programs, actions, bootstrap, nomination);
-  const candidate = build ? {...material(archive, programs.get(nomination.program.id)), author_task: task,
-    build_attempt: build.attempt_id, build_call: build.call_id, build_result_cut: build.cut} : null;
   const uses = rows(11, 'workspace_view').map(row =>
-    projectionUse(archive, row, programs, values, specimen, sourceRefs, attempts, actions, lossySourceDigest)).filter(Boolean);
+    projectionUse(archive, row, programs, values, specimen, sourceRefs, attempts, actions, lossySourceDigest, build)).filter(Boolean);
+  const rejection = build ? incompatibleBuild(archive, build, programs.get(nomination.program.id), observations, uses) : null;
+  const candidate = build && !rejection ? {...material(archive, programs.get(nomination.program.id)), author_task: task,
+    build_attempt: build.attempt_id, build_call: build.call_id, build_result_cut: build.cut} : null;
   const projected = uses.find(v => same(v.view, bootstrap?.view) && same(v.result, bootstrap?.result) &&
     same(v.program, bootstrap?.program) && same(v.input, bootstrap?.input) && same(v.work, bootstrap?.work) &&
     same(v.consumer, bootstrap?.consumer));
   const actual = projected && material(archive, programs.get(projected.program.id));
-  const transfer = Boolean(frozen && frozen.author_task !== task && projected?.canonical_input && actual &&
-    ['source_sha256', 'image_sha256', 'input_schema_sha256', 'result_schema_sha256', 'failure_schema_sha256']
-      .every(key => actual[key] === frozen[key]));
-  const applied = candidate && uses.find(v => same(v.program, candidate.program) && v.canonical_input &&
-    v.model_start && v.model_select && BigInt(v.model_start.cut) > BigInt(build.cut) &&
-    BigInt(v.model_select.cut) > BigInt(v.model_start.cut) && v.exposures.some(e =>
-      e.delivery === 'confirmed' && e.rendered && e.preparation_cut !== null && BigInt(e.preparation_cut) >= BigInt(v.model_select.cut)));
+  const transfer = Boolean(frozen && frozen.author_task !== task && projected?.canonical_input &&
+    matchesFrozen(actual, frozen) && same(bootstrap.input_schema, ref('schema', actual.input_schema_sha256)) &&
+    same(bootstrap.output_schema, ref('schema', actual.result_schema_sha256)));
+  const applied = confirmedApplication(uses, candidate, build?.cut, new Set(reportHistory.map(i => i.attempt?.id)));
   const builtPrograms = new Set(builds.filter(b => b.disposition === 'admitted').map(b => b.program?.id));
   const work = inventory(archive, 9, 'workspace_work').flatMap(({raw}) => {
     const program = hex(raw[8]);
     if (hex(raw[2]) !== task || !builtPrograms.has(program)) return [];
     const inputRef = some(raw[16]), input = values.get(digest(inputRef)), result = some(raw[29]);
     const canonical = input && digest(input.raw[3][1]) === inputSchemaId &&
-      canonicalRun(values, inputRef, specimen, sourceRefs, typed(archive, input.raw[3][1], input.raw[3][2]));
+      equal(raw[15], input.raw[3][2]) && equal(programs.get(program)?.raw[3][6], input.raw[3][1]) &&
+      canonicalRun(values, inputRef, specimen, sourceRefs, scanInput(archive, input));
     return [{work: ref('work', hex(raw[1])), program: ref('program', program), input_sha256: digest(raw[15]),
       input: inputRef ? ref('value', digest(inputRef)) : null, canonical_input: Boolean(canonical),
       outcome: ['progressed', 'yielded', 'requested', 'completed', 'failed', 'cancelled'][raw[19]],
       result: result ? ref('value', digest(result)) : null}];
   });
   const support = decisionSupport(archive, application, specimen, sourceRefs, values, history, uses, producer);
-  return {candidate, builds, work, selections, report_bound: Boolean(producer), report_attempt: producer?.attempt.id ?? null,
-    authored_and_applied: Boolean(applied), transfer_bound: transfer, projection: projected ?? null, uses,
+  const evidenceComplete = Boolean(producer && !support.unresolved.length && !attempts.some(a => a.delivery === 'unknown') &&
+    history.length === inventory(archive, 26, 'controller_interaction').length &&
+    observations.some(o => o.acquisition_records_complete && o.report_producer?.attempt_id === producer.attempt.id));
+  return {candidate, nomination_rejection: rejection, builds, work, selections, report_bound: Boolean(producer),
+    report_attempt: producer?.attempt.id ?? null, authored_and_applied: Boolean(applied), applied_use: applied,
+    transfer_bound: transfer, projection: projected ?? null, uses,
     exposure: support.exposure, ordinary_routes: support.routes, unresolved_evidence_routes: support.unresolved,
-    ordinary_fallback: support.routes.length ? true : producer && !support.unresolved.length &&
-      history.length === inventory(archive, 26, 'controller_interaction').length && observations.some(o => o.acquisition_records_complete) ? false : null,
+    evidence_complete: evidenceComplete, ordinary_fallback: support.routes.length ? true : evidenceComplete ? false : null,
     delivery: attempts.map(publicAttempt)};
 }
 
@@ -423,24 +684,29 @@ export function adjudicateRepairCollision({archive, bootstrap, specimen, pairedS
     hex(row.raw[1]) === task).map(row => [digest(row.raw[2]), row]));
   const programs = byArtifact(8, 'workspace_program'), values = byArtifact(10, 'workspace_value');
   const works = inventory(archive, 9, 'workspace_work');
-  const consumer = inventory(archive, 17, 'workspace_reply').find(row => row.id === bootstrap?.consumer?.id &&
+  const consumer = inventory(archive, 17, 'workspace_reply').find(row => same(bootstrap?.consumer, ref('observation', row.id)) &&
     hex(row.raw[1]) === task && row.raw[4].tag === 0 && row.raw[4].value.tag === 7);
   const program = programs.get(bootstrap?.program?.id);
   const inspect = (receipt, source, manifestPath) => {
     if (!program || !consumer || !receipt || !source || !candidate || candidate.author_task === task) return null;
     const executable = material(archive, program);
-    if (!['source_sha256', 'image_sha256', 'input_schema_sha256', 'result_schema_sha256', 'failure_schema_sha256']
-        .every(key => executable[key] === candidate[key])) return null;
+    if (!matchesFrozen(executable, candidate) || !same(bootstrap.program, executable.program) ||
+        !same(bootstrap.input_schema, ref('schema', executable.input_schema_sha256)) ||
+        !same(bootstrap.output_schema, ref('schema', executable.result_schema_sha256))) return null;
     const row = works.find(r => r.id === receipt.work?.id);
     const input = values.get(receipt.input?.id), result = values.get(receipt.result?.id);
-    if (!row || !input || !result) return null;
+    if (!row || !input || !result || !same(receipt.work, ref('work', hex(row.raw[1]))) ||
+        !same(receipt.input, ref('value', digest(input.raw[2]))) ||
+        !same(receipt.result, ref('value', digest(result.raw[2])))) return null;
     const refs = acquisitions(archive, values, source, receipt, manifestPath);
     const run = execution(archive, programs, values, source, refs, program.raw[2], input.raw[2], result.raw[2], row.raw);
-    if (!run?.proof || !equal(run.actual[0], [12, bootstrap.consumer?.id]) ||
-        !equal(run.output[0][0], run.actual[0])) return null;
+    if (!run?.proof || !equal(run.actual[0], [12, bootstrap.consumer.id])) return null;
+    const presentation = run.presented;
+    const inspected = diagnosticPresentation(presentation, run.actual[0]);
     return {consumer: bootstrap.consumer, program: executable.program, work: receipt.work, input: receipt.input,
-      result: receipt.result, payload: renderedValue(run.output[1]), expected: assessScan(source).outcome,
-      schema_kind: run.schemaKind, ...run.semantic};
+      result: receipt.result, expected: assessScan(source).outcome, schema_kind: run.schemaKind,
+      one_computed_block: presentation.one_computed_block ?? null, ...inspected,
+      ...(inspected.inspection_error ? {semantic_judgment: 'unestablished', paths: []} : run.semantic)};
   };
   const left = inspect(bootstrap, specimen, 'scan.json');
   const right = inspect(bootstrap?.paired, pairedSpecimen, 'paired-scan.json');

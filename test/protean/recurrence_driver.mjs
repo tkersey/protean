@@ -211,7 +211,6 @@ try {
   assert.deepEqual(await child.exited, [0, null]);
   const config = JSON.parse(await readFile(new URL('../../examples/adaptive/adaptive.example.json', import.meta.url)));
   const applicationPath = process.argv[3], application = JSON.parse(await readFile(applicationPath));
-  await checkInterfaceRepair(launch, root, {sources, application, config});
   const fixtureChild = launch(null, 'fixture-state');
   const fixtureTask = await fixtureChild.call('task.submit', submission);
   const fixture = await fixtureChild.call('evaluation.fixture', {task_id: fixtureTask.task_id, reject_action: true});
@@ -265,8 +264,14 @@ try {
   }
   assert.equal(completedExposure?.acquisition.exposure.selected_view.id, fixture.view.id,
     'consumed interactions retain actual exposure after the returned action is rejected');
+  const exampleArchive = join(root, 'ordinary-projector.agnx');
+  await fixtureChild.call('evaluation.export', {task_id: fixtureTask.task_id, path: exampleArchive});
   fixtureChild.stdin.end();
   assert.deepEqual(await fixtureChild.exited, [0, null]);
+  const example = readArchive(await readFile(exampleArchive));
+  const scalarProjection = {id: hex(program.value.artifact.digest),
+    source: example.object([program.value.description.source.digest, BigInt(program.value.description.source.bytes)]).toString()};
+  await checkInterfaceRepair(launch, root, {sources, application, config, scalarProjection});
   const delegatedSnapshot = join(root, 'delegated-snapshot'), delegatedConfigPath = join(root, 'delegated.json');
   await mkdir(delegatedSnapshot);
   await writeFile(join(delegatedSnapshot, 'fixture.txt'), 'Native delegated fixture evidence.');

@@ -142,6 +142,17 @@ export function physicalProviderAttempt(id, disposition, state) {
   throw new Error('Unknown occurrence state');
 }
 
+export function providerRequestBodyBytes(prepared, role, schemas, application) {
+  if (!prepared) return null;
+  if (role === 'controller') return decodeValue(contract(application, 'AdaptivePrepared'), prepared)[2].length;
+  assert.equal(role, 'delegated');
+  const {root, types} = schemas.get('workspace_delegation');
+  const [, , , , , , , , , , model, snapshot] = types[root].product;
+  const bytes = types.length + 1;
+  const schema = {root: types.length, types: [...types, {product: [bytes, bytes, model, snapshot]}, 'bytes']};
+  return decodeValue(schema, prepared)[1].length;
+}
+
 export function workspaceMetrics(archive, application) {
   const captured = contract(application, 'CapturedResponse');
   const replySchema = contract(application, 'WorkspaceReply');
@@ -196,7 +207,9 @@ export function workspaceMetrics(archive, application) {
     if (attempt[7].tag === 1) count.prepared_bytes += Number(attempt[7].value[1]);
     if (!physicalProviderAttempt(id, capture?.[5], state)) continue;
     count.calls++;
-    const physical = {id, role, usage: null, capture_disposition: capture?.[5] ?? null};
+    const prepared = attempt[7].tag === 1 ? archive.object(attempt[7].value) : null;
+    const physical = {id, role, usage: null, capture_disposition: capture?.[5] ?? null,
+      request_body_bytes: providerRequestBodyBytes(prepared, role, archive.schemas, application), prepared_bytes: prepared?.length ?? null};
     stats.physical_attempts.push(physical);
     if (!capture || capture[4].tag !== 1) { count.missing_usage++; continue; }
     const raw = decodeValue(captured, archive.object(capture[4].value));
@@ -513,21 +526,23 @@ export class RecurrenceDelivery {
   }
 }
 
-export function recurrenceCost(report, model, usages) {
-  const result = {model_id: model.id ?? null, currency: model.currency ?? null,
-    total: null, complete: false, inference: null, host: null, storage: null, missing: []};
-  if (model.kind !== 'tariff' || model.predeclared !== true) {
-    result.missing.push('No predeclared deployment tariff.');
-    return result;
-  }
+export function tariffErrors(model) {
+  if (model?.kind !== 'tariff' || model.predeclared !== true) return ['No predeclared deployment tariff.'];
+  const missing = [];
   for (const field of ['input_per_million', 'cached_input_per_million', 'output_per_million',
     'host_per_second', 'storage_per_byte_second', 'retention_seconds']) {
-    if (!Number.isFinite(model[field]) || model[field] < 0) result.missing.push(field);
+    if (!Number.isFinite(model[field]) || model[field] < 0) missing.push(field);
   }
   if (!model.id || !model.currency || !model.provider_source || !model.deployment_source)
-    result.missing.push('Tariff identity and sources.');
+    missing.push('Tariff identity and sources.');
   if (model.host_includes_attempt_storage !== true)
-    result.missing.push('Deployment price must include storage during execution.');
+    missing.push('Deployment price must include storage during execution.');
+  return missing;
+}
+
+export function recurrenceCost(report, model, usages) {
+  const result = {model_id: model?.id ?? null, currency: model?.currency ?? null,
+    total: null, complete: false, inference: null, host: null, storage: null, missing: tariffErrors(model)};
   if (result.missing.length) return result;
   const calls = report.metrics ? report.metrics.controller.calls + report.metrics.delegated.calls : null;
   if (calls === null || calls !== usages.length) result.missing.push('Complete physical attempt inventory.');

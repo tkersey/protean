@@ -21,6 +21,7 @@ const Options = struct {
     profile_task: ?[16]u8 = null,
     fixture_workspace: bool = false,
     bootstrap_digest: ?[32]u8 = null,
+    bootstrap_source: ?[]const u8 = null,
     configuration: native.configuration.Options = .{ .offline = false },
 
     fn parse(init: std.process.Init) !Options {
@@ -53,6 +54,8 @@ const Options = struct {
                     result.configuration.siwc_auth_dir = value;
                 } else if (std.mem.eql(u8, arg, "--profile-task")) {
                     result.profile_task = try native.client.identifier(16, Json.string(value));
+                } else if (std.mem.eql(u8, arg, "--interface-repair-source")) {
+                    result.bootstrap_source = value;
                 } else if (std.mem.eql(u8, arg, "--interface-repair-bootstrap")) {
                     result.bootstrap_digest = try native.client.identifier(32, Json.string(value));
                 } else return error.InvalidArguments;
@@ -197,7 +200,10 @@ fn run(init: std.process.Init) !void {
         .client = .{ .service = &service },
         .worker = worker,
         .fixture_workspace = options.fixture_workspace,
-        .repair_session = .{ .expected = options.bootstrap_digest },
+        .repair_session = .{
+            .expected = options.bootstrap_digest,
+            .source_path = options.bootstrap_source,
+        },
     };
     if (options.profile_task) |task| try driver.repair_session.restore(&service, a, task);
     try driver.serve(init.gpa, init.io);
@@ -291,7 +297,11 @@ const Driver = struct {
         if (std.mem.eql(u8, method, "evaluation.pause")) return self.pause(a, params);
         if (self.paused) return error.EvaluationPaused;
         if (std.mem.eql(u8, method, "evaluation.interface_repair.bootstrap"))
-            return self.repair_session.bootstrap(self.service, self.worker, a, params);
+            return self.repair_session.bootstrap(self.service, self.worker, a, params, false);
+        if (std.mem.eql(u8, method, "evaluation.interface_repair.fixture_select")) {
+            if (!self.fixture_workspace) return error.OfflineFixtureRequired;
+            return self.repair_session.bootstrap(self.service, self.worker, a, params, true);
+        }
         if (std.mem.eql(u8, method, "evaluation.interface_repair.fixture"))
             return self.repairFixture(a, params, false);
         if (std.mem.eql(u8, method, "evaluation.interface_repair.answer"))
@@ -327,7 +337,18 @@ const Driver = struct {
         );
         const selected = std.meta.stringToEnum(native.protocol.Method, method) orelse
             return error.MethodNotFound;
+        if (selected == .@"task.submit") try self.checkSubmission(a, params);
         return self.client.call(a, selected, params);
+    }
+
+    fn checkSubmission(self: *Driver, a: std.mem.Allocator, params: Json.Value) !void {
+        const task = self.repair_session.task orelse return;
+        const operation = try Json.text(try field(params, "client_operation_id"));
+        var prior = (try self.service.operationLookup(a, operation)) orelse
+            return error.PlannedTaskRequired;
+        defer prior.deinit();
+        if (prior.value.method != .submit or !std.meta.eql(prior.value.task, task))
+            return error.PlannedTaskRequired;
     }
 
     fn repairFixture(
@@ -345,6 +366,9 @@ const Driver = struct {
         if (self.repair_session.fixture_used or params != .object or params.object.count() != 2)
             return error.InvalidParams;
         const task = try native.client.identifier(16, try field(params, "task_id"));
+        var parent = try self.service.task(a, task);
+        defer parent.deinit();
+        if (parent.value.inference_attempts != 0) return error.InitialCutRequired;
         if (downstream) {
             if (!std.meta.eql(@as(?[16]u8, task), self.repair_session.downstream_task))
                 return error.InvalidParams;
@@ -446,11 +470,19 @@ const Driver = struct {
     }
 
     fn step(self: *Driver, a: std.mem.Allocator) !Json.Value {
-        if (self.repair_session.expected != null and !self.repair_session.ready)
-            return error.BootstrapRequired;
+        if (self.repair_session.expected != null and !self.repair_session.ready) {
+            try self.repair_session.prepare(self.service, self.worker, a);
+            return self.boundary(a, "bootstrap_ready");
+        }
         if (try self.finishWorker(a)) return self.boundary(a, "captured");
         const next = try self.service.pump(a);
         if (next == .work) {
+            if (self.repair_session.task) |task| {
+                if (!std.meta.eql(task, next.work.task)) {
+                    try self.service.notSent(a, next.work);
+                    return error.PlannedTaskRequired;
+                }
+            }
             if (self.fixture_workspace and next.work.entry.declaration.inference) {
                 try self.service.notSent(a, next.work);
                 return error.ScriptedFixtureOnly;
@@ -614,6 +646,15 @@ const Driver = struct {
             try Json.put(a, &record, "record_b64", try base64(a, bytes));
             if (key.kind == .workspace_view)
                 try Json.put(a, &record, "projection_blocks", try self.projectionBlocks(a, bytes));
+            if (sources and key.kind == .workspace_program and
+                self.repair_session.expected != null)
+            {
+                var program = try C.decodeOwned(native.workspace.Program, a, bytes);
+                defer program.deinit();
+                try Json.put(a, &record, "pure", .{
+                    .bool = try repair.programPure(self.service, a, program.value.description),
+                });
+            }
             if (sources and key.kind == .workspace_value) {
                 try Json.put(a, &record, "native_derivation", try acquisition.derivation(a, bytes));
                 try Json.put(a, &record, "native_acquisition", try presentation.judgment(

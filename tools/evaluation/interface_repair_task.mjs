@@ -4,13 +4,14 @@ import {createHash} from 'node:crypto';
 import {appendFile, readFile, realpath, writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {setTimeout as wait} from 'node:timers/promises';
+import {isDeepStrictEqual} from 'node:util';
 import {readArchive} from '../../test/protean/native_archive.mjs';
 import {contract} from '../../test/protean/adaptive_capture_checks.mjs';
 import {decodeValue} from '../../test/support/values.mjs';
 import {armViolations, bytesUnder, capturedUsage, decodeRecurrenceObservation, inferenceArguments, readOutcome, RecurrenceDriver,
-  recurrenceCost, workspaceMetrics} from './workspace.mjs';
+  providerRequestBodyBytes, recurrenceCost, workspaceMetrics} from './workspace.mjs';
 import {parseCandidate, gradeAnswer} from './interface_repair.mjs';
-import {adjudicateRepairTrace, adjudicateRepairCollision} from './interface_repair_trace.mjs';
+import {adjudicateRepairTrace, adjudicateRepairCollision, selectedPresentation} from './interface_repair_trace.mjs';
 import {campaignIdentity} from './recurrence.mjs';
 
 const json = value => JSON.stringify(value, (_, v) => typeof v === 'bigint' ? String(v) : v);
@@ -18,7 +19,8 @@ const hash = value => createHash('sha256').update(value).digest('hex');
 const sourceText = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true});
 const terminal = new Set(['completed', 'failed', 'cancelled', 'unknown', 'blocked', 'waiting_input']);
 const rejectedCandidate = new Set(['ProjectionBuildRejected', 'ProjectionInputRejected', 'ProjectionStartRejected',
-  'ProjectionWorkFailed', 'ProjectionSelectionRejected']);
+  'ProjectionWorkFailed', 'ProjectionSelectionRejected', 'ProjectionPreparationRejected', 'ProjectionPreparationOversized',
+  'ProjectionPreparationStale', 'ProjectionPreparationInvalid', 'ProjectionPreparationUnavailable', 'ProjectionResultRejected']);
 
 function conditionViolations(subject, actions) {
   const prohibited = new Set(armViolations('recurrence', actions));
@@ -45,20 +47,47 @@ function rssBytes(pid) {
   return status === 0 && /^\s*\d+\s*$/.test(stdout) ? Number(stdout.trim()) * 1024 : null;
 }
 
-function confirmedAttempts(observations, schemas, application, attempts) {
+function observeAttempts(observations, schemas, application, attempts, initialProjection, taskId) {
   const response = contract(application, 'CapturedResponse');
   for (const page of observations) {
     const decoded = decodeRecurrenceObservation({...page, events: [], records: []}, schemas);
     for (const row of decoded.attempts) {
       const capability = row.attempt.capability;
-      if (!['agent.model.invoke.v13', 'protean.workspace.inference/2'].includes(capability) ||
-          row.capture?.disposition !== 'complete' || !row.response_b64) continue;
+      if (!['agent.model.invoke.v13', 'protean.workspace.inference/2'].includes(capability)) continue;
+      assert.equal(Buffer.from(row.attempt.task).toString('hex'), taskId);
+      assert.deepEqual(row.occurrence.id, row.attempt.occurrence);
       const id = Buffer.from(row.attempt.id).toString('hex');
-      if (attempts.has(id)) continue;
-      const body = decodeValue(response, Buffer.from(row.response_b64, 'base64'));
-      let usage;
-      try { usage = capturedUsage(body) ?? null; } catch { usage = null; }
-      attempts.set(id, {id, role: capability === 'agent.model.invoke.v13' ? 'controller' : 'delegated', usage});
+      if (row.capture) {
+        assert.deepEqual(row.capture.task, row.attempt.task);
+        assert.deepEqual(row.capture.occurrence, row.attempt.occurrence);
+        assert.deepEqual(row.capture.attempt, row.attempt.id);
+        assert.deepEqual(row.capture.request, row.attempt.prepared);
+      }
+      if (!row.physical_provider_attempt) { attempts.delete(id); continue; }
+      const role = capability === 'agent.model.invoke.v13' ? 'controller' : 'delegated';
+      const prepared = row.prepared_b64 ? Buffer.from(row.prepared_b64, 'base64') : null;
+      if (prepared) {
+        assert.equal(hash(prepared), Buffer.from(row.attempt.prepared.digest).toString('hex'));
+        assert.equal(BigInt(prepared.length), BigInt(row.attempt.prepared.bytes));
+      }
+      const item = {id, role, capture_disposition: row.capture ? ['complete', 'definitely_not_sent', 'unknown'].indexOf(row.capture.disposition) : null,
+        request_body_bytes: providerRequestBodyBytes(prepared, role, schemas, application), prepared_bytes: prepared?.length ?? null, usage: null};
+      if (row.capture?.disposition === 'complete' && row.response_b64) {
+        const bytes = Buffer.from(row.response_b64, 'base64');
+        assert.equal(hash(bytes), Buffer.from(row.capture.response.digest).toString('hex'));
+        assert.equal(BigInt(bytes.length), BigInt(row.capture.response.bytes));
+        const body = decodeValue(response, bytes);
+        try { item.usage = capturedUsage(body) ?? null; } catch {}
+        if (initialProjection && role === 'controller' && prepared && body[0] >= 200 && body[0] < 300 && body[7] === 2) {
+          const request = decodeValue(contract(application, 'AdaptivePrepared'), prepared);
+          const view = request[3].tag === 1 ? Buffer.from(request[3].value[0]).toString('hex') : null;
+          const presented = view === initialProjection.view.id && selectedPresentation(view, JSON.parse(Buffer.from(request[2])));
+          item.initial_projection_delivered = Boolean(presented && presented.blocks.some(block => block.kind === 'computed' &&
+            isDeepStrictEqual(block.result, initialProjection.result) && block.schema_identity === initialProjection.payload_schema_sha256 &&
+            isDeepStrictEqual(block.value, initialProjection.payload)));
+        }
+      }
+      attempts.set(id, item);
     }
   }
 }
@@ -91,7 +120,7 @@ async function initialCondition({plan, plan_sha256, subject, candidate}) {
   const descriptor = json({version: 1, plan_sha256, submission_id: subject.id,
     prompt_sha256: hash(subject.prompt),
     phase: subject.phase === 'transfer' ? 'downstream' : subject.phase, condition,
-    files: subject.evidence, source_sha256: hash(source)});
+    files: subject.evidence, source_sha256: hash(source), program_sha256: candidate?.program.id ?? null});
   return {condition, descriptor, source};
 }
 
@@ -105,11 +134,13 @@ export async function executeRepairTask(options, {Client = RecurrenceDriver, scr
   const report = {subject, build, plan_sha256: options.plan_sha256, execution_mode: scripted ? 'scripted_fixture' : 'live',
     task: null, status: null, result: null, bootstrap: null,
     nomination: null, nomination_error: null, adjudication: null, grading: null,
-    archive: null, metrics: null, arm_violations: null, peak_rss_sampled_bytes: null,
+    archive: null, metrics: null, final_metrics_complete: false, authoring_opportunity: null,
+    arm_violations: null, peak_rss_sampled_bytes: null,
     retained_namespace_bytes: null, timed_out: false, errors: [], candidate_rejection: null,
     effective_condition: null, fallback_reason: null};
   const record = (stage, error) => report.errors.push({stage, name: error.name, message: error.message});
   let client, timer, startup, schemas, cursor = '0', specimen, pairedSpecimen, stage = 'setup';
+  let stepStarted = false, initialProjection;
   const observe = async () => {
     const raw = await client.call('evaluation.observe', {task_id: report.task.task_id, after: cursor, acquisition: true});
     assert(!raw.events.length || BigInt(raw.cursor) > BigInt(cursor), 'Native observation cursor did not advance.');
@@ -161,6 +192,11 @@ export async function executeRepairTask(options, {Client = RecurrenceDriver, scr
     startup = ['--state-dir', state, '--config', subject.config,
       ...(scripted ? ['--offline', '--fixture-workspace'] : inferenceArguments(options)),
       '--interface-repair-bootstrap', hash(initial.descriptor)];
+    if (candidate) {
+      const path = join(output, 'candidate-source.json');
+      await writeFile(path, initial.source, {flag: 'wx', mode: 0o600});
+      startup.push('--interface-repair-source', path);
+    }
     checkDeadline();
     client = new Client(driver, startup);
     armDeadline();
@@ -186,7 +222,7 @@ export async function executeRepairTask(options, {Client = RecurrenceDriver, scr
     stage = 'bootstrap';
     checkDeadline();
     {
-      const params = {task_id, descriptor: initial.descriptor, source: initial.source};
+      const params = {task_id, descriptor: initial.descriptor, source: candidate ? null : initial.source};
       await write('bootstrap-request.json', params);
       report.bootstrap = await client.call('evaluation.interface_repair.bootstrap', params);
       await write('bootstrap.json', report.bootstrap);
@@ -200,9 +236,10 @@ export async function executeRepairTask(options, {Client = RecurrenceDriver, scr
       } else {
         const bound = adjudicateRepairTrace({archive, application, bootstrap: report.bootstrap, specimen, candidate});
         assert(bound.projection?.canonical_input, 'Selected seed lacks a canonical source-backed work input.');
+        if (subject.phase === 'author') initialProjection = bound.projection;
         if (candidate) assert(bound.transfer_bound, 'Transfer does not match frozen executable and schemas.');
       }
-      if (scripted && subject.phase === 'author') {
+      if (scripted && (subject.phase === 'author' || initial.condition === 'ordinary')) {
         await close('bootstrap_close');
         assert(!report.errors.length, 'Could not establish a clean bootstrap restart.');
         checkDeadline();
@@ -214,11 +251,13 @@ export async function executeRepairTask(options, {Client = RecurrenceDriver, scr
           assert.deepEqual(restored.task[field], archive.task[field], 'Bootstrap restart changed ' + field);
         assert.equal(BigInt(restored.task.inference_attempts), 0n);
         const bound = adjudicateRepairTrace({archive: restored, application, bootstrap: report.bootstrap, specimen});
-        assert(bound.projection?.canonical_input && !bound.delivery.length, 'Bootstrap restart lost its initial projection.');
+        assert(!bound.delivery.length);
+        if (initial.condition === 'ordinary') assert.equal(bound.projection, null);
+        else assert(bound.projection?.canonical_input, 'Bootstrap restart lost its initial projection.');
         const status = await client.call('task.status', {task_id});
         if (status.status === 'parked') await client.call('task.resume', {
           client_operation_id: subject.id + '-reopen', task_id, expected_revision: status.revision});
-        report.recovery = {task_id, before: path, after: reopened, selected_view: bound.projection.view,
+        report.recovery = {task_id, before: path, after: reopened, selected_view: bound.projection?.view ?? null,
           inference_attempts_before_first_use: 0};
       }
     }
@@ -242,6 +281,7 @@ export async function executeRepairTask(options, {Client = RecurrenceDriver, scr
       }
       if (terminal.has(report.status.status) || report.status.question) break;
       checkDeadline();
+      stepStarted = true;
       const step = await client.call('evaluation.step');
       if (step.step === 'dispatched')
         await appendFile(join(output, 'dispatches.jsonl'), json({elapsed_ms: elapsed(), ...step}) + '\n', {mode: 0o600});
@@ -288,6 +328,7 @@ export async function executeRepairTask(options, {Client = RecurrenceDriver, scr
     if (finalArchive) {
       try {
         report.metrics = workspaceMetrics(finalArchive, application);
+        report.final_metrics_complete = true;
         report.arm_violations = conditionViolations(subject, report.metrics.actions);
       } catch (error) { record('metrics', error); }
       const result = report.result?.outcome?.value?.result;
@@ -309,19 +350,26 @@ export async function executeRepairTask(options, {Client = RecurrenceDriver, scr
             bootstrap: report.bootstrap, specimen, pairedSpecimen, candidate});
         }
         if (summary !== null && subject.phase === 'transfer') {
-          const {report_bound, exposure} = report.adjudication;
-          report.grading = gradeAnswer(summary, specimen, report_bound ? exposure : null);
+          const {report_bound, exposure, evidence_complete} = report.adjudication;
+          report.grading = gradeAnswer(summary, specimen, report_bound ? exposure : null, evidence_complete);
         }
       } catch (error) { record('adjudication', error); }
     }
   }
   try { report.retained_namespace_bytes = await bytesUnder(state); }
   catch (error) { record('namespace', error); }
-  if (!report.metrics && observations.length) {
+  if ((!report.metrics || initialProjection && !report.adjudication) && observations.length) {
     const attempts = new Map();
-    try { confirmedAttempts(observations, schemas, application, attempts); }
+    try { observeAttempts(observations, schemas, application, attempts, initialProjection, report.task.task_id); }
     catch (error) { record('observed_usage', error); }
     report.observed_provider_attempts = [...attempts.values()];
+  }
+  if (subject.phase === 'author' && !scripted) {
+    if (report.adjudication?.projection?.exposures.some(item => item.delivery === 'confirmed' && item.rendered) ||
+        report.observed_provider_attempts?.some(item => item.initial_projection_delivered))
+      report.authoring_opportunity = true;
+    else if (!stepStarted || report.final_metrics_complete && !report.metrics.controller.calls)
+      report.authoring_opportunity = false;
   }
   report.elapsed_ms = elapsed();
   report.finalization_ms = report.elapsed_ms - report.execution_ms;

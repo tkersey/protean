@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
-import {mkdir, readFile} from 'node:fs/promises';
+import {mkdir, readFile, writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {prepareInterfaceRepair} from '../../tools/evaluation/interface_repair_campaign.mjs';
 import {executeRepairTask} from '../../tools/evaluation/interface_repair_task.mjs';
@@ -28,7 +28,7 @@ class CheckedBootstrapClient extends RecurrenceDriver {
 async function rejectedSubmission(launch, root, author, plan_sha256, source, baselinePrograms) {
   const descriptor = JSON.stringify({version: 1, plan_sha256, submission_id: author.id,
     prompt_sha256: sha(author.prompt), phase: 'author', condition: 'repair',
-    files: author.evidence, source_sha256: sha(source)});
+    files: author.evidence, source_sha256: sha(source), program_sha256: null});
   const child = launch(null, 'changed-prompt', ['--fixture-workspace', '--config', author.config,
     '--interface-repair-bootstrap', sha(descriptor)]);
   try {
@@ -41,6 +41,101 @@ async function rejectedSubmission(launch, root, author, plan_sha256, source, bas
     const archive = readArchive(await readFile(path));
     assert.equal(archive.task.inference_attempts, 0n);
     assert.deepEqual(sourceInventory(archive), baselinePrograms);
+  } finally {
+    child.stdin.end();
+    assert.deepEqual(await child.exited, [0, null]);
+  }
+}
+
+async function restartAtSelection(launch, root, subject, plan_sha256, source, oversized) {
+  const descriptor = JSON.stringify({version: 1, plan_sha256, submission_id: subject.id,
+    prompt_sha256: sha(subject.prompt), phase: 'downstream', condition: 'fixed-lossy',
+    files: subject.evidence, source_sha256: sha(source), program_sha256: null});
+  const state = oversized ? 'rejected-presentation' : 'selection-recovery';
+  let configPath = subject.config;
+  if (oversized) {
+    const config = JSON.parse(await readFile(configPath));
+    for (const profile of config.adaptive.profiles) profile.request_bytes = 512;
+    configPath = join(root, state + '.json');
+    await writeFile(configPath, JSON.stringify(config));
+  }
+  const options = ['--fixture-workspace', '--config', configPath, '--interface-repair-bootstrap', sha(descriptor)];
+  let child = launch(null, state, options);
+  const close = async () => {
+    child.stdin.end();
+    assert.deepEqual(await child.exited, [0, null]);
+  };
+  const task = {};
+  const reopen = async () => {
+    await close();
+    child = launch(task.task_id, state, options);
+    const status = await child.call('task.status', task);
+    if (status.status === 'parked') await child.call('task.resume',
+      {...task, client_operation_id: 'resume-' + status.revision, expected_revision: status.revision});
+  };
+  try {
+    const {profile} = await child.call('describe');
+    const submitted = {client_operation_id: subject.id, application_id: 'adaptive-agent', profile_id: profile.id,
+      input: {schema_id: 'adaptive-agent.input.v2', value: {task: subject.prompt}}};
+    task.task_id = (await child.call('task.submit', submitted)).task_id;
+    const setup = await child.call('evaluation.interface_repair.fixture_select', {...task, descriptor, source});
+    assert(setup.view);
+    await reopen();
+    if (oversized) {
+      await assert.rejects(child.call('evaluation.step'), /ProjectionPreparationOversized/);
+      await reopen();
+      await assert.rejects(child.call('evaluation.step'), /ProjectionPreparationOversized/);
+      const path = join(root, state + '.agnx');
+      await child.call('evaluation.export', {...task, path});
+      assert.equal(readArchive(await readFile(path)).task.inference_attempts, 0n);
+      return;
+    }
+    assert.equal((await child.call('evaluation.step')).step, 'bootstrap_ready');
+    await assert.rejects(child.call('task.submit', {...submitted, client_operation_id: 'another-task'}),
+      /PlannedTaskRequired/);
+    await child.call('evaluation.interface_repair.answer', {...task, summary: 'Controlled terminal report.'});
+    const path = join(root, state + '.agnx');
+    await child.call('evaluation.export', {...task, path});
+    const before = readArchive(await readFile(path));
+    assert(before.task.inference_attempts > 0n);
+    await reopen();
+    await assert.rejects(child.call('evaluation.interface_repair.answer', {...task, summary: 'Second report.'}),
+      /InitialCutRequired/);
+    for (let turn = 0; turn < 128; turn++) {
+      if ((await child.call('task.status', task)).status === 'completed') break;
+      await child.call('evaluation.step');
+    }
+    assert.equal((await child.call('task.status', task)).status, 'completed');
+    const after = join(root, state + '-completed.agnx');
+    await child.call('evaluation.export', {...task, path: after});
+    assert.equal(readArchive(await readFile(after)).task.inference_attempts, before.task.inference_attempts);
+  } finally { await close(); }
+}
+
+async function rejectIncompatibleProgram(launch, root, subject, plan_sha256, scalar, large) {
+  const state = large ? 'large-source' : 'scalar-input';
+  const source = large ? scalar.source + ' '.repeat(1024 * 1024) : scalar.source;
+  const path = join(root, state + '.source.json');
+  await writeFile(path, source);
+  const descriptor = JSON.stringify({version: 1, plan_sha256, submission_id: subject.id,
+    prompt_sha256: sha(subject.prompt), phase: 'diagnostic', condition: 'repair',
+    files: subject.evidence, source_sha256: sha(source), program_sha256: scalar.id});
+  const options = ['--fixture-workspace', '--config', subject.config, '--interface-repair-source', path,
+    '--interface-repair-bootstrap', sha(descriptor)];
+  const child = launch(null, state, options);
+  try {
+    const {profile} = await child.call('describe');
+    const {task_id} = await child.call('task.submit', {client_operation_id: subject.id,
+      application_id: 'adaptive-agent', profile_id: profile.id,
+      input: {schema_id: 'adaptive-agent.input.v2', value: {task: subject.prompt}}});
+    await assert.rejects(child.call(bootstrapMethod, {task_id, descriptor, source: null}),
+      large ? /ChangedExecutable/ : /ProjectionInputRejected/);
+    const retained = join(root, state + '.agnx');
+    await child.call('evaluation.export', {task_id, path: retained});
+    const archive = readArchive(await readFile(retained));
+    assert(sourceInventory(archive).includes(sha(source)));
+    assert.equal(archive.manifest[6].filter(([kind]) => kind === 9).length, 0);
+    assert.equal(archive.task.inference_attempts, 0n);
   } finally {
     child.stdin.end();
     assert.deepEqual(await child.exited, [0, null]);
@@ -104,7 +199,8 @@ function checkUnrenderedCandidate(exact, use, exposure, change) {
   assert.equal(request.delivery, 'confirmed');
   assert.equal(request.input_index, exposure.input_index);
   assert.equal(request.rendered, false);
-  assert.equal(trace.exposure.some(row => row.ref.id === use.result.id), false);
+  assert(!trace.exposure.some(row => row.ref.id === use.result.id && row.requests?.length));
+  assert(trace.ordinary_routes.some(row => row.kind === 'work_result_preview' && row.ref?.id === use.result.id));
   assert.equal(trace.authored_and_applied, false);
 }
 
@@ -142,18 +238,24 @@ async function auditEvidence(report, application) {
   assert(uncertain.delivery.some(row => unconfirmed.has(row.id) && row.delivery === 'unknown'));
 }
 
-export async function checkInterfaceRepair(launch, root, {sources, application, config}) {
+export async function checkInterfaceRepair(launch, root, {sources, application, config, scalarProjection}) {
   const directory = join(root, 'directed-repair-plan');
   const preflight = readArchive(await readFile(join(root, 'preflight.agnx')));
   const {build} = preflight, baselinePrograms = sourceInventory(preflight);
   const driver = process.argv[2], applicationPath = process.argv[3];
-  const plan = await prepareInterfaceRepair({config: {...config, adaptive: {...config.adaptive,
+  const plan = await prepareInterfaceRepair({config: {...config, tools: {...config.tools, build: true, run: true},
+    adaptive: {...config.adaptive,
     endpoint: 'https://127.0.0.1:1/v1/responses'}}, directory, study: 'comparison',
     binary: driver, driver, applicationPath},
   {describeBuild: () => build, exportSources: () => sources, validateConfiguration: () => ({valid: true})});
   const plan_sha256 = (await readFile(join(directory, 'plan.sha256'), 'utf8')).trim();
   const {author, diagnostic, downstream} = plan.conditions.find(c => c.arm === 'repair');
   await rejectedSubmission(launch, root, author, plan_sha256, sources.lossy, baselinePrograms);
+  const fixed = plan.conditions.find(c => c.arm === 'fixed-lossy').downstream[0];
+  for (const oversized of [false, true])
+    await restartAtSelection(launch, root, fixed, plan_sha256, sources.lossy, oversized);
+  for (const large of [false, true])
+    await rejectIncompatibleProgram(launch, root, diagnostic, plan_sha256, scalarProjection, large);
   const episode = async (subject, candidate = null) => {
     const output = join(root, 'result-' + subject.id);
     await mkdir(output);
@@ -179,6 +281,7 @@ export async function checkInterfaceRepair(launch, root, {sources, application, 
   assert.notEqual(development.recovery.before, development.recovery.after);
   assert.equal(development.recovery.inference_attempts_before_first_use, 0);
   assert.equal(trace.report_bound, true);
+  assert.deepEqual(trace.applied_use.view, development.fixture_receipt.view);
   assert.equal(development.controlled_application_path, true);
   assert.equal(trace.authored_and_applied, false);
   const {candidate} = trace;
