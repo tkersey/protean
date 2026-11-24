@@ -17,6 +17,19 @@ const refKinds = ['program', 'work', 'port', 'value', 'schema', 'source', 'prove
   'runtime', 'residual', 'candidate', 'controller', 'observation'];
 const u64Max = '18446744073709551615';
 
+export function unsignedJsonInteger(source) {
+  const [mantissa, exponent = '0'] = source.toLowerCase().split('e');
+  const [integer, fraction = ''] = mantissa.split('.');
+  const digits = (integer + fraction).replace(/^-?0*/, '');
+  if (!digits) return 0n;
+  const significant = digits.replace(/0+$/, '');
+  const shift = Number(exponent) - fraction.length + digits.length - significant.length;
+  if (mantissa.startsWith('-') || Math.abs(Number(exponent)) > 1_000_000 ||
+      shift < 0 || significant.length + shift > 20) return null;
+  const exact = BigInt(significant) * 10n ** BigInt(shift);
+  return exact <= 0xffffffffffffffffn ? exact : null;
+}
+
 function demand(condition, reason) {
   if (!condition) throw new Error(reason);
 }
@@ -38,12 +51,14 @@ export function strictJson(text, reviver) {
     if (token[0] === '{') objects.push(new Set());
     else if (token[0] === '}') objects.pop();
     else {
+      const string = JSON.parse(token[0]);
+      demand(string.isWellFormed(), 'invalid_json');
       let next = token.index + token[0].length;
       while (next < text.length && ' \t\n\r'.includes(text[next])) next++;
       if (text[next] !== ':') continue;
-      const key = JSON.parse(token[0]), keys = objects.at(-1);
-      demand(!keys.has(key), 'duplicate_field');
-      keys.add(key);
+      const keys = objects.at(-1);
+      demand(!keys.has(string), 'duplicate_field');
+      keys.add(string);
     }
   }
   return value;

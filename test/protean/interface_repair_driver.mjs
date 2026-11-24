@@ -298,26 +298,42 @@ async function rejectIncompatibleProgram(launch, root, subject, plan_sha256, sca
     files: subject.evidence, source_sha256: sha(source), program_sha256: scalar.id});
   const options = ['--fixture-workspace', '--config', subject.config, '--interface-repair-source', path,
     '--interface-repair-bootstrap', sha(descriptor)];
-  const child = launch(null, state, options);
+  let child = launch(null, state, options);
+  const close = async () => {
+    child.stdin.end();
+    assert.deepEqual(await child.exited, [0, null]);
+  };
   try {
     const {profile} = await child.call('describe');
     const {task_id} = await child.call('task.submit', {client_operation_id: subject.id,
       application_id: 'adaptive-agent', profile_id: profile.id,
       input: {schema_id: 'adaptive-agent.input.v2', value: {task: subject.prompt}}});
-    await assert.rejects(child.call(bootstrapMethod, {task_id, descriptor, source: null}),
-      large ? /ChangedExecutable/ : /ProjectionInputRejected/);
-    if (!large) assert.equal((await committedBootstrap(child, {task_id, descriptor, source: null})).candidate_rejected,
-      'ProjectionInputRejected');
+    const params = {task_id, descriptor, source: null};
+    if (!large) {
+      await assert.rejects(child.call('evaluation.interface_repair.fixture_select', {...params, stop_after: 'consumer'}),
+        /FixtureCut/);
+      assert.equal(await committedBootstrap(child, params), null);
+      await close();
+      child = launch(task_id, state, options);
+      const status = await child.call('task.status', {task_id});
+      assert.equal(status.status, 'parked');
+      assert.equal(await committedBootstrap(child, params), null);
+      await child.call('task.resume', {task_id, client_operation_id: 'resume-admission',
+        expected_revision: status.revision});
+    }
+    const before = await child.call('task.status', {task_id});
+    await assert.rejects(child.call(bootstrapMethod, params), large ? /ChangedExecutable/ : /ProjectionInputRejected/);
+    if (!large) {
+      assert.deepEqual(await child.call('task.status', {task_id}), before);
+      assert.equal(await committedBootstrap(child, params), null);
+    }
     const retained = join(root, state + '.agnx');
     await child.call('evaluation.export', {task_id, path: retained});
     const archive = readArchive(await readFile(retained));
     assert(sourceInventory(archive).includes(sha(source)));
     assert.equal(archive.manifest[6].filter(([kind]) => kind === 9).length, 0);
     assert.equal(archive.task.inference_attempts, 0n);
-  } finally {
-    child.stdin.end();
-    assert.deepEqual(await child.exited, [0, null]);
-  }
+  } finally { await close(); }
 }
 
 async function rejectedProjection(launch, root, diagnostic, transfer, plan_sha256, forwarder) {
@@ -587,6 +603,7 @@ export async function checkInterfaceRepair(launch, root, {sources, application:o
     Buffer.from(candidate.source_b64, 'base64').toString(), 'diagnostic', candidate.program.id);
   const probe = await episode(diagnostic, candidate);
   assert.equal(probe.bootstrap.view, null);
+  assert(probe.peak_rss_sampled_bytes > 0);
   assert.equal(probe.adjudication.delivery.length, 0);
   assert.equal(probe.adjudication.collision.distinction_preserved, true);
   assert.deepEqual(probe.adjudication.collision.left.consumer, probe.adjudication.collision.right.consumer);

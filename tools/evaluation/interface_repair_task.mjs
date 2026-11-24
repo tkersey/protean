@@ -185,7 +185,7 @@ async function initialCondition({plan, plan_sha256, subject, candidate}) {
   return {condition, descriptor, source};
 }
 
-export async function executeRepairTask(options, {Client = RecurrenceDriver, scripted = false, scriptedAnswer} = {}) {
+export async function executeRepairTask(options, {Client = RecurrenceDriver, scripted = false, scriptedAnswer, sampleRss = rssBytes} = {}) {
   assert(scripted || options.authorizeInference === true, 'Live evaluation requires explicit --authorize-inference.');
   const {subject, plan, deadline, driver, application, build, candidate = null} = options;
   const started = performance.now();
@@ -201,8 +201,19 @@ export async function executeRepairTask(options, {Client = RecurrenceDriver, scr
     retained_namespace_bytes: null, timed_out: false, errors: [], candidate_rejection: null,
     effective_condition: null, fallback_reason: null};
   const record = (stage, error) => report.errors.push({stage, name: error.name, message: error.message});
-  let client, timer, startup, schemas, cursor = '0', specimen, pairedSpecimen, stage = 'setup';
+  let client, timer, rssTimer, startup, schemas, cursor = '0', specimen, pairedSpecimen, stage = 'setup';
   let stepStarted = false, initialProjection, bootstrapRequest;
+  const sampleMemory = () => {
+    const child = client?.child;
+    if (!child?.pid || child.exitCode != null || child.signalCode != null) return;
+    const rss = sampleRss(child.pid);
+    if (rss !== null) report.peak_rss_sampled_bytes = Math.max(report.peak_rss_sampled_bytes ?? 0, rss);
+  };
+  const open = args => {
+    client = new Client(driver, args);
+    sampleMemory();
+    if (client.child?.pid) rssTimer = setInterval(sampleMemory, 1000).unref();
+  };
   const observe = async () => {
     const raw = await client.call('evaluation.observe', {task_id: report.task.task_id, after: cursor, acquisition: true});
     if (!report.bootstrap?.build_metrics && raw.bootstrap_build_metrics != null)
@@ -233,9 +244,11 @@ export async function executeRepairTask(options, {Client = RecurrenceDriver, scr
   const close = async (stage, killed = false) => {
     if (!client) return;
     try {
+      sampleMemory();
       const exit = await client.close();
       if (!killed && (exit.code !== 0 || exit.signal !== null)) throw new Error(json(exit));
     } catch (error) { record(stage, error); }
+    clearInterval(rssTimer);
     client = null;
   };
   try {
@@ -264,7 +277,7 @@ export async function executeRepairTask(options, {Client = RecurrenceDriver, scr
       startup.push('--interface-repair-source', path);
     }
     checkDeadline();
-    client = new Client(driver, startup);
+    open(startup);
     armDeadline();
     const description = await client.call('describe');
     assert.equal(description.execution_mode, scripted ? 'offline' : 'live');
@@ -316,7 +329,7 @@ export async function executeRepairTask(options, {Client = RecurrenceDriver, scr
         await close('bootstrap_close');
         assert(!report.errors.length, 'Could not establish a clean bootstrap restart.');
         checkDeadline();
-        client = new Client(driver, [...startup, '--profile-task', task_id]);
+        open([...startup, '--profile-task', task_id]);
         const reopened = join(output, 'reopened.agnx');
         await client.call('evaluation.export', {task_id, path: reopened});
         const restored = readArchive(await readFile(reopened));
@@ -343,15 +356,9 @@ export async function executeRepairTask(options, {Client = RecurrenceDriver, scr
       report.fixture_receipt = await client.call('evaluation.interface_repair.answer', {
         task_id, summary: scriptedAnswer(specimen, report.bootstrap)});
     }
-    let lastSample = -Infinity;
     while (subject.phase !== 'diagnostic') {
       checkDeadline();
       report.status = await client.call('task.status', {task_id});
-      if (elapsed() - lastSample >= 1000) {
-        const rss = rssBytes(client.child?.pid);
-        if (rss !== null) report.peak_rss_sampled_bytes = Math.max(report.peak_rss_sampled_bytes ?? 0, rss);
-        lastSample = elapsed();
-      }
       if (terminal.has(report.status.status) || report.status.question) break;
       checkDeadline();
       stepStarted = true;
@@ -389,7 +396,7 @@ export async function executeRepairTask(options, {Client = RecurrenceDriver, scr
     const task_id = report.task.task_id;
     let finalArchive;
     try {
-      client = new Client(driver, [...startup, '--profile-task', task_id]);
+      open([...startup, '--profile-task', task_id]);
       timer = setTimeout(() => client?.kill(), 30000);
       const path = join(output, 'task.agnx');
       await client.call('evaluation.export', {task_id, path});

@@ -14,7 +14,7 @@ import {contract} from '../../test/protean/adaptive_capture_checks.mjs';
 import {createCorpus, createOnlineCorpus, gradeReport, gradeOnlineAnswers, combineOnlineGrading,
   parseOnlineAnswer, compareCampaign, parseReport, campaignIdentity} from './recurrence.mjs';
 import {profilePreparedRequest} from './request_profile.mjs';
-import {prepareInterfaceRepair, runInterfaceRepair} from './interface_repair_campaign.mjs';
+import {parseRepairConfiguration, prepareInterfaceRepair, runInterfaceRepair} from './interface_repair_campaign.mjs';
 import {strictJson} from './interface_repair.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -145,13 +145,18 @@ export function physicalProviderAttempt(id, disposition, state) {
 
 export function providerRequestBodyBytes(prepared, role, schemas, application) {
   if (!prepared) return null;
-  if (role === 'controller') return decodeValue(contract(application, 'AdaptivePrepared'), prepared)[2].length;
-  assert.equal(role, 'delegated');
-  const {root, types} = schemas.get('workspace_delegation');
-  const [, , , , , , , , , , model, snapshot] = types[root].product;
-  const bytes = types.length + 1;
-  const schema = {root: types.length, types: [...types, {product: [bytes, bytes, model, snapshot]}, 'bytes']};
-  return decodeValue(schema, prepared)[1].length;
+  try {
+    if (role === 'controller') return decodeValue(contract(application, 'AdaptivePrepared'), prepared)[2].length;
+    assert.equal(role, 'delegated');
+    const {root, types} = schemas.get('workspace_delegation');
+    const [, , , , , , , , , , model, snapshot] = types[root].product;
+    const bytes = types.length + 1;
+    const schema = {root: types.length, types: [...types, {product: [bytes, bytes, model, snapshot]}, 'bytes']};
+    return decodeValue(schema, prepared)[1].length;
+  } catch (error) {
+    if (error.code === 'ValueCapacity') return null;
+    throw error;
+  }
 }
 
 export function workspaceMetrics(archive, application) {
@@ -1811,7 +1816,7 @@ if (import.meta.main) {
 if (mode === 'prepare' && option(args, '--suite') === 'interface-repair') {
   const directory = resolve(option(args, '--out', '')), costPath = option(args, '--cost-model');
   const plan = await prepareInterfaceRepair({directory,
-    config:strictJson(await readFile(resolve(option(args, '--config', '')), 'utf8')),
+    config:parseRepairConfiguration(await readFile(resolve(option(args, '--config', '')), 'utf8')),
     binary:resolve(option(args, '--binary', '')), driver:resolve(option(args, '--driver', '')),
     applicationPath:resolve(option(args, '--application', '')), study:option(args, '--study', 'episode'),
     repetitions:Number(option(args, '--repetitions', '1')), seconds:Number(option(args, '--seconds', '600')),

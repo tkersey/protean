@@ -209,12 +209,7 @@ pub const Session = struct {
         } else blk: {
             run.consumer = try self.retainedConsumer(&run, plan.phase);
             const built = try run.builtReceipt(try run.nextOperation(a));
-            break :blk copy.selectProgram(&run, env, plan, built) catch |err| {
-                if (err == error.BootstrapEvidencePending and plan.program_sha256 != null and
-                    !run.acquired_scan)
-                    try run.admitProgram(try ref(a, built, "program"), plan);
-                return err;
-            };
+            break :blk try copy.selectProgram(&run, env, plan, built);
         };
         const metrics = if (std.meta.eql(self.task, @as(?[16]u8, task)) and self.metrics != null)
             self.metrics.?
@@ -263,8 +258,6 @@ pub const Session = struct {
         switch (err) {
             error.ProjectionWorkFailed,
             error.ProjectionResultRejected,
-            error.ProjectionInputRejected,
-            error.ProjectionBuildRejected,
             => {},
             else => return err,
         }
@@ -1001,7 +994,6 @@ const Bootstrap = struct {
     remaining: u64,
     sequence: u64 = 0,
     read_only: bool = false,
-    acquired_scan: bool = false,
     observed_first_build: bool,
 
     fn nextOperation(self: *@This(), a: Allocator) ![]const u8 {
@@ -1175,7 +1167,6 @@ const Bootstrap = struct {
         manifest: sources.ManifestSelection,
     ) !Json.Value {
         const scan = try sources.acquireScanAt(self.a, self, manifest);
-        self.acquired_scan = true;
         const materialized = try self.command(.{ .context = .{ .materialize = .{
             .input = .{ .value = .{ .inline_json = .{
                 .schema = schema,

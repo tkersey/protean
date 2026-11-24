@@ -34,19 +34,34 @@ test('live task execution requires explicit inference authorization before a dri
 test('a failed preflight retains the isolated task, reopens it only for measurements and charges unknowns', async t => {
   const options = await setup(t);
   const calls = [], launches = [], task_id = 'af'.repeat(16);
+  const samples = [];
+  let rss = 64;
+  t.mock.timers.enable({apis: ['setInterval']});
   class RejectedArchive {
-    constructor(_, argv) { launches.push(argv); }
+    constructor(_, argv) {
+      launches.push(argv);
+      this.child = {pid: launches.length};
+    }
     async call(method) {
       calls.push(method);
       if (method === 'describe') return {execution_mode: 'live', profile: {id: 'adaptive', sha256: hash('profile')}};
       if (method === 'evaluation.interface_repair.admission') return {profile_sha256: hash('profile'), configuration_digest: hash('{}')};
       if (method === 'task.submit') return {task_id};
       if (method === 'evaluation.drain') return {step: 'idle'};
+      rss = this.child.pid * 1024;
+      t.mock.timers.tick(1000);
+      rss = 64;
       throw new Error('UnexportableArchive');
     }
     async close() { return {code: 0, signal: null}; }
   }
-  const report = await executeRepairTask(options, {Client: RejectedArchive});
+  const report = await executeRepairTask(options, {Client: RejectedArchive, sampleRss(pid) {
+    samples.push([pid, rss]);
+    return rss;
+  }});
+  t.mock.timers.tick(1000);
+  assert.deepEqual(samples, [[1, 64], [1, 1024], [1, 64], [2, 64], [2, 2048], [2, 64]]);
+  assert.equal(report.peak_rss_sampled_bytes, 2048);
   assert.equal(report.effective_condition, 'ordinary');
   assert.equal(report.fallback_reason, 'no_candidate');
   assert.equal(report.task.task_id, task_id);
@@ -172,6 +187,10 @@ test('provider body accounting excludes both controller and delegated typed prep
   const schemas = new Map([['workspace_delegation', {root: 0, types: [{product: Array(12).fill(1)}, {sum: [2, 3]}, 'unit', 'bytes']}]]);
   assert.equal(providerRequestBodyBytes(metadata, 'delegated', schemas, null), body.length);
   assert.equal(providerRequestBodyBytes(null, 'controller', null, null), null);
+  const large = {root:0,types:[{product:[1,2,2]},{array:{element:3,length:1_000_001}},'bytes','unit']};
+  const bounded = {support:{AdaptivePrepared:schemaSupport(large)}};
+  assert.equal(providerRequestBodyBytes(Buffer.from([0,0]),'controller',null,bounded),null);
+  assert.throws(()=>providerRequestBodyBytes(Buffer.alloc(0),'controller',null,application),{code:'Truncated'});
 });
 
 function decisionFixture(pairedSpecimen) {
@@ -243,8 +262,8 @@ function decisionFixture(pairedSpecimen) {
       attempt: {id, delivery: 'confirmed', model_response: true, body: {input: [{type:'function_call', call_id}, {type:'function_call_output', call_id, output: text}]}},
       results: [{call_id, output: {tag: 'work', value: {digest: [...artifact[0]], bytes: String(artifact[1])}}}], result_actions: []});
   };
-  const support = (uses = [], projector = null, consumers) => decisionSupport(archive, {support: {WorkArtifact: schemaSupport(workSchema)}},
-    specimen, refs, values, history, uses, history.at(-1), projector, consumers, pairedSpecimen);
+  const support = (uses = [], projector = null, consumers, producer = history.at(-1)) => decisionSupport(archive, {support: {WorkArtifact: schemaSupport(workSchema)}},
+    specimen, refs, values, history, uses, producer, projector, consumers, pairedSpecimen);
   return {step, support, expand, acquire, materialize, work, snapshot, history, page, path, member, absent, file, slice, full, witness, input, result, value, put};
 }
 
@@ -258,6 +277,17 @@ test('verified partial snapshot handles each carry only their own source interva
     assert.deepEqual(entry.paths, []);
     assert.deepEqual(entry.range, {path: f.path, start, end});
   }
+});
+
+test('a confirmed ordinary acquisition survives a missing report without becoming decision support', () => {
+  const f = decisionFixture();
+  f.materialize(f.full);
+  const evidence = () => f.support([],null,undefined,null);
+  assert(evidence().routes.some(r => r.path === f.path));
+  assert.deepEqual(evidence().exposure, []);
+  assert.deepEqual(evidence().projection_exposure, []);
+  f.history[0].attempt.model_response = null;
+  assert.deepEqual(evidence().routes, []);
 });
 
 test('a reused settled call ID binds the current materialization output', () => {
@@ -433,10 +463,12 @@ test('static guidance, bound controller metadata and a verified same-view reread
     exposures:[{id:'1',rendered:true,delivery:'confirmed',model_response:true}]};
   f.step('program',{tag:'describe',value:{section:'projection'}},f.page('static projection documentation'),
     {selected:use.view.id,block:{kind:'computed',value:'shown',schema:descriptor,schema_identity:'s',result:use.result}});
+  for (const section of ['components','semantic_candidates'])
+    f.step('program',{tag:'describe',value:{section}},f.page('contract metadata'));
   f.step('context',{tag:'inspect',value:{consumer:{target:{tag:'controller',value:{}}}}},
     {consumer:use.consumer,binding:f.page('binding metadata')});
   f.step('context',{tag:'expand',value:{reference:use.consumer}}, {consumer:use.consumer,binding:f.page('binding metadata', 3)});
-  f.step('program',{tag:'inspect',value:{target:{tag:'consumer',value:{program:use.program,function:'main',binding:'input'}}}},
+  f.step('program',{tag:'inspect',value:{target:{tag:'consumer',value:{program:{...use.program,id:use.program.id.toUpperCase()},function:'main',binding:'input'}}}},
     f.page('projector consumer'));
   const schema = {kind:'schema', id:Buffer.from(f.input.raw[3][1][0]).toString('hex')};
   f.expand(schema, JSON.stringify(descriptor), 3, 11);

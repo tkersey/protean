@@ -3,7 +3,7 @@ import {isDeepStrictEqual as equal} from 'node:util';
 import {contract} from '../../test/protean/adaptive_capture_checks.mjs';
 import {decodeSchema, decodeValue, encodeSchema, ValueCodecError} from '../../test/support/values.mjs';
 import {acquiredPageRanges, physicalProviderAttempt} from './workspace.mjs';
-import {assessScan, canonicalEvidence, collisionProbe, inspectProjection, parseCandidate, samePresentedValue, strictJson} from './interface_repair.mjs';
+import {assessScan, canonicalEvidence, collisionProbe, inspectProjection, parseCandidate, samePresentedValue, strictJson, unsignedJsonInteger} from './interface_repair.mjs';
 
 const hex = bytes => Buffer.from(bytes).toString('hex');
 const digest = ref => ref && hex(ref[0]);
@@ -11,6 +11,8 @@ const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const some = option => option?.tag === 1 ? option.value : null;
 const ref = (kind, id) => ({kind, id});
 const same = (a, b) => a && b && a.kind === b.kind && a.id === b.id;
+const actionRef = value => typeof value?.id === 'string' && /^[a-f0-9]{64}$/i.test(value.id) ?
+  ref(value.kind, value.id.toLowerCase()) : value;
 const typed = (archive, schema, bytes) => decodeValue(decodeSchema(archive.object(schema)), archive.object(bytes));
 const schemaId = (types, root) => sha(encodeSchema({types, root}));
 const scanTypes = [
@@ -133,7 +135,7 @@ function scanInput(archive, input) {
 const nonempty = value => typeof value === 'string' && value.length > 0;
 
 function modelItem(item, incomplete) {
-  if (item?.status !== 'completed' && !(incomplete && item?.status === 'incomplete') &&
+  if (item?.status !== 'completed' && !(incomplete && ['incomplete','in_progress'].includes(item?.status)) &&
       !(item?.type === 'reasoning' && item.status === undefined)) return false;
   if (item.type === 'function_call') return nonempty(item.call_id) && nonempty(item.name) && typeof item.arguments === 'string';
   if (item.type === 'reasoning') return nonempty(item.encrypted_content) ||
@@ -160,6 +162,10 @@ function reconcileOutput(items, roster) {
     while (pending.length) {
       const [target, patch] = pending.pop();
       if (target === patch) continue;
+      if (JSON.isRawJSON(target) || JSON.isRawJSON(patch)) {
+        if (!JSON.isRawJSON(target) || !JSON.isRawJSON(patch) || target.rawJSON !== patch.rawJSON) return null;
+        continue;
+      }
       if (!target || !patch || typeof target !== 'object' || typeof patch !== 'object' ||
           Array.isArray(target) !== Array.isArray(patch) || Array.isArray(target) && target.length !== patch.length) return null;
       for (const key of Object.keys(patch)) {
@@ -177,77 +183,93 @@ function reconcileOutput(items, roster) {
   return ordered;
 }
 
-function eventInteger(key, value, context) {
-  if (!['sequence_number', 'output_index'].includes(key) || typeof value !== 'number') return value;
-  const [mantissa, exponent = '0'] = context.source.toLowerCase().split('e');
-  const [integer, fraction = ''] = mantissa.split('.');
-  const digits = (integer + fraction).replace(/^-?0*/, '');
-  if (!digits) return 0n;
-  const significant = digits.replace(/0+$/, '');
-  const shift = Number(exponent) - fraction.length + digits.length - significant.length;
-  if (mantissa.startsWith('-') || Math.abs(Number(exponent)) > 1_000_000 || shift < 0 || significant.length + shift > 20) return null;
-  const exact = BigInt(significant) * 10n ** BigInt(shift);
-  return exact <= 0xffffffffffffffffn ? exact : null;
+function eventInteger(token) {
+  return JSON.isRawJSON(token) ? unsignedJsonInteger(token.rawJSON) : token === undefined ? undefined : null;
 }
 
-const deltaItems = new Map([
-  ['response.output_text.delta', 'message'], ['response.refusal.delta', 'message'],
-  ['response.reasoning_text.delta', 'reasoning'], ['response.reasoning_summary_text.delta', 'reasoning'],
-  ['response.function_call_arguments.delta', 'function_call'],
+const contentEvents = new Map([
+  ['response.output_text', ['message','text']], ['response.refusal', ['message','refusal']],
+  ['response.reasoning_text', ['reasoning','text']], ['response.reasoning_summary_text', ['reasoning','text']],
+  ['response.function_call_arguments', ['function_call','arguments']],
 ]);
 
 function responseStream(text) {
   const frames = text.replaceAll('\r\n', '\n').replaceAll('\r', '\n').split('\n\n');
   if (frames.pop() !== '') return null;
   const items = new Map();
-  const added = new Map();
+  const progress = new Map(), owners = new Map();
   const identities = {id: new Set(), call_id: new Set()};
-  let responseId, sequence, partial = false;
+  let responseId, sequence, sawContent = false;
+  const observe = (id, index, type, role, identified, content) => {
+    if (content) sawContent = true;
+    if (!nonempty(id) || index === null) return;
+    const item = progress.get(id) ?? {valid:true, content:false, identified:false};
+    for (const [key, value] of Object.entries({index,type,role})) {
+      if (value === undefined) continue;
+      if (item[key] !== undefined && item[key] !== value) item.valid = false;
+      item[key] = value;
+    }
+    if (index !== undefined) owners.set(index, owners.has(index) && owners.get(index) !== id ? null : id);
+    item.identified ||= identified;
+    item.content ||= content;
+    progress.set(id, item);
+  };
   for (const [i, frame] of frames.entries()) {
-    const lines = frame.split('\n');
-    const data = lines.filter(s => s === 'data' || s.startsWith('data:')).map(s => s.slice(5).replace(/^ /, '')).join('\n');
+    const parts = [];
+    let label;
+    for (const line of frame.split('\n')) {
+      const colon = line.indexOf(':');
+      const key = colon < 0 ? line : line.slice(0, colon), value = colon < 0 ? '' : line.slice(colon + 1).replace(/^ /, '');
+      if (key === 'data') parts.push(value);
+      if (key === 'event') {
+        if (label !== undefined && label !== value) return null;
+        label = value;
+      }
+    }
+    const data = parts.join('\n');
     if (!data || data === '[DONE]') continue;
-    const event = strictJson(data, eventInteger);
-    if (!nonempty(event.type) || lines.filter(s => s.startsWith('event:')).some(s => s.slice(6).replace(/^ /, '') !== event.type)) return null;
+    const event = strictJson(data, (key, value, context) => typeof value === 'number' ? JSON.rawJSON(context.source) : value);
+    if (!nonempty(event.type) || label !== undefined && label !== event.type) return null;
     for (const id of [event.response_id, event.response?.id]) {
       if (id === undefined) continue;
       if (!nonempty(id) || responseId !== undefined && responseId !== id) return null;
       responseId = id;
     }
     if (event.sequence_number !== undefined) {
-      if (typeof event.sequence_number !== 'bigint' || event.sequence_number <= sequence) return null;
-      sequence = event.sequence_number;
+      const ordinal = eventInteger(event.sequence_number);
+      if (ordinal === null || ordinal <= sequence) return null;
+      sequence = ordinal;
     }
-    if (event.type === 'response.output_item.added' && nonempty(event.item?.id)) {
-      const opening = {type:event.item.type, role:event.item.role, index:event.output_index};
-      const id = event.item.id;
-      if (!added.has(id)) added.set(id, opening);
-      else if (!equal(added.get(id), opening)) added.set(id, null);
+    const index = eventInteger(event.output_index);
+    if (event.type === 'response.output_item.added' || event.type === 'response.output_item.done') {
+      const item = event.item;
+      observe(item?.id, index, item?.type, item?.role, item?.type !== 'message' || item.role === 'assistant', modelItem(item, true));
     }
-    if (event.type.endsWith('.delta') && nonempty(event.delta)) {
-      const expected = deltaItems.get(event.type), opening = added.get(event.item_id);
-      const bound = expected !== undefined && nonempty(event.item_id) &&
-        (event.output_index === undefined || typeof event.output_index === 'bigint') && (added.has(event.item_id) ?
-        opening?.type === expected && (expected !== 'message' || opening.role === 'assistant') &&
-        (opening.index === undefined || typeof opening.index === 'bigint') &&
-        (opening.index === undefined || event.output_index === undefined || opening.index === event.output_index) :
-        nonempty(event.response_id) && typeof event.output_index === 'bigint');
-      if (bound) partial = true;
-      else if (!partial) partial = null;
+    const suffix = event.type.lastIndexOf('.'), phase = event.type.slice(suffix + 1);
+    const content = contentEvents.get(event.type.slice(0, suffix));
+    if (phase === 'delta' || phase === 'done' && content) {
+      const value = phase === 'delta' ? event.delta : event[content[1]];
+      if (nonempty(value)) {
+        if (content) observe(event.item_id, index, content[0], content[0] === 'message' ? 'assistant' : undefined,
+          nonempty(event.response_id) && typeof index === 'bigint', true);
+        else sawContent = true;
+      }
     }
     if (event.type === 'response.output_item.done') {
       const item = event.item;
-      if (typeof event.output_index !== 'bigint' || items.has(event.output_index) ||
+      if (typeof index !== 'bigint' || items.has(index) ||
           !['reasoning', 'message', 'function_call'].includes(item?.type)) return null;
       for (const [key, ids] of Object.entries(identities)) {
         if (!Object.hasOwn(item, key)) continue;
         if (!nonempty(item[key]) || ids.has(item[key])) return null;
         ids.add(item[key]);
       }
-      items.set(event.output_index, item);
+      items.set(index, item);
     }
     if (!['response.completed', 'response.incomplete', 'response.failed', 'error'].includes(event.type)) continue;
     if (i + 1 !== frames.length) return null;
+    const partial = [...progress].some(([id, item]) => item.valid && item.content && item.identified &&
+      (item.index === undefined || owners.get(item.index) === id)) || (sawContent ? null : false);
     const emitted = [...items.values()].some(item => modelItem(item, true)) || partial;
     if (event.type === 'error') return {body: {status: 'failed'}, emitted};
     const body = event.response;
@@ -281,7 +303,7 @@ export function capturedModelResponse(raw) {
   if (body?.status === 'failed') return Array.isArray(body.output) && body.output.some(item => modelItem(item, true)) || emitted;
   const incomplete = body?.status === 'incomplete';
   if (incomplete && emitted === true) return true;
-  if ((!incomplete && body?.status !== 'completed') || (incomplete ? body.error != null : body.error !== null) ||
+  if ((!incomplete && (body?.status !== 'completed' || body.error !== null)) ||
       !Array.isArray(body.output)) return null;
   return emitted || body.output.some(item => modelItem(item, incomplete)) ? true : null;
 }
@@ -357,8 +379,8 @@ function actionsAt(interaction) {
   });
 }
 
-function authored(programs, actions, bootstrap, nomination) {
-  if (nomination?.status !== 'candidate' || same(bootstrap?.program, nomination.program)) return null;
+function authored(programs, actions, nomination) {
+  if (nomination?.status !== 'candidate') return null;
   const program = programs.get(nomination.program.id);
   if (!program) return null;
   return actions.find(({action, command, reply, observation}) => action.tag === 'program' &&
@@ -370,8 +392,10 @@ function authored(programs, actions, bootstrap, nomination) {
     (command.value.source.tag !== 'json_text' || sha(command.value.source.value) === digest(program.raw[3][1])));
 }
 
-function incompatibleBuild(archive, build, program, observations, uses) {
+export function incompatibleBuild(archive, build, program, observations, uses, seed) {
   const d = program.raw[3], command = build.command.value;
+  if (!seed) return 'SeedExecutableUnestablished';
+  if (equal(d[5], seed.raw[3][5])) return 'UnchangedSeedExecutable';
   if (d[2] !== 0 || command.role !== 'computation' || some(d[12])) return 'IncompatibleProgramRole';
   if (command.exposures.length || d[10].length) return 'ExposedProgram';
   if (digest(d[6]) !== inputSchemaId) return 'InvalidInputSchema';
@@ -462,7 +486,7 @@ export function computedRendering(blocks, result, schema, payload, expectedDescr
   return matches.includes(true) || (matches.includes(null) ? null : false);
 }
 
-function projectionUse(archive, view, programs, values, specimen, sourceRefs, attempts, actions, lossySourceDigest, build, schemas) {
+function projectionUse(archive, view, programs, values, specimen, sourceRefs, attempts, actions, lossyImages, build, schemas) {
   const p = some(view.raw[3][3]);
   if (!p) return null;
   const [resultRef, workRef, programRef, inputRef] = p;
@@ -478,12 +502,12 @@ function projectionUse(archive, view, programs, values, specimen, sourceRefs, at
     const operation = action.tag === 'work' ? command :
       action.tag === 'placement' && command.tag === 'control' ? command.value.command : null;
     return operation?.tag === 'start' && reply.disposition === 'observed' &&
-      (!build || !same(build.reply.program, operation.value.program) || BigInt(cut) > BigInt(build.cut)) &&
-      same(operation.value.program, ref('program', digest(programRef))) &&
+      (!build || !same(build.reply.program, actionRef(operation.value.program)) || BigInt(cut) > BigInt(build.cut)) &&
+      same(actionRef(operation.value.program), ref('program', digest(programRef))) &&
       same(observation.work, ref('work', hex(work[1])));
   });
   const selection = actions.find(({action, command, reply, observation, cut}) => action.tag === 'context' &&
-    command.tag === 'select' && command.value.tag === 'projected' && same(command.value.value, resultReference) &&
+    command.tag === 'select' && command.value.tag === 'projected' && same(actionRef(command.value.value), resultReference) &&
     (!started || BigInt(cut) > BigInt(started.cut)) && reply.disposition === 'observed' &&
     same(reply.selected_view, viewReference) && same(observation.view, viewReference));
   const exposures = attempts.filter(row => row.selected_view === viewReference.id).map(row => {
@@ -499,7 +523,7 @@ function projectionUse(archive, view, programs, values, specimen, sourceRefs, at
     canonical_input: proof, payload: presented.payload, payload_schema_sha256: presented.schema ?? null,
     payload_descriptor: presented.display ?? null, schema_kind: schemaKind,
     inspection_error: presented.inspection_error ?? null,
-    known_lossy: digest(result.program.raw[3][1]) === lossySourceDigest,
+    known_lossy: lossyImages.has(digest(result.program.raw[3][5])),
     ...semantic, one_computed_block: presented.one_computed_block ?? null,
     model_start: started ? {attempt_id: started.attempt_id, call_id: started.call_id, cut: started.cut} : null,
     model_select: selection ? {attempt_id: selection.attempt_id, call_id: selection.call_id, cut: selection.cut} : null,
@@ -585,12 +609,22 @@ function receivedOutput(attempt, callId) {
   return output?.length === 1 && output[0].type === 'input_text' ? output[0].text : null;
 }
 
-const staticDescriptions = new Set(['source_records', 'source_derivations', 'values', 'bindings', 'runtimes',
-  'examples', 'projection', 'retention_query', 'divergence_query', 'hypothetical_reply', 'controller_contract']);
+const metadataDescriptions = new Set(['source_records', 'source_derivations', 'values', 'bindings', 'runtimes',
+  'examples', 'projection', 'retention_query', 'divergence_query', 'hypothetical_reply', 'controller_contract',
+  'semantic_candidates', 'components']);
 
 export function decisionSupport(archive, application, specimen, sourceRefs, values, interactions, uses, producer, projector = null, consumers = new Set(), pairedSpecimen = null) {
   const exposure = [], projection_exposure = [], routes = [], unresolved = [];
-  if (!producer) return {exposure, projection_exposure, routes, unresolved};
+  if (!producer) {
+    const observed = interactions.filter(i => i.attempt?.model_response === true);
+    for (const group of Map.groupBy(observed, i => i.controller_id + '/' + i.controller_epoch).values()) {
+      const access = decisionSupport(archive, application, specimen, sourceRefs, values, group, uses, group.at(-1),
+        projector, consumers, pairedSpecimen);
+      routes.push(...access.routes);
+      unresolved.push(...access.unresolved);
+    }
+    return {exposure, projection_exposure, routes, unresolved};
+  }
   const history = interactions.filter(i => i.controller_id === producer.controller_id &&
     i.controller_epoch === producer.controller_epoch && BigInt(i.event_cut) <= BigInt(producer.event_cut) &&
     i.attempt?.model_response === true);
@@ -788,10 +822,10 @@ export function decisionSupport(archive, application, specimen, sourceRefs, valu
           if (!wanted || !same(reply.evidence, wanted)) { note(unresolved, 'unbound_value_preview', i); continue; }
           if (path && byValue.get(wanted.id)?.path !== path) { note(unresolved, 'unbound_acquisition', i); continue; }
           if (input.tag === 'value' && input.value.tag === 'reference') {
-            const origin = input.value.value;
+            const origin = actionRef(input.value.value);
             if (!same(origin, wanted)) {
               const original = values.get(origin.id)?.raw, alias = values.get(wanted.id)?.raw;
-              const sources = command.value.sources;
+              const sources = command.value.sources?.map(actionRef);
               if (!original || !alias || origin.kind !== 'value' || wanted.kind !== 'value' ||
                   !Array.isArray(sources) || !sources.length || sources.some(s => s.kind !== 'value' || !values.has(s.id)) ||
                   alias[4][0] !== 3 || !equal(alias[4][1], [...sources.map(s => values.get(s.id).raw[2]), original[2]]) ||
@@ -804,18 +838,18 @@ export function decisionSupport(archive, application, specimen, sourceRefs, valu
           }
           preview(i, path ? 'snapshot_acquisition' : 'materialized_value', wanted, observation.preview, observation.source);
         } else if (action.tag === 'program' && command.tag === 'inspect' && reply.disposition === 'observed' &&
-            (command.value.target.tag === 'program' && same(command.value.target.value, projector?.program) ||
-             command.value.target.tag === 'consumer' && same(command.value.target.value.program, projector?.program))) continue;
-        else if (action.tag === 'program' && command.tag === 'describe' && staticDescriptions.has(command.value.section) &&
+            (command.value.target.tag === 'program' && same(actionRef(command.value.target.value), projector?.program) ||
+             command.value.target.tag === 'consumer' && same(actionRef(command.value.target.value.program), projector?.program))) continue;
+        else if (action.tag === 'program' && command.tag === 'describe' && metadataDescriptions.has(command.value.section) &&
             reply.disposition === 'observed') continue;
         else if (action.tag === 'context' && reply.disposition === 'observed' && observation.consumer?.kind === 'observation' &&
             consumers.has(observation.consumer.id) && typeof observation.binding?.text === 'string' &&
             (command.tag === 'inspect' && command.value.consumer?.target.tag === 'controller' ||
-             command.tag === 'expand' && same(command.value.reference, observation.consumer))) continue;
+             command.tag === 'expand' && same(actionRef(command.value.reference), observation.consumer))) continue;
         else if (action.tag === 'context' && command.tag === 'expand' && reply.disposition === 'observed' &&
-            same(command.value.reference, projector?.source) && pageRange(observation, projector.source_bytes)) continue;
+            same(actionRef(command.value.reference), projector?.source) && pageRange(observation, projector.source_bytes)) continue;
         else if (action.tag === 'context' && command.tag === 'expand' && reply.disposition === 'observed') {
-          const wanted = command.value.reference;
+          const wanted = actionRef(command.value.reference);
           if (wanted.kind === 'schema' && projector?.schema_ids?.includes(wanted.id)) {
             const bytes = archive.objects.get(wanted.id);
             if (bytes && sha(bytes) === wanted.id) {
@@ -939,11 +973,14 @@ export function adjudicateRepairTrace({archive, application, observations = [], 
   const selections = actions.filter(a => a.action.tag === 'context' && a.command.tag === 'select').map(a => ({
     attempt_id: a.attempt_id, call_id: a.call_id, cut: a.cut, selection: a.command.value,
     disposition: a.reply.disposition, view: a.reply.selected_view, rejection: a.observation.error ?? null}));
-  const build = proposed && equal(proposed, nomination) && authored(programs, actions, bootstrap, nomination);
+  const build = proposed && equal(proposed, nomination) && authored(programs, actions, nomination);
+  const lossyImages = new Set([...programs.values()].filter(p => digest(p.raw[3][1]) === lossySourceDigest)
+    .map(p => digest(p.raw[3][5])));
   const presentedSchemas = {};
   const uses = rows(11, 'workspace_view').map(row =>
-    projectionUse(archive, row, programs, values, specimen, sourceRefs, attempts, actions, lossySourceDigest, build, presentedSchemas)).filter(Boolean);
-  const rejection = build ? incompatibleBuild(archive, build, programs.get(nomination.program.id), observations, uses) : null;
+    projectionUse(archive, row, programs, values, specimen, sourceRefs, attempts, actions, lossyImages, build, presentedSchemas)).filter(Boolean);
+  const rejection = build ? incompatibleBuild(archive, build, programs.get(nomination.program.id), observations, uses,
+    programs.get(bootstrap?.program?.id)) : null;
   const candidate = build && !rejection ? {...material(archive, programs.get(nomination.program.id)), author_task: task,
     build_attempt: build.attempt_id, build_call: build.call_id, build_result_cut: build.cut} : null;
   const projected = uses.find(v => same(v.view, bootstrap?.view) && same(v.result, bootstrap?.result) &&

@@ -5,7 +5,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {writeRepairReport} from '../../tools/evaluation/interface_repair_task.mjs';
 import {createHash} from 'node:crypto';
-import {adjudicateRepairTrace, bindReport, canonicalProjectionInput, capturedModelResponse, computedRendering, confirmedApplication, diagnosticPresentation, inspectProjectionResult,
+import {adjudicateRepairTrace, bindReport, canonicalProjectionInput, capturedModelResponse, computedRendering, confirmedApplication, diagnosticPresentation, incompatibleBuild, inspectProjectionResult,
   selectedPresentation} from '../../tools/evaluation/interface_repair_trace.mjs';
 import {canonicalEvidence, collisionProbe, makeRepairCorpus} from '../../tools/evaluation/interface_repair.mjs';
 import {encodeValue} from '../support/values.mjs';
@@ -119,6 +119,57 @@ test('report credit requires the admitted archive projection identified by the p
   delete last.attempt.capture_projection_sha256;
   assert.equal(bind(receipt), null);
   assert.equal(bind({...receipt,capture_projection_sha256:undefined}), null);
+});
+
+test('opening contents and completed content parts preserve output with consistent item ownership', () => {
+  const read = events => capturedModelResponse([200,true,null,Buffer.from(events.map(event =>
+    'data: ' + JSON.stringify(event) + '\n\n').join('')),1,null,null,2]);
+  const opened = (item, output_index) => ({type:'response.output_item.added', response_id:'r',item,output_index});
+  const message = {id:'m',type:'message',role:'assistant',status:'in_progress',content:[]};
+  const reasoning = {id:'s',type:'reasoning',encrypted_content:'generated'};
+  const final = {type:'response.failed',response:{id:'r',status:'failed',output:[]}};
+  const text = {type:'response.output_text.done',item_id:'m',output_index:0,response_id:'r',text:'Observed'};
+  assert.equal(read([opened(reasoning,0),final]), true);
+  assert.equal(read([opened(message,0),text,final]), true);
+  const other = opened({...reasoning,encrypted_content:''},0), delta = {...text,type:'response.output_text.delta',delta:'Observed'};
+  assert.equal(read([other,delta,final]), null);
+  assert.equal(read([delta,other,final]), null);
+  assert.equal(read([opened(message,0),delta,other,final]), null);
+  const partial = {...message,content:[{type:'output_text',text:'Observed'}]};
+  for (const status of ['failed','incomplete']) {
+    const body = {id:'r', status, error:{message:'stopped'}, output:[partial]};
+    assert.equal(capturedModelResponse([200,true,null,Buffer.from(JSON.stringify(body)),0,null,null,2]), true);
+  }
+});
+
+test('response validation preserves Unicode strings, SSE labels and exact numeric metadata', () => {
+  const read = (text, format = 1) => capturedModelResponse([200,true,null,Buffer.from(text),format,null,null,2]);
+  const item = {id:'m',type:'message',role:'assistant',status:'completed',content:[{type:'output_text',text:'OK'}],
+    metadata:{offset:JSON.rawJSON('9007199254740992')}};
+  const terminal = {id:'r',status:'completed',error:null,output:[item]};
+  const frame = event => 'data: ' + JSON.stringify(event) + '\n\n';
+  const done = frame({type:'response.output_item.done',output_index:0,item});
+  const completed = frame({type:'response.completed',response:terminal});
+  assert.equal(read(done + completed), true);
+  assert.equal(read(done + completed.replace('9007199254740992','9007199254740993')), null);
+  assert.equal(read(done + 'event\n' + completed), null);
+  assert.equal(read('event: start\nevent: another\n\n' + done + completed), null);
+  for (const format of [0,1]) {
+    const raw = format ? done + completed : JSON.stringify(terminal);
+    assert.equal(read(raw.replaceAll('OK', '\\ud83d\\ude00'),format), true);
+    assert.equal(read(raw.replaceAll('OK', '\\ud83d'),format), null);
+  }
+});
+
+test('reformatting the seed source preserves its executable identity', () => {
+  const obj = text => [createHash('sha256').update(text).digest(), BigInt(text.length)];
+  const source = JSON.stringify({module:{entry:0}});
+  const program = text => ({raw:[0,null,obj(text + ' program'),[2,obj(text),0,null,null,obj('image')]]});
+  const seed = program(source), rebuilt = program(JSON.stringify(JSON.parse(source),null,2));
+  assert.notDeepEqual(rebuilt.raw[2], seed.raw[2]);
+  assert.notDeepEqual(rebuilt.raw[3][1], seed.raw[3][1]);
+  assert.equal(incompatibleBuild(null,{command:{value:{}}},rebuilt,[],[],seed),'UnchangedSeedExecutable');
+  assert.equal(incompatibleBuild(null,{command:{value:{}}},rebuilt,[],[],null),'SeedExecutableUnestablished');
 });
 
 test('canonical scan work requires the task-owned consumer observation as well as source-backed scan facts', () => {

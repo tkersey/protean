@@ -6,7 +6,7 @@ import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {readArchive} from '../../test/protean/native_archive.mjs';
-import {makeRepairCorpus, assessScan, scanContract, taskContract, candidateContract} from './interface_repair.mjs';
+import {makeRepairCorpus, assessScan, scanContract, taskContract, candidateContract, strictJson, unsignedJsonInteger} from './interface_repair.mjs';
 import {RecurrenceDriver, bytesUnder, command, inferenceArguments, tariffErrors} from './workspace.mjs';
 import {executeRepairTask, writeRepairReport} from './interface_repair_task.mjs';
 
@@ -104,12 +104,38 @@ function validateEfforts(efforts, selected) {
   assert(efforts.includes(selected), 'Initial effort is unavailable.');
 }
 
+const profileLimits = ['max_output_tokens','request_bytes','response_bytes','timeout_ms'];
+
+export function parseRepairConfiguration(text) {
+  const invalidLimits = new WeakMap();
+  const config = strictJson(text,function(key,value,context) {
+    if (profileLimits.includes(key) && typeof value === 'number') {
+      const exact = unsignedJsonInteger(context.source);
+      if (exact !== null && exact <= 0xffffffffn) return Number(exact);
+      invalidLimits.set(this,key);
+    }
+    return value;
+  });
+  const active = config?.adaptive;
+  if (Array.isArray(active?.profiles)) for (const profile of active.profiles) {
+    if (profile?.id === active.initial_profile && invalidLimits.has(profile))
+      throw new Error('Invalid unsigned profile limit: '+invalidLimits.get(profile));
+  }
+  return config;
+}
+
 export function selectRepairProfile(config) {
   assert.equal(config.schema, 'adaptive-agent.configuration.v3');
   const adaptive = config.adaptive;
   const selected = adaptive.profiles.filter(p => p.id === adaptive.initial_profile);
   assert.equal(selected.length, 1, 'Select exactly one approved initial profile.');
   const [profile] = selected;
+  assert.equal(typeof profile.effort_update,'boolean','Invalid effort_update capability.');
+  for (const key of profileLimits) {
+    const limit = profile[key];
+    assert(limit == null || Number.isSafeInteger(limit) && limit >= 0 && limit <= 0xffffffff,
+      'Invalid unsigned profile limit: '+key);
+  }
   assert(/^gpt-[0-9]+(?:\.[0-9]+)*-astra$/.test(profile.model), 'Directed repair requires an approved Astra model.');
   validateEfforts(profile.efforts,adaptive.initial_effort);
   return {...profile, efforts:[adaptive.initial_effort], effort_update:false};
@@ -305,19 +331,23 @@ export async function validateRepairPlan(directory,options) {
 }
 
 function bootstrapBuild(report) {
-  const observed = report?.bootstrap?.build_metrics ?? report?.bootstrap_build_metrics;
-  const readsOnly = report?.effective_condition === 'ordinary';
-  const beforeBootstrap = report?.errors?.some(error=>error.stage === 'setup');
-  const performed = report?.bootstrap?.program?.kind === 'program' || Boolean(report?.candidate_rejection);
-  const commands = observed ? observed.build_commands : performed ? 1 : readsOnly || beforeBootstrap ? 0 : null;
-  const ns = field => {
-    const raw = observed?.[field];
-    const value = typeof raw === 'string' && /^[0-9]+$/.test(raw) ? Number(raw) : raw;
-    return Number.isSafeInteger(value) && value >= 0 ? value : commands === 0 ? 0 : null;
+  const observations = [report?.bootstrap?.build_metrics,report?.bootstrap_build_metrics].filter(Boolean);
+  const metric = (key,fallback)=>{
+    const recorded = observations.filter(row=>Object.hasOwn(row,key));
+    if (!recorded.length) return fallback;
+    const values = recorded.map(row=>row[key]).filter(value=>value != null)
+      .map(value=>typeof value === 'string' && /^[0-9]+$/.test(value) ? Number(value) : value);
+    const [value] = values;
+    return Number.isSafeInteger(value) && value >= 0 && values.every(v=>v === value) ? value : null;
   };
-  return {commands, rejected:observed && Object.hasOwn(observed,'rejected_build_commands') ? observed.rejected_build_commands :
-    (commands === 0 || report?.bootstrap?.program || (performed && report.candidate_rejection !== 'ProjectionBuildRejected') ? 0 : null),
-    elapsed:ns('build_elapsed_nanoseconds'),compiler:ns('compiler_nanoseconds')};
+  const readsOnly = report?.effective_condition === 'ordinary';
+  const beforeBootstrap = report?.task === null || report?.errors?.some(error=>error.stage === 'setup');
+  const performed = report?.bootstrap?.program?.kind === 'program' || Boolean(report?.candidate_rejection);
+  const commands = metric('build_commands',performed ? 1 : readsOnly || beforeBootstrap ? 0 : null);
+  const rejected = metric('rejected_build_commands',commands === 0 || report?.bootstrap?.program ||
+    (performed && report.candidate_rejection !== 'ProjectionBuildRejected') ? 0 : null);
+  return {commands,rejected,elapsed:metric('build_elapsed_nanoseconds',commands === 0 ? 0 : null),
+    compiler:metric('compiler_nanoseconds',commands === 0 ? 0 : null)};
 }
 
 function providerTraffic(report) {
@@ -373,8 +403,8 @@ function resources(tasks, costModel) {
   const knownBodyBytes = knownSum(bodyBytes);
   const total = values=>values.every(count) ? knownSum(values) : null;
   const taskMetric = key => {
-    const fields = started.map(t=>t.report?.metrics?.[key]);
-    return fields.every(count) && started.every(t=>t.report?.final_metrics_complete !== false) ? knownSum(fields) : null;
+    return total(started.map(({report})=>report?.task === null && report.inference_dispatch_possible === false ? 0 :
+      report?.final_metrics_complete === false ? null : report?.metrics?.[key]));
   };
   const namespaces = started.map(t=>t.report?.retained_namespace_bytes);
   const bootstrap = started.map(t=>bootstrapBuild(t.report));
@@ -472,23 +502,23 @@ export function gradeCondition(condition, tasks, costModel) {
     const decision = decisionState(r), answered = decision === 'answered';
     const sameRef = (a,b) => a && b && a.kind === b.kind && a.id === b.id;
     const citedProjection = answered ? Boolean(projection && grade.answer.support.some(ref=>sameRef(ref,projection.result))) : null;
-    const projectedAlias = ref=>projection && trace.exposure?.some(row=>sameRef(row.projected_result,projection.result) &&
-      !sameRef(row.ref,projection.result) && sameRef(ref,row.ref));
-    const citedAlias = answered ? grade.answer.support.some(projectedAlias) : null;
+    const aliases = answered ? grade.answer.support.filter(ref=>!sameRef(ref,projection?.result)).map(ref=>{
+      if (projection && trace.exposure?.some(row=>sameRef(row.projected_result,projection.result) && sameRef(ref,row.ref))) return true;
+      return trace.evidence_complete !== true && ['view','work','value'].includes(ref.kind) ? null : false;
+    }) : [];
+    const citedAlias = !answered ? null : aliases.includes(true) ? true : aliases.includes(null) ? null : false;
     const projectionCited = citedProjection || citedAlias;
-    const otherCited = answered ? grade.answer.support.some(ref=>!sameRef(ref,projection?.result) && !projectedAlias(ref)) : null;
-    const projectionSupport = !answered ? null : !projectionCited ? false :
-      Object.hasOwn(grade,'projection_citations_supported') ? grade.projection_citations_supported :
-      !otherCited && projection.semantic_judgment === 'supported' ? grade.supported : null;
+    const otherCited = !answered ? null : aliases.includes(false) ? true : aliases.includes(null) ? null : false;
+    const projectionSupport = !answered ? null : Object.hasOwn(grade,'projection_citations_supported') ?
+      grade.projection_citations_supported : projectionCited === false ? false :
+      projectionCited && otherCited === false && projection?.semantic_judgment === 'supported' ? grade.supported : null;
     const exposures = projection?.exposures ?? [];
-    const ordinaryOnly = r?.effective_condition === 'ordinary' && !projection && bound && trace.evidence_complete &&
-      trace.delivery?.some(e=>e.model_response === true) && trace.delivery.every(e=>
-        e.selected_view === null || e.delivery === 'not_sent' || e.model_response === false);
     const inventoried = inventoriedControllerDelivery(r);
+    const allAttempts = inventoried ?? (bound && trace.evidence_complete ? trace.delivery : null);
+    const noSelectedExposure = allAttempts?.every(a=>a.selected_view === null || a.delivery === 'not_sent' ||
+      a.model_response === false || exposures.some(e=>e.id === a.id && e.rendered === false));
     const exposed = exposures.some(e=>e.rendered && e.delivery === 'confirmed' && e.model_response === true) ? true :
-      inventoried?.every(a=>a.model_response === false) || ordinaryOnly ||
-      (trace?.evidence_complete || inventoried) && exposures.length && exposures.every(e=>e.rendered === false ||
-        e.delivery === 'not_sent' || e.model_response === false) ? false : null;
+      noSelectedExposure ? false : null;
     const projectionBinding = condition.arm === 'repair' ? trace?.transfer_bound : projection?.canonical_input;
     const supportedUse = !answered ? null : allObserved([grade.supported,projectionCited,projectionSupport,compliant,exposed,
       projectionBinding]);
@@ -606,13 +636,18 @@ export function formatRepairResults(results) {
   return lines.join('\n');
 }
 
-export async function runInterfaceRepair(directory, options, {execute=executeRepairTask,now=()=>performance.now()} = {}) {
+export async function runInterfaceRepair(directory, options, {execute=executeRepairTask,now=()=>performance.now(),
+  validateCredentials=command} = {}) {
   options = {...options};
   assert(options.authorizeInference === true,'Explicit --authorize-inference is required.');
-  inferenceArguments(options);
+  const [, ...credentialArgs] = inferenceArguments(options);
   const campaignStart = now();
   const {plan,plan_sha256,application,directory:preparedDirectory,preparedFiles} = await readRepairPlan(directory,options);
   assert.equal(options.chatgptAccount ? 'chatgpt' : 'api-key',plan.route,'Credential route differs from preparation.');
+  const first = plan.conditions[0];
+  const admission = await validateCredentials(options.binary,['validate','--config',
+    (first.author ?? first.downstream[0]).config,...credentialArgs]);
+  assert.equal(admission.valid,true,'Product rejected the selected credential route.');
   const output = join(preparedDirectory,'run');
   await mkdir(output,{mode:0o700});
   const results = {format,plan_sha256,study:plan.study,timing_file:'timing.json',conditions:[],paired_cases:[]};
