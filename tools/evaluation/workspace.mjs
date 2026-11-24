@@ -14,7 +14,7 @@ import {contract} from '../../test/protean/adaptive_capture_checks.mjs';
 import {createCorpus, createOnlineCorpus, gradeReport, gradeOnlineAnswers, combineOnlineGrading,
   parseOnlineAnswer, compareCampaign, parseReport, campaignIdentity} from './recurrence.mjs';
 import {profilePreparedRequest} from './request_profile.mjs';
-import {parseRepairConfiguration, prepareInterfaceRepair, runInterfaceRepair} from './interface_repair_campaign.mjs';
+import {prepareInterfaceRepair, runInterfaceRepair} from './interface_repair_campaign.mjs';
 import {strictJson} from './interface_repair.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -1816,7 +1816,7 @@ if (import.meta.main) {
 if (mode === 'prepare' && option(args, '--suite') === 'interface-repair') {
   const directory = resolve(option(args, '--out', '')), costPath = option(args, '--cost-model');
   const plan = await prepareInterfaceRepair({directory,
-    config:parseRepairConfiguration(await readFile(resolve(option(args, '--config', '')), 'utf8')),
+    configPath:resolve(option(args,'--config','')), siwcAuthDir:option(args,'--siwc-auth-dir'),
     binary:resolve(option(args, '--binary', '')), driver:resolve(option(args, '--driver', '')),
     applicationPath:resolve(option(args, '--application', '')), study:option(args, '--study', 'episode'),
     repetitions:Number(option(args, '--repetitions', '1')), seconds:Number(option(args, '--seconds', '600')),

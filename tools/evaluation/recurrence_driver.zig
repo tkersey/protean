@@ -212,11 +212,64 @@ const Package = struct {
     }
 };
 
+fn preparationProfile(init: std.process.Init, a: std.mem.Allocator) !bool {
+    var args = init.minimal.args.iterate();
+    _ = args.next();
+    if (!std.mem.eql(u8, args.next() orelse return false, "--interface-repair-profile"))
+        return false;
+    const path = args.next() orelse return error.InvalidArguments;
+    const name = args.next() orelse return error.InvalidArguments;
+    const route: native.responses_contract.Route = if (std.mem.eql(u8, name, "chatgpt"))
+        .chatgpt_plan_sse
+    else if (std.mem.eql(u8, name, "api-key")) .api_key_json else return error.InvalidArguments;
+    const auth_dir = args.next();
+    if (args.next() != null) return error.InvalidArguments;
+    const roots = try native.configuration.ProtectedRoots.init(
+        a,
+        init.io,
+        init.environ_map.get("HOME"),
+        auth_dir,
+    );
+    const source = try environment.readConfiguration(a, init.io, path, roots);
+    const c = source.value.adaptive;
+    const tools = source.value.tools orelse return error.MissingConstructionPermission;
+    if (!tools.build or !tools.run) return error.MissingConstructionPermission;
+    var selected: ?types.model.AdaptiveInferenceProfile = null;
+    for (c.profiles.items) |p| {
+        if (!std.mem.eql(u8, p.id.bytes, c.initial_profile.bytes)) continue;
+        if (selected != null) return error.InvalidConfiguration;
+        try native.adaptive_responses.Admission(types.P).validateProfile(c.endpoint.bytes, p);
+        try native.responses_contract.admitProfile(route, p);
+        if (std.mem.indexOfScalar(
+            @TypeOf(c.initial_effort),
+            p.efforts.items,
+            c.initial_effort,
+        ) == null) return error.UnsupportedEffort;
+        selected = p;
+    }
+    const profile = selected orelse return error.UnknownInferenceProfile;
+    const output = .{
+        .schema = source.value.schema,
+        .adaptive = .{
+            .workspace = c.workspace,
+            .endpoint = c.endpoint,
+            .audience = c.audience,
+            .profiles = @as(@TypeOf(c.profiles), .{ .items = &.{profile} }),
+            .initial_profile = c.initial_profile,
+            .initial_effort = c.initial_effort,
+        },
+        .tools = .{ .build = tools.build, .run = tools.run },
+    };
+    try emit(init.io, try native.values.toJson(@TypeOf(output), a, output));
+    return true;
+}
+
 fn run(init: std.process.Init) !void {
-    const options = try Options.parse(init);
     var arena = std.heap.ArenaAllocator.init(init.gpa);
     defer arena.deinit();
     const a = arena.allocator();
+    if (try preparationProfile(init, a)) return;
+    const options = try Options.parse(init);
     var package = try Package.open(init.gpa, options.bootstrap_digest != null);
     defer package.close();
     const application = &package.application;

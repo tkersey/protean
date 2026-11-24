@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
-import {mkdir, readFile, unlink, writeFile} from 'node:fs/promises';
+import {access, link, mkdir, readFile, unlink, writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
-import {prepareInterfaceRepair} from '../../tools/evaluation/interface_repair_campaign.mjs';
+import {spawnSync} from 'node:child_process';
+import {prepareInterfaceRepair, runInterfaceRepair} from '../../tools/evaluation/interface_repair_campaign.mjs';
 import {executeRepairTask} from '../../tools/evaluation/interface_repair_task.mjs';
 import {assessScan} from '../../tools/evaluation/interface_repair.mjs';
 import {readArchive} from './native_archive.mjs';
@@ -153,7 +154,7 @@ async function restartAtSelection(launch, root, subject, plan_sha256, source, ov
 }
 
 async function recoverBootstrap(launch, root, subject, plan_sha256, source, mode, programId = null) {
-  const ordinary = mode === 'ordinary';
+  const ordinary = mode === 'ordinary' || mode === 'ordinary-parked';
   const diagnostic = mode === 'diagnostic';
   const condition = diagnostic ? 'repair' : ordinary ? 'ordinary' : 'fixed-lossy';
   const descriptor = JSON.stringify({version: 1, plan_sha256, submission_id: subject.id,
@@ -179,11 +180,33 @@ async function recoverBootstrap(launch, root, subject, plan_sha256, source, mode
     task = {task_id: submitted.task_id};
     const params = {...task, descriptor, source};
     assert.equal(await committedBootstrap(child, params), null);
+    if (mode === 'build-key') {
+      const before = await capture('before-key');
+      await assert.rejects(child.call('evaluation.interface_repair.fixture_select',
+        {...params, stop_after: 'build_key'}), /OutOfMemory/);
+      assert.deepEqual((await capture('after-key')).manifest, before.manifest);
+      assert.deepEqual((await child.call('evaluation.observe', task)).bootstrap_build_metrics,
+        {build_commands: 0, rejected_build_commands: 0, build_elapsed_nanoseconds: '0', compiler_nanoseconds: '0'});
+      return;
+    }
     if (!diagnostic) {
       await close();
       child = launch(task.task_id, state, flags);
       const parked = await child.call('task.status', task);
       assert.equal(parked.status, 'parked');
+      if (mode === 'ordinary-parked') {
+        const acquired = await child.call(bootstrapMethod, params);
+        assert.equal(acquired.manifest.kind, 'value');
+        assert.equal(acquired.build_metrics.build_commands, 0);
+        assert.equal((await capture('ordinary-parked')).task.inference_attempts, 0n);
+        return;
+      }
+      if (mode === 'projected') {
+        const before = await capture('parked');
+        await assert.rejects(child.call(bootstrapMethod, params), /InitialSetupBlocked/);
+        assert.deepEqual((await capture('after-parked-rejection')).manifest, before.manifest);
+        assert.equal((await child.call('evaluation.observe', task)).bootstrap_build_metrics, null);
+      }
       await child.call('task.resume', {...task, client_operation_id: 'resume-after-submit',
         expected_revision: parked.revision});
       assert.equal(await committedBootstrap(child, params), null);
@@ -514,10 +537,77 @@ async function auditEvidence(report, application) {
   assert(uncertain.delivery.some(row => unconfirmed.has(row.id) && row.delivery === 'unknown'));
 }
 
+export async function checkPreparationAdmission(root,driver,applicationPath,binary) {
+  const source = join(root,'operator.json'), directory = join(root,'operator-plan');
+  const authDir = join(root,'synthetic-siwc');
+  await mkdir(authDir,{mode:0o700});
+  const config = JSON.parse(await readFile(new URL('../../examples/adaptive/adaptive.chatgpt.example.json',import.meta.url)));
+  config.tools = {build:true,run:true,inputs:[]};
+  const original = JSON.stringify(config);
+  const cli = () => spawnSync(process.execPath,['tools/evaluation/workspace.mjs','prepare','--suite','interface-repair',
+    '--config',source,'--driver',driver,'--binary',binary,'--application',applicationPath,'--out',directory,
+    '--provider-route','chatgpt','--siwc-auth-dir',authDir],{cwd:new URL('../../',import.meta.url),encoding:'utf8'});
+  const withLimit = token => original.replace('"request_bytes":null','"request_bytes":'+token);
+  async function refused(bytes,reason) {
+    await writeFile(source,bytes,{mode:0o600});
+    const attempt = cli();
+    assert.notEqual(attempt.status,0);
+    assert.match(attempt.stderr,reason);
+    await assert.rejects(access(directory),{code:'ENOENT'});
+  }
+  await refused(original.replace('"schema":','"schema":"unused","schema":'),/DuplicateKey/);
+  await refused(Buffer.concat([Buffer.from('{"'),Buffer.from([255]),Buffer.from('":1}')]),/InvalidJson|Malformed|Syntax|Utf8/i);
+  for (const token of ['1e400','1e-400','1.00000000000000000001','4294967296'])
+    await refused(withLimit(token),/InvalidParams/);
+  await refused(original.replace('"effort_update":false','"effort_update":true'),/ChatGPT requires/);
+  const other = join(root,'linked-operator.json');
+  await link(source,other);
+  await refused(original,/one hard link/);
+  await unlink(other);
+  const protectedSource = join(authDir,'inside.json');
+  await writeFile(protectedSource,original);
+  assert.match(spawnSync(driver,['--interface-repair-profile',protectedSource,'chatgpt',authDir],{encoding:'utf8'}).stderr,
+    /protected authentication directory/);
+  const projected = (...args) => spawnSync(driver,['--interface-repair-profile',source,...args],{encoding:'utf8'});
+  await writeFile(source,original.replace('"reasoning_mode":"standard"','"reasoning_mode":"pro"')
+    .replace('"effort_update":false','"effort_update":true'));
+  assert.match(projected('api-key').stderr,/UnsupportedEffort|InvalidConfiguration/);
+  await writeFile(source,withLimit('1.000e2'));
+  const accepted = cli();
+  assert.equal(accepted.status,0,accepted.stderr);
+  const plan = JSON.parse(await readFile(join(directory,'plan.json')));
+  const frozen = JSON.parse(await readFile(plan.conditions[0].author.config));
+  assert.equal(frozen.adaptive.profiles[0].request_bytes,100);
+  assert.deepEqual(frozen.adaptive.profiles[0].efforts,[config.adaptive.initial_effort]);
+  assert.deepEqual(frozen.adaptive.skills,[]);
+  const helper = join(authDir,'siwc');
+  await writeFile(helper,[
+    '#!/bin/sh',
+    'printf "%s\\n" "$1" >> "$0.commands"',
+    'case "$1" in',
+    '  --version) echo 0.1.3 ;;',
+    '  status) /bin/cat "$0.status" ;;',
+    '  *) exit 2 ;;',
+    'esac',
+  ].join('\n'),{mode:0o700});
+  const status = {phase:'signed_out',app:'protean',account:'fixture',client_id:null,subject:null,email:null,expires_at:null};
+  await writeFile(helper+'.status',JSON.stringify(status));
+  const options = {binary,driver,applicationPath,authorizeInference:true,chatgptAccount:'fixture',siwcBin:helper,siwcAuthDir:authDir};
+  await assert.rejects(runInterfaceRepair(directory,options),/admit the selected local credentials/);
+  assert.deepEqual((await readFile(helper+'.commands','utf8')).trim().split('\n'),['--version','status']);
+  await assert.rejects(access(join(directory,'run')),{code:'ENOENT'});
+  await writeFile(helper+'.status',JSON.stringify({...status,phase:'ready',client_id:'fixture-client',subject:'fixture-subject'}));
+  let clock = 0, executions = 0;
+  await runInterfaceRepair(directory,options,{now:()=>clock+=1e9,execute:()=>{executions++;}});
+  assert.equal(executions,0);
+  assert.deepEqual((await readFile(helper+'.commands','utf8')).trim().split('\n'),['--version','status','--version','status']);
+}
+
 export async function checkInterfaceRepair(launch, root, {sources, application:ordinaryApplication, config, scalarProjection}) {
   const directory = join(root, 'directed-repair-plan');
   const preflight = readArchive(await readFile(join(root, 'preflight.agnx')));
   const driver = process.argv[2], applicationPath = process.argv[3];
+  await checkPreparationAdmission(root,driver,applicationPath,process.argv[4]);
   const options = {config: {...config, tools: {...config.tools, build: true, run: true},
     adaptive: {...config.adaptive,
     endpoint: 'https://127.0.0.1:1/v1/responses'}}, directory, study: 'comparison',
@@ -527,11 +617,14 @@ export async function checkInterfaceRepair(launch, root, {sources, application:o
   const unclean = join(root, 'unclean-driver.cjs');
   await writeFile(unclean, '#!/usr/bin/env node\n' +
     'const child = require("node:child_process").spawn('+JSON.stringify(driver)+', process.argv.slice(2), {stdio:"inherit"});\n' +
-    'child.on("exit", code => { process.exitCode = code || 7; });\n', {mode:0o700});
+    'child.on("exit", code => { process.exitCode = code || (process.argv[2] === "--offline" ? 7 : 0); });\n', {mode:0o700});
   const failedDirectory = join(root, 'unclean-preparation');
   await assert.rejects(prepareInterfaceRepair({...options,driver:unclean,directory:failedDirectory},checks),
     /Offline preparation driver did not exit cleanly/);
   await assert.rejects(readFile(join(failedDirectory,'plan.json')),{code:'ENOENT'});
+  await writeFile(unclean,'#!/bin/sh\nexec '+JSON.stringify(driver)+' "$@"\n');
+  await assert.rejects(prepareInterfaceRepair({...options,driver:unclean,directory:failedDirectory},checks),
+    /ordinary preparation archive identifies a different driver/);
   const {build} = plan.study_assets;
   const application = JSON.parse(await readFile(plan.study_assets.application.path));
   assert.notEqual(build.program_sha256,preflight.build.program_sha256);
@@ -549,8 +642,9 @@ export async function checkInterfaceRepair(launch, root, {sources, application:o
   for (const large of [false, true])
     await rejectIncompatibleProgram(launch, root, diagnostic, plan_sha256, scalarProjection, large);
   const evidence = plan.conditions.find(c => c.arm === 'evidence').downstream[0];
-  await recoverBootstrap(launch, root, evidence, plan_sha256, '', 'ordinary');
-  for (const mode of ['projected', 'message', 'early-message', 'cancelled', 'joined'])
+  for (const mode of ['ordinary', 'ordinary-parked'])
+    await recoverBootstrap(launch, root, evidence, plan_sha256, '', mode);
+  for (const mode of ['projected', 'message', 'early-message', 'cancelled', 'joined', 'build-key'])
     await recoverBootstrap(launch, root, fixed, plan_sha256, sources.lossy, mode);
   const episode = async (subject, candidate = null) => {
     const output = join(root, 'result-' + subject.id);

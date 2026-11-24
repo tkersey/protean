@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
-import {appendFile, readFile, realpath, writeFile} from 'node:fs/promises';
+import {appendFile, lstat, readFile, realpath, writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {setTimeout as wait} from 'node:timers/promises';
 import {readArchive} from '../../test/protean/native_archive.mjs';
@@ -458,7 +458,12 @@ export async function executeRepairTask(options, {Client = RecurrenceDriver, scr
       } catch (error) { record('adjudication', error); }
     }
   }
-  try { report.retained_namespace_bytes = await bytesUnder(state); }
+  try {
+    const namespace = await lstat(state).catch(error => {
+      if (error.code !== 'ENOENT') throw error;
+    });
+    report.retained_namespace_bytes = namespace ? await bytesUnder(state) : 0;
+  }
   catch (error) { record('namespace', error); }
   if ((!report.metrics || initialProjection && !report.adjudication) && observations.length) {
     const attempts = new Map();

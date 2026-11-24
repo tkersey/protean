@@ -135,6 +135,26 @@ test('opening contents and completed content parts preserve output with consiste
   assert.equal(read([other,delta,final]), null);
   assert.equal(read([delta,other,final]), null);
   assert.equal(read([opened(message,0),delta,other,final]), null);
+  for (const [family, item, part] of [
+    ['content_part', message, {type:'output_text', text:'Observed'}],
+    ['content_part', message, {type:'refusal', refusal:'Declined'}],
+    ['content_part', {...reasoning,encrypted_content:''}, {type:'reasoning_text',text:'Reason'}],
+    ['reasoning_summary_part', {...reasoning,encrypted_content:''}, {type:'summary_text',text:'Reason'}],
+  ]) for (const phase of ['added','done']) {
+    const event = {type:'response.' + family + '.' + phase, item_id:item.id, output_index:0, part};
+    assert.equal(read([opened(item,0),event,final]), true);
+    assert.equal(read([opened(item,1),event,final]), null);
+    assert.equal(read([opened(item,0),{...event,item_id:'another'},final]), null);
+    assert.equal(read([opened(item,0),{...event,part:{...part,text:'',refusal:''}},final]), false);
+  }
+  for (const id of ['m',undefined]) {
+    const item = {...message,id,status:'completed',content:[{type:'output_text',text:'Observed'}]};
+    const done = {type:'response.output_item.done',output_index:0,item};
+    const first = opened({...message,id,role:'user'},0);
+    for (const terminal of [final, {type:'response.completed',response:{id:'r',status:'completed',error:null,output:[item]}}])
+      assert.equal(read([first,done,terminal]), null);
+    assert.equal(read([first,done,opened(reasoning,1),final]), true);
+  }
   const partial = {...message,content:[{type:'output_text',text:'Observed'}]};
   for (const status of ['failed','incomplete']) {
     const body = {id:'r', status, error:{message:'stopped'}, output:[partial]};
@@ -180,6 +200,8 @@ test('canonical scan work requires the task-owned consumer observation as well a
   const values = new Map([[input[0].toString('hex'), {raw:[,,,,[null, origins]]}]]);
   const matches = (kind, id, observed) => canonicalProjectionInput(values, input, specimen, refs, [[kind, id], facts], observed);
   assert.equal(matches(12, view, view), true);
+  assert.equal(matches(12, view.toUpperCase(), view), true);
+  assert.equal(matches(12, 'G'.repeat(64), view), false);
   assert.equal(matches(3, view, view), false);
   assert.equal(matches(12, view, null), false);
   assert.equal(matches(12, view, 'f'.repeat(64)), false);
@@ -258,6 +280,7 @@ test('diagnostic credit compares the payloads both executions propose to their s
   };
   const left = proposal([computed], true), right = proposal([computed], false);
   assert.equal(collisionProbe(left, right).distinction_preserved, true);
+  assert.equal(collisionProbe(left,proposal([computed],false,[12,view.toUpperCase()])).distinction_preserved,true);
   for (const invalid of [proposal([], false), proposal([{tag: 3, value: 'same'}], false),
     proposal([computed, computed], false), proposal([computed], false, [12, 'other'])]) {
     assert.equal(Object.hasOwn(invalid, 'payload'), false);

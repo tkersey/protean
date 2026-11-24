@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
 import {createHash, randomBytes} from 'node:crypto';
 import {spawnSync} from 'node:child_process';
-import {lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile} from 'node:fs/promises';
+import {stripTypeScriptTypes} from 'node:module';
+import {lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rm, rmdir, unlink, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
-import {join, resolve} from 'node:path';
+import {basename, dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {ProteanClient} from '../../test/support/stdio-client.mts';
 import {readArchive} from '../../test/protean/native_archive.mjs';
-import {makeRepairCorpus, assessScan, scanContract, taskContract, candidateContract, strictJson, unsignedJsonInteger} from './interface_repair.mjs';
+import {makeRepairCorpus, assessScan, scanContract, taskContract, candidateContract} from './interface_repair.mjs';
 import {RecurrenceDriver, bytesUnder, command, inferenceArguments, tariffErrors} from './workspace.mjs';
 import {executeRepairTask, writeRepairReport} from './interface_repair_task.mjs';
 
@@ -51,15 +53,18 @@ async function identities({binary, driver}, applicationBytes) {
   loadedEvaluator ??= loadedSources();
   const loaded = await loadedEvaluator;
   const hashes = await Promise.all([binary, driver].map(async path => hash(await readFile(path))));
-  const evaluator = Object.fromEntries(await Promise.all(sourcesUsed.map(async path =>
-    [path, hash(await readFile(new URL(path, import.meta.url)))])));
-  for (const path of sourcesUsed.filter(path=>path.endsWith('.mjs')))
-    assert.equal(evaluator[path],loaded[path],'Loaded evaluator differs from its source: '+path);
+  const evaluator = Object.fromEntries(await Promise.all(sourcesUsed.map(async path => {
+    const url = new URL(path,import.meta.url), source = await readFile(url), digest = hash(source);
+    const executed = path.endsWith('.mts') ?
+      hash(stripTypeScriptTypes(source.toString('utf8'),{mode:'strip',sourceUrl:url.href})) : digest;
+    assert.equal(executed,loaded[path],'Loaded evaluator differs from its source: '+path);
+    return [path,digest];
+  })));
   return {binary_sha256:hashes[0], driver_sha256:hashes[1], application_sha256:hash(applicationBytes),
     evaluator,loaded_evaluator:{...loaded},repository_head:repositoryHead()};
 }
 
-async function exportSources(driver, build) {
+async function exportSources(driver, build, driverIdentity) {
   const scratch = await realpath(await mkdtemp(join(tmpdir(), 'protean-repair-sources-')));
   async function preflight(name, study) {
     const args = ['--offline','--state-dir',join(scratch,name)];
@@ -77,12 +82,14 @@ async function exportSources(driver, build) {
         input:{schema_id:'adaptive-agent.input.v2',value:{task:'Validate the frozen experiment assets.'}}});
       const path = join(scratch,name+'.agnx');
       await client.call('evaluation.export',{task_id:task.task_id,path});
+      verified = true;
       const archive = readArchive(await readFile(path));
       assert.equal(archive.task.inference_attempts,0n);
+      assert.equal(Buffer.from(archive.task.runtime_identity).toString('hex'),driverIdentity,
+        `The ${name} preparation archive identifies a different driver executable.`);
       if (study) assert.deepEqual(archive.build,study.build,'Admitted study build differs from the private manifest.');
       else for (const field of ['program_sha256','application_assets_sha256'])
         assert.equal(archive.build[field],build[field],`Driver and product disagree on ${field}.`);
-      verified = true;
       return {...sources,study:assets};
     } finally {
       clearTimeout(timer);
@@ -105,24 +112,6 @@ function validateEfforts(efforts, selected) {
 }
 
 const profileLimits = ['max_output_tokens','request_bytes','response_bytes','timeout_ms'];
-
-export function parseRepairConfiguration(text) {
-  const invalidLimits = new WeakMap();
-  const config = strictJson(text,function(key,value,context) {
-    if (profileLimits.includes(key) && typeof value === 'number') {
-      const exact = unsignedJsonInteger(context.source);
-      if (exact !== null && exact <= 0xffffffffn) return Number(exact);
-      invalidLimits.set(this,key);
-    }
-    return value;
-  });
-  const active = config?.adaptive;
-  if (Array.isArray(active?.profiles)) for (const profile of active.profiles) {
-    if (profile?.id === active.initial_profile && invalidLimits.has(profile))
-      throw new Error('Invalid unsigned profile limit: '+invalidLimits.get(profile));
-  }
-  return config;
-}
 
 export function selectRepairProfile(config) {
   assert.equal(config.schema, 'adaptive-agent.configuration.v3');
@@ -148,8 +137,37 @@ export function repairOrder(study, repetition) {
   return [...arms.slice(index),...arms.slice(0,index)];
 }
 
-async function frozenFile(path, bytes) {
-  await save(path, bytes);
+function preparationCleanup(rollback) {
+  const directories = new Map();
+  return (path, original) => {
+    const lineage = [...(directories.get(dirname(path)) ?? []), {path,original}];
+    if (original.isDirectory()) directories.set(path,lineage);
+    rollback.defer(async () => {
+      try {
+        for (const entry of lineage) {
+          const current = await lstat(entry.path,{bigint:true});
+          if (current.dev !== entry.original.dev || current.ino !== entry.original.ino ||
+              current.birthtimeNs !== entry.original.birthtimeNs ||
+              entry.original.isFile() && current.ctimeNs !== entry.original.ctimeNs) return;
+        }
+        if (original.isDirectory()) await rmdir(path);
+        else await unlink(path);
+      } catch (error) {
+        if (!['ENOENT','ENOTDIR','ENOTEMPTY','EEXIST'].includes(error.code)) throw error;
+      }
+    });
+  };
+}
+
+async function prepareDirectory(path, register) {
+  await mkdir(path,{mode:0o700});
+  register(path,await lstat(path,{bigint:true}));
+}
+
+async function frozenFile(path, bytes, register) {
+  await using file = await open(path,'wx',0o600);
+  try { await file.writeFile(bytes); }
+  finally { register(path,await file.stat({bigint:true})); }
   return {path,sha256:hash(bytes)};
 }
 
@@ -164,10 +182,11 @@ function decisionPrompt(specimen) {
   return [taskContract,'Classify the scan for case '+specimen.case_id+'. Inspect the supplied presentation and evidence as needed. context.materialize(snapshot) supplies citable value references and context.expand exposes their bytes. Building or running new programs, selecting another view, reconstruction, and runtime replacement are outside this downstream condition.'].join('\n\n');
 }
 
-async function freezeSubject({root, iteration, arm, phase, specimen, paired, cases, config, profile, sources}) {
+async function freezeSubject({root, iteration, arm, phase, specimen, paired, cases, config, profile, sources, register}) {
   const id = [iteration,arm,phase,specimen.case_id].join('-');
   const home = join(root,id), snapshot = join(home,'snapshot');
-  await mkdir(snapshot,{recursive:true});
+  await prepareDirectory(home,register);
+  await prepareDirectory(snapshot,register);
   let files = {...specimen.files};
   if (paired) {
     const {'scan.json':scan,...observations} = paired.files;
@@ -178,20 +197,35 @@ async function freezeSubject({root, iteration, arm, phase, specimen, paired, cas
   const evidence = [];
   for (const [name, bytes] of Object.entries(files).sort(([a],[b])=>a.localeCompare(b))) {
     assert(/^[A-Za-z0-9_.-]+$/.test(name) && !['.','..'].includes(name));
-    await save(join(snapshot,name),bytes);
-    evidence.push({path:name,sha256:hash(bytes)});
+    const file = await frozenFile(join(snapshot,name),bytes,register);
+    evidence.push({path:name,sha256:file.sha256});
   }
   const authored = phase === 'author';
   const selected = {schema:config.schema,adaptive:{...config.adaptive,snapshot_root:snapshot,profiles:[profile],skills:[]},
     tools:{build:authored && config.tools.build,run:authored && config.tools.run,reconstruct:false,inputs:[]}, semantic_construction:null};
-  const cfg = await frozenFile(join(home,'config.json'),encode(selected));
+  const cfg = await frozenFile(join(home,'config.json'),encode(selected),register);
   const source = authored || arm === 'fixed-lossy' ? sources.lossy : arm === 'fixed-adequate' ? sources.adequate : null;
   return {id,arm,phase,case_id:specimen.case_id,case_path:cases[specimen.case_id].specimen.path,
     paired_case_path:paired ? cases[paired.case_id].specimen.path : null, config:cfg.path,config_sha256:cfg.sha256,
     snapshot,evidence,seed_path:source?.path ?? null,prompt:authored ? authorPrompt(specimen,paired) : decisionPrompt(specimen)};
 }
 
-export async function prepareInterfaceRepair({config,directory,binary,driver,applicationPath,study='episode',
+async function admittedConfiguration({config,configPath,driver,route,siwcAuthDir}, admit) {
+  const read = path => admit(driver,['--interface-repair-profile',path,route,
+    ...(siwcAuthDir ? [resolve(siwcAuthDir)] : [])]);
+  if (configPath) return read(configPath);
+  const scratch = await realpath(await mkdtemp(join(tmpdir(),'protean-repair-configuration-')));
+  try {
+    const path = join(scratch,'configuration.json');
+    await save(path,JSON.stringify(config,(_key,value)=>{
+      assert(typeof value !== 'number' || Number.isFinite(value),'Configuration numbers must be finite.');
+      return value;
+    }));
+    return await read(path);
+  } finally { await rm(scratch,{recursive:true,force:true}); }
+}
+
+export async function prepareInterfaceRepair({config,configPath,siwcAuthDir,directory,binary,driver,applicationPath,study='episode',
   repetitions=1,seconds=600,route='api-key',costModel={kind:'unpriced'}}, deps = {}) {
   config = structuredClone(config);
   costModel = structuredClone(costModel);
@@ -199,19 +233,23 @@ export async function prepareInterfaceRepair({config,directory,binary,driver,app
   assert(Number.isSafeInteger(repetitions) && repetitions>0 && (study !== 'episode' || repetitions===1));
   assert(Number.isSafeInteger(seconds) && seconds>0 && Number.isSafeInteger(seconds*1000*repetitions*arms.length));
   assert(['api-key','chatgpt'].includes(route));
-  assert(config.tools?.build === true && config.tools.run === true,
+  assert((config !== undefined) !== Boolean(configPath),'Supply one source configuration.');
+  if (config) assert(config.tools?.build === true && config.tools.run === true,
     'The approved configuration must allow build and run for the authoring task.');
   validateCostModel(costModel);
+  config = await admittedConfiguration({config,configPath,driver,route,siwcAuthDir},deps.admitConfiguration ?? command);
   const profile = selectRepairProfile(config);
   const approvedEfforts = config.adaptive.profiles.find(p=>p.id === profile.id).efforts;
   const ids = await identities({binary,driver},await readFile(applicationPath));
   const build = (deps.describeBuild ?? command)(binary,['describe-build']);
   assert.equal(build.application_assets_sha256,ids.application_sha256);
-  await mkdir(directory,{mode:0o700});
-  directory = await realpath(directory);
-  const raw = await (deps.exportSources ?? exportSources)(driver,build);
+  await using rollback = new AsyncDisposableStack();
+  const register = preparationCleanup(rollback);
+  directory = join(await realpath(dirname(directory)),basename(directory));
+  await prepareDirectory(directory,register);
+  const raw = await (deps.exportSources ?? exportSources)(driver,build,ids.driver_sha256);
   const privateRoot = join(directory,'private');
-  await mkdir(privateRoot);
+  await prepareDirectory(privateRoot,register);
   assert.equal(typeof raw.study.application,'string');
   assert.match(raw.study.build.program_sha256,/^[0-9a-f]{64}$/);
   assert.equal(hash(raw.study.application),raw.study.build.application_assets_sha256);
@@ -219,11 +257,11 @@ export async function prepareInterfaceRepair({config,directory,binary,driver,app
   assert.equal(typeof raw.lossy,'string');
   assert.equal(typeof raw.adequate,'string');
   assert.notEqual(raw.lossy,raw.adequate);
-  const studyAssets = {application:await frozenFile(join(privateRoot,'application.json'),raw.study.application),
+  const studyAssets = {application:await frozenFile(join(privateRoot,'application.json'),raw.study.application,register),
     build:raw.study.build};
   const sources = {};
   for (const key of ['lossy','adequate'])
-    sources[key] = await frozenFile(join(privateRoot,key+'.json'),raw[key]);
+    sources[key] = await frozenFile(join(privateRoot,key+'.json'),raw[key],register);
   const cases = {}, conditions = [];
   const seed = randomBytes(32).toString('hex');
   for (let repetition=0; repetition<repetitions; repetition++) {
@@ -234,11 +272,11 @@ export async function prepareInterfaceRepair({config,directory,binary,driver,app
         continue;
       }
       cases[specimen.case_id] = {
-        specimen:await frozenFile(join(privateRoot,specimen.case_id+'.json'),encode(specimen)),
-        expected:await frozenFile(join(privateRoot,specimen.case_id+'.expected.json'),encode(assessScan(specimen)))};
+        specimen:await frozenFile(join(privateRoot,specimen.case_id+'.json'),encode(specimen),register),
+        expected:await frozenFile(join(privateRoot,specimen.case_id+'.expected.json'),encode(assessScan(specimen)),register)};
     }
     for (const arm of repairOrder(study,repetition)) {
-      const common = {root:directory,iteration:repetition,arm,cases,config,profile,sources};
+      const common = {root:directory,iteration:repetition,arm,cases,config,profile,sources,register};
       const author = arm === 'repair' ? await freezeSubject({...common,phase:'author',specimen:development[0],paired:development[1]}) : null;
       const diagnostic = author ? {...author,id:author.id+'-diagnostic',phase:'diagnostic'} : null;
       const downstream = [];
@@ -266,8 +304,9 @@ export async function prepareInterfaceRepair({config,directory,binary,driver,app
     deadline_scope:'Each condition has its own allowance for setup, authoring, replay and downstream work. The campaign reserves an additional minute per condition for process closure and post-expiry archive measurement. Finalization time is charged and recorded.',
     sources,cases,conditions};
   const bytes = encode(plan);
-  await save(join(directory,'plan.json'),bytes);
-  await save(join(directory,'plan.sha256'),hash(bytes)+'\n');
+  const manifest = await frozenFile(join(directory,'plan.json'),bytes,register);
+  await frozenFile(join(directory,'plan.sha256'),manifest.sha256+'\n',register);
+  rollback.move();
   return plan;
 }
 
@@ -438,7 +477,9 @@ function resources(tasks, costModel) {
     cost_model:costModel.id ?? costModel.kind};
 }
 
-function inventoriedControllerDelivery(report) {
+function inventoriedControllerDelivery(task) {
+  if (task?.state === 'not_started') return [];
+  const report = task?.report;
   if (report?.inference_dispatch_possible === false && report.execution_mode !== 'scripted_fixture') return [];
   if (report?.final_metrics_complete !== true) return null;
   const inventory = report?.metrics?.physical_attempts;
@@ -451,11 +492,11 @@ function inventoriedControllerDelivery(report) {
   return rows.every(Boolean) ? rows : null;
 }
 
-function initialPresentation(report) {
+function initialPresentation(report, inventory) {
   const trace = report?.adjudication;
   const attempts = trace?.delivery?.filter(a=>a.delivery !== 'not_sent' && a.model_response !== false);
   const unknown = {confirmed:null,one_computed_block:null};
-  if (!attempts?.length && inventoriedControllerDelivery(report)?.every(a=>a.model_response === false))
+  if (!attempts?.length && inventory?.every(a=>a.model_response === false))
     return {confirmed:false,one_computed_block:null};
   if (!attempts?.length || attempts.some(a => a.preparation_cut == null)) return unknown;
   const first = attempts.reduce((a, b) => BigInt(a.preparation_cut) <= BigInt(b.preparation_cut) ? a : b);
@@ -493,7 +534,8 @@ export function gradeCondition(condition, tasks, costModel) {
     const t = transfer.find(task=>task.subject.case_id === subject.case_id) ?? {subject,state:'missing_record'};
     const r = t.report, grade = r?.grading, trace = r?.adjudication, projection = trace?.projection;
     const bound = trace?.report_bound === true;
-    const initial = initialPresentation(r);
+    const inventoried = inventoriedControllerDelivery(t);
+    const initial = initialPresentation(r,inventoried);
     const ordinary = condition.arm === 'evidence' || condition.arm === 'repair' && !author?.adjudication?.candidate;
     const expectedArm = ordinary ? 'ordinary' : condition.arm;
     const compliant = allObserved([initial.confirmed, r?.effective_condition == null ? null : r.effective_condition === expectedArm,
@@ -513,7 +555,6 @@ export function gradeCondition(condition, tasks, costModel) {
       grade.projection_citations_supported : projectionCited === false ? false :
       projectionCited && otherCited === false && projection?.semantic_judgment === 'supported' ? grade.supported : null;
     const exposures = projection?.exposures ?? [];
-    const inventoried = inventoriedControllerDelivery(r);
     const allAttempts = inventoried ?? (bound && trace.evidence_complete ? trace.delivery : null);
     const noSelectedExposure = allAttempts?.every(a=>a.selected_view === null || a.delivery === 'not_sent' ||
       a.model_response === false || exposures.some(e=>e.id === a.id && e.rendered === false));
@@ -544,7 +585,7 @@ export function gradeCondition(condition, tasks, costModel) {
   const allSupported = complete && cases.every(c=>c.supported === true);
   const authored = author?.adjudication?.authored_and_applied === true;
   const supportedUses = cases.filter(c=>c.state === 'completed' && c.supported_view_use === true);
-  const initialAuthor = initialPresentation(author).confirmed;
+  const initialAuthor = initialPresentation(author,inventoriedControllerDelivery(authorTask)).confirmed;
   const authorCompliant = initialAuthor === true && author?.effective_condition === 'repair' &&
     Array.isArray(author.arm_violations) && !author.arm_violations.length && author.adjudication?.applied_use?.one_computed_block === true;
   const completeOutcome = 'exhausted_declared_domain';
@@ -636,8 +677,23 @@ export function formatRepairResults(results) {
   return lines.join('\n');
 }
 
+async function admitCredentials(binary,args) {
+  const client = new ProteanClient(binary,args);
+  let admitted = false;
+  try {
+    await client.initialize();
+    admitted = true;
+  } catch (cause) {
+    throw new Error('The native product could not admit the selected local credentials.',{cause});
+  } finally {
+    const exit = await client.close();
+    if (admitted) assert.deepEqual(exit,{code:0,signal:null},'Credential admission did not exit cleanly.');
+  }
+  return {valid:true};
+}
+
 export async function runInterfaceRepair(directory, options, {execute=executeRepairTask,now=()=>performance.now(),
-  validateCredentials=command} = {}) {
+  validateCredentials=admitCredentials} = {}) {
   options = {...options};
   assert(options.authorizeInference === true,'Explicit --authorize-inference is required.');
   const [, ...credentialArgs] = inferenceArguments(options);
@@ -645,7 +701,7 @@ export async function runInterfaceRepair(directory, options, {execute=executeRep
   const {plan,plan_sha256,application,directory:preparedDirectory,preparedFiles} = await readRepairPlan(directory,options);
   assert.equal(options.chatgptAccount ? 'chatgpt' : 'api-key',plan.route,'Credential route differs from preparation.');
   const first = plan.conditions[0];
-  const admission = await validateCredentials(options.binary,['validate','--config',
+  const admission = await validateCredentials(options.binary,['--config',
     (first.author ?? first.downstream[0]).config,...credentialArgs]);
   assert.equal(admission.valid,true,'Product rejected the selected credential route.');
   const output = join(preparedDirectory,'run');

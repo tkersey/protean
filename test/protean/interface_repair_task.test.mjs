@@ -123,7 +123,17 @@ test('changed frozen candidate bytes stop the task before launch', async t => {
   const report = await executeRepairTask({...options, candidate}, {Client: class { constructor() { assert.fail('launched'); } }});
   assert.equal(report.task, null);
   assert(report.errors.some(e => e.stage === 'setup' && e.message.includes('Authored source changed')));
+  assert.equal(report.retained_namespace_bytes, 0);
+  assert(!report.errors.some(e => e.stage === 'namespace'));
   assert.equal(report.adjudication, null);
+});
+
+test('an existing unmeasurable namespace retains its measurement error', async t => {
+  const options = await setup(t);
+  await writeFile(join(options.output,'state'),'not a directory');
+  const report = await executeRepairTask({...options,deadline:0}, {Client: class { constructor() { assert.fail('launched'); } }});
+  assert.equal(report.retained_namespace_bytes, null);
+  assert(report.errors.some(e => e.stage === 'namespace' && e.message.includes('ENOTDIR')));
 });
 
 test('diagnostic grading cannot consume a changed paired specimen after campaign validation', async t => {
@@ -254,6 +264,9 @@ function decisionFixture(pairedSpecimen) {
   const workSchema = {root: 0, types: [{product: [1,2,3,3,4,3,5,3,4]}, 'u8', 'bytes', 'unit', 'text', {sum:[6,10]},
     {product:[7,8]}, {product:[4,4]}, {product:[9,16,4]}, {seq:13}, {product:[11,12]},
     {product:[4,14,1]}, {sum:[15,4,4]}, {product:[4,14]}, 'u64', {product:[2,4,4,14,14,14,4]}, 'boolean']};
+  const controlSchema = {root:0,types:[{product:[1,7]}, {product:[2,4,7,6,6,8,9,10,10,11,11,12,12,6,6]},
+    {array:{element:3,length:16}}, 'u8', {product:[5,6]}, {array:{element:3,length:32}}, 'u64','text',
+    {enumeration:[0,1,2]}, {enumeration:[0,1,2,3,4,5,6,7]}, {bounded_text:64}, {bounded_text:128}, {enumeration:[0,1,2,3,4,5,6]}]};
   const work = (result, rendered) => {
     const task = Buffer.alloc(16), id = String(history.length + 1), call_id = 'work-' + id;
     const text = JSON.stringify(rendered);
@@ -262,10 +275,66 @@ function decisionFixture(pairedSpecimen) {
       attempt: {id, delivery: 'confirmed', model_response: true, body: {input: [{type:'function_call', call_id}, {type:'function_call_output', call_id, output: text}]}},
       results: [{call_id, output: {tag: 'work', value: {digest: [...artifact[0]], bytes: String(artifact[1])}}}], result_actions: []});
   };
-  const support = (uses = [], projector = null, consumers, producer = history.at(-1)) => decisionSupport(archive, {support: {WorkArtifact: schemaSupport(workSchema)}},
+  const support = (uses = [], projector = null, consumers, producer = history.at(-1)) => decisionSupport(archive,
+    {support: {WorkArtifact:schemaSupport(workSchema), ReceiptArtifact:schemaSupport(controlSchema)}},
     specimen, refs, values, history, uses, producer, projector, consumers, pairedSpecimen);
-  return {step, support, expand, acquire, materialize, work, snapshot, history, page, path, member, absent, file, slice, full, witness, input, result, value, put};
+  return {step, support, expand, acquire, materialize, work, snapshot, history, page, path, member, absent, file, slice, full, witness, input, result, value, put, controlSchema};
 }
+
+test('a delivered control receipt establishes metadata only for its recorded task, capture and call', () => {
+  const f = decisionFixture(), task = Buffer.alloc(16), capture = f.put(Buffer.from('capture')), text = 'Unchanged';
+  f.step('program', {tag:'describe',value:{section:'components'}}, {});
+  const [i] = f.history, pending = i.results[0];
+  const receipt = [[...task],[[...capture[0]],capture[1]],pending.call_id,1n,1n,1,0,'adaptive','adaptive','m','m',1,1,0n,0n];
+  const object = f.put(encodeValue(f.controlSchema,[receipt,text]));
+  pending.output = {tag:'control',value:{digest:[...object[0]],bytes:String(object[1])}};
+  i.task_id = task.toString('hex');
+  i.previous.capture_sha256 = Buffer.from(capture[0]).toString('hex');
+  const delivered = i.attempt.body.input[1];
+  delivered.output = text;
+  assert.deepEqual(f.support(), {exposure:[], projection_exposure:[], routes:[], unresolved:[]});
+  for (const [target,key,value] of [[i,'task_id','other'], [i.previous,'capture_sha256','other'],
+    [pending,'call_id','other'], [delivered,'output','Different']]) {
+    const original = target[key];
+    target[key] = value;
+    assert(f.support().unresolved.some(r => r.kind === 'unbound_control_receipt'));
+    target[key] = original;
+  }
+});
+
+test('a delivered judgment or complete pages of its ScanEvidence field support the canonical input citation', () => {
+  const bind = f => {
+    const ids = Array.from({length:13},(_,i) => i);
+    const fields = [[1,4],[2,3],ids,64,[5,9],[6,6,7,8],null,null,6,10,[6,6,6,7,6,1]];
+    const tags = ['product','product','enumeration','bounded_text','product','product','u64','boolean','seq','seq','product'];
+    const schema = {root:0,types:fields.map((v,i) => v === null ? tags[i] : {[tags[i]]:v})};
+    const display = {root:'0',types:fields.map((v,i) => ({tag:tags[i],value: v === null ? {} :
+      tags[i] === 'enumeration' ? v : Array.isArray(v) ? v.map(String) : String(v)}))};
+    const model = [[12,'e'.repeat(64)],[['1','1',true,['1']],[
+      ['1','1','1',true,'2',[3,f.witness.handle.id]], ['1','1','1',false,'0',[3,f.full.handle.id]]]]];
+    const x = f.input;
+    x.raw[4][0] = 3;
+    x.raw[3][1] = f.put(encodeSchema(schema));
+    x.raw[3][2] = f.put(encodeValue(schema,model));
+    const use = {canonical_input:true,input:x.handle,result:f.result.handle,exposures:[]};
+    const block = {kind:'judgment',value_reference:x.handle,schema:display,provenance:{...x.source,kind:'provenance'},value:model};
+    return {use,block, support:() => f.support([use]), credited:() => f.support([use]).exposure
+      .some(row => row.ref.id === x.handle.id && [f.path,f.member,f.absent].every(path => row.paths.includes(path)))};
+  };
+  const f = decisionFixture(), pages = bind(f), text = JSON.stringify(pages.block.value);
+  const start = text.indexOf(JSON.stringify(pages.block.value[1])), end = text.length - 1;
+  f.expand(f.input.handle,text,start,end - 1);
+  assert(pages.support().routes.some(row => row.kind === 'expansion'));
+  assert(!pages.credited());
+  f.expand(f.input.handle,text,end - 1,end);
+  assert(pages.credited());
+  for (const patch of [{}, {schema:{}}, {value:[]}, {provenance:{kind:'value',id:'other'}}]) {
+    const f = decisionFixture(), judgment = bind(f);
+    f.step('program',{tag:'describe',value:{section:'components'}},{}, {selected:'a'.repeat(64),block:{...judgment.block,...patch}});
+    assert.equal(judgment.credited(),!Object.keys(patch).length);
+    assert.equal(judgment.support().unresolved.length,Object.keys(patch).length);
+  }
+});
 
 test('verified partial snapshot handles each carry only their own source interval', () => {
   const f = decisionFixture(), tail = f.acquire(f.path, 4, f.file.length);

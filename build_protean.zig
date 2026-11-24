@@ -1200,6 +1200,7 @@ const BuildGraph = struct {
         check.addArgs(&.{ "node", "test/protean/recurrence_driver.mjs" });
         check.addFileArg2(executable.getEmittedBin(), .{ .make_absolute = true });
         check.addFileArg2(s.adaptive_application, .{ .make_absolute = true });
+        check.addFileArg2(s.adaptive_product.executable.getEmittedBin(), .{ .make_absolute = true });
         if (s.native_direct) s.directHashCheck(&check.step);
         s.b.step("check-recurrence-driver", "Check sealed capture and external crash recovery")
             .dependOn(&check.step);

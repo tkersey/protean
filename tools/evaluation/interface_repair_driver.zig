@@ -27,6 +27,7 @@ const Plan = struct {
 
 pub const Cut = enum {
     complete,
+    build_key,
     build,
     consumer,
     acquisition,
@@ -46,10 +47,10 @@ const BuildMetrics = struct {
         .rejected_build_commands = null,
         .elapsed_ns = null,
     };
-    const admitted: @This() = .{ .build_commands = 1, .elapsed_ns = null };
+    const issued: @This() = .{ .build_commands = 1, .elapsed_ns = null };
 
     fn historical(observed: bool) @This() {
-        return if (observed) admitted else uncertain;
+        return if (observed) issued else uncertain;
     }
 
     fn json(self: @This(), a: Allocator) !Json.Value {
@@ -160,7 +161,10 @@ pub const Session = struct {
         const remaining = try requireCut(service, a, task, plan, expected, submission, observed);
         self.started = true;
         self.task = task;
-        self.metrics = .{};
+        self.metrics = if (plan.condition == .ordinary or (remaining == 0 and observed))
+            .{}
+        else
+            BuildMetrics.historical(observed);
         if (plan.phase == .downstream) self.downstream_task = task;
         var run: Bootstrap = .{
             .a = a,
@@ -216,7 +220,7 @@ pub const Session = struct {
         else if (ordinary_case)
             BuildMetrics{}
         else
-            BuildMetrics.admitted;
+            BuildMetrics.issued;
         try Json.put(a, &output, "build_metrics", try metrics.json(a));
         return output;
     }
@@ -755,6 +759,8 @@ fn requireCut(
     defer parent.deinit();
     if (parent.value.inference_attempts != 0 or parent.value.terminal())
         return error.InitialCutRequired;
+    if (plan.condition != .ordinary and parent.value.schedule == .parked)
+        return error.InitialSetupBlocked;
     if (submission.revision == parent.value.revision) return 0;
     const prefix = try progressPrefix(a, digest);
     const first = try firstKey(a, prefix, observed);
@@ -1003,26 +1009,29 @@ const Bootstrap = struct {
     }
 
     fn build(self: *@This(), source: []const u8, metrics: *BuildMetrics) !Json.Value {
-        const resumed = self.remaining != 0;
-        metrics.* = BuildMetrics.historical(self.observed_first_build);
-        const started = std.Io.Clock.awake.now(self.service.io);
-        defer if (!resumed and self.observed_first_build) {
-            const now = std.Io.Clock.awake.now(self.service.io);
-            const elapsed = now.nanoseconds - started.nanoseconds;
-            metrics.elapsed_ns = std.math.cast(u64, elapsed);
-        };
-        return self.command(.{ .program = .{ .build = .{
+        const measure = self.remaining == 0 and self.observed_first_build;
+        const a = self.a;
+        const key_allocator = if (self.cut == .build_key) std.testing.failing_allocator else a;
+        const id = try self.nextOperation(key_allocator);
+        try self.expectReplay(a, id, false);
+        const command_value: wc.Command = .{ .program = .{ .build = .{
             .source = .{ .json_text = .{ .bytes = source } },
             .source_kind = .source_records,
             .exposures = .{ .items = &.{} },
-        } } }) catch |err| {
-            if (self.observed_first_build)
-                metrics.rejected_build_commands = if (err == error.ProjectionBuildRejected)
-                    1
-                else
-                    null;
+        } } };
+        if (measure) metrics.* = BuildMetrics.issued;
+        const started = std.Io.Clock.awake.now(self.service.io);
+        const issued = self.service.workspaceCommand(a, id, self.task, command_value);
+        if (measure) {
+            const now = std.Io.Clock.awake.now(self.service.io);
+            metrics.elapsed_ns = std.math.cast(u64, now.nanoseconds - started.nanoseconds);
+        }
+        const reply = issued catch |err| {
+            if (measure) metrics.rejected_build_commands = null;
             return err;
         };
+        if (measure) metrics.rejected_build_commands = @intFromBool(reply.disposition == .rejected);
+        return observation(a, reply, command_value);
     }
 
     fn expectReplay(self: *@This(), a: Allocator, operation: []const u8, missing: bool) !void {

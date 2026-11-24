@@ -357,6 +357,41 @@ pub fn configure(
     return admission.finish();
 }
 
+pub fn readConfiguration(
+    a: std.mem.Allocator,
+    io: std.Io,
+    path: []const u8,
+    roots: ?native.configuration.ProtectedRoots,
+) !struct { parsed: std.json.Parsed(native.json.Value), value: t.ConfigurationV3 } {
+    const bytes = try native.configuration.readProtectedFile(
+        a,
+        io,
+        path,
+        null,
+        false,
+        roots,
+    );
+    var parsed = try native.json.parse(a, bytes, .{
+        .bytes = bytes.len,
+        .tokens = bytes.len,
+        .members = bytes.len,
+    });
+    if (parsed.value == .object and !parsed.value.object.contains("semantic_construction"))
+        try native.json.put(a, &parsed.value, "semantic_construction", .null);
+    if (parsed.value == .object) if (parsed.value.object.getPtr("tools")) |tools| {
+        if (tools.* == .object and !tools.object.contains(
+            "reconstruct",
+        )) try native.json.put(a, tools, "reconstruct", .{ .bool = false });
+    };
+    const value = try native.values.fromJson(t.ConfigurationV3, a, parsed.value);
+    if (!std.mem.eql(
+        u8,
+        value.schema.bytes,
+        "adaptive-agent.configuration.v3",
+    )) return error.InvalidConfiguration;
+    return .{ .parsed = parsed, .value = value };
+}
+
 const ConfigurationAdmission = struct {
     a: std.mem.Allocator,
     io: std.Io,
@@ -437,32 +472,9 @@ const ConfigurationAdmission = struct {
 
     fn loadConfiguration(s: *ConfigurationAdmission) !void {
         if (s.options.config_path) |path| {
-            const bytes = try native.configuration.readProtectedFile(
-                s.a,
-                s.io,
-                path,
-                null,
-                false,
-                s.protected_roots,
-            );
-            var parsed = try native.json.parse(s.a, bytes, .{
-                .bytes = bytes.len,
-                .tokens = bytes.len,
-                .members = bytes.len,
-            });
-            if (parsed.value == .object and !parsed.value.object.contains("semantic_construction"))
-                try native.json.put(s.a, &parsed.value, "semantic_construction", .null);
-            if (parsed.value == .object) if (parsed.value.object.getPtr("tools")) |tools| {
-                if (tools.* == .object and !tools.object.contains(
-                    "reconstruct",
-                )) try native.json.put(s.a, tools, "reconstruct", .{ .bool = false });
-            };
-            const value = try native.values.fromJson(t.ConfigurationV3, s.a, parsed.value);
-            if (!std.mem.eql(
-                u8,
-                value.schema.bytes,
-                "adaptive-agent.configuration.v3",
-            )) return error.InvalidConfiguration;
+            const admitted = try readConfiguration(s.a, s.io, path, s.protected_roots);
+            var parsed = admitted.parsed;
+            const value = admitted.value;
             s.config = value.adaptive;
             s.tool_config = value.tools;
             s.semantic_config = value.semantic_construction;

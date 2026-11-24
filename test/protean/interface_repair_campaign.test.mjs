@@ -1,13 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {spawnSync} from 'node:child_process';
-import {copyFile, mkdir, mkdtemp, readFile, symlink, writeFile, rm} from 'node:fs/promises';
+import {copyFile, mkdir, mkdtemp, readFile, rename, symlink, writeFile, rm} from 'node:fs/promises';
 import {existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {dirname, join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {createHash} from 'node:crypto';
-import {parseRepairConfiguration, prepareInterfaceRepair, validateRepairPlan, selectRepairProfile, gradeCondition, repairOrder, formatRepairResults,
+import {prepareInterfaceRepair, validateRepairPlan, selectRepairProfile, gradeCondition, repairOrder, formatRepairResults,
   runInterfaceRepair} from '../../tools/evaluation/interface_repair_campaign.mjs';
 import {makeRepairCorpus, canonicalEvidence, inspectProjection} from '../../tools/evaluation/interface_repair.mjs';
 import {gradeRepairDecision, writeRepairReport} from '../../tools/evaluation/interface_repair_task.mjs';
@@ -15,6 +14,7 @@ import {bytesUnder} from '../../tools/evaluation/workspace.mjs';
 
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const fixtureCredentials = () => ({valid:true});
+const fixtureConfiguration = async (_binary,[,path]) => JSON.parse(await readFile(path,'utf8'));
 const studyProgram = sha('directed study');
 const studyApplication = JSON.stringify({program_sha256:studyProgram});
 const studyAssets = {application:studyApplication,build:{program_sha256:studyProgram,application_assets_sha256:sha(studyApplication)}};
@@ -27,32 +27,13 @@ const tariff = {kind:'tariff',predeclared:true,id:'synthetic',currency:'USD',pro
 test('preparation rejects absent authoring permissions and invalid tariffs before starting any work', async () => {
   for (const tools of [null, {...config.tools,build:false}, {...config.tools,run:false}])
     await assert.rejects(prepareInterfaceRepair({config:{...config,tools}}), /must allow build and run/);
+  for (const limit of [NaN,Infinity,-Infinity]) {
+    const original = structuredClone(config);
+    original.adaptive.profiles[0].max_output_tokens = limit;
+    await assert.rejects(prepareInterfaceRepair({config:original}),/must be finite/);
+  }
   for (const costModel of [null,{},[],{kind:'tariff'}])
     await assert.rejects(prepareInterfaceRepair({config,costModel}), /cost model|declared tariff/);
-});
-
-test('CLI preparation checks the original JSON fields before deriving a study configuration', async t => {
-  const root = await mkdtemp(join(tmpdir(),'repair-config-'));
-  t.after(()=>rm(root,{recursive:true,force:true}));
-  const configPath = join(root,'config.json'), directory = join(root,'plan');
-  await writeFile(configPath,'{"schema":1,"schema":1}');
-  const result = spawnSync(process.execPath,['tools/evaluation/workspace.mjs','prepare','--suite','interface-repair',
-    '--config',configPath,'--out',directory],{cwd:new URL('../../',import.meta.url),encoding:'utf8'});
-  assert.notEqual(result.status,0);
-  assert.match(result.stderr,/duplicate_field/);
-  assert.equal(existsSync(directory),false);
-});
-
-test('selected profile limits retain exact native unsigned integer semantics',()=>{
-  const input = JSON.stringify(config);
-  const withLimit = token=>input.replace('"request_bytes":null','"request_bytes":'+token);
-  for (const token of ['1e400','-1e400','1e-400','1.00000000000000000001','4294967296'])
-    assert.throws(()=>selectRepairProfile(parseRepairConfiguration(withLimit(token))));
-  for (const [token,expected] of [['1.000e2',100],['-0e29',0],['4294967295',4294967295],['null',null]])
-    assert.equal(selectRepairProfile(parseRepairConfiguration(withLimit(token))).request_bytes,expected);
-  const invalid = structuredClone(config);
-  invalid.adaptive.profiles[0].effort_update='false';
-  assert.throws(()=>selectRepairProfile(invalid),/effort_update/);
 });
 
 test('only the approved initial Astra model and effort survive preparation',()=>{
@@ -74,6 +55,64 @@ test('only the approved initial Astra model and effort survive preparation',()=>
     new Set(['repair','evidence','fixed-adequate','fixed-lossy']));
 });
 
+test('failed preparation releases its destination and preserves concurrent unrelated files',async t=>{
+  const root = await mkdtemp(join(tmpdir(),'interface-repair-prepare-'));
+  t.after(()=>rm(root,{recursive:true,force:true}));
+  const app = join(root,'application.json'), directory = join(root,'episode');
+  await writeFile(app,'{}');
+  const opts = {binary:app,driver:app,applicationPath:app,config,directory,route:'chatgpt'};
+  const deps = {describeBuild:()=>({application_assets_sha256:sha('{}')}),
+    exportSources:()=>({lossy:'lossy',adequate:'adequate',study:studyAssets}),
+    admitConfiguration:fixtureConfiguration,validateConfiguration:()=>({valid:true})};
+  await assert.rejects(prepareInterfaceRepair(opts,{...deps,exportSources:()=>{throw new Error('offline driver failed');}}),
+    /offline driver failed/);
+  assert(!existsSync(directory));
+  await assert.rejects(prepareInterfaceRepair(opts,{...deps,validateConfiguration:()=>({valid:false})}),
+    /Product rejected the frozen configuration/);
+  assert(!existsSync(directory));
+  await prepareInterfaceRepair(opts,deps);
+  await validateRepairPlan(directory,opts);
+
+  const interrupted = join(root,'interrupted');
+  let foreign;
+  const digest = join(interrupted,'plan.sha256');
+  await assert.rejects(prepareInterfaceRepair({...opts,directory:interrupted},{...deps,validateConfiguration:async path=>{
+    if (!foreign) {
+      const cfg = JSON.parse(await readFile(path));
+      foreign = join(cfg.adaptive.snapshot_root,'other-study.bin');
+      await writeFile(digest,'another writer',{flag:'wx'});
+      await writeFile(foreign,'independent output',{flag:'wx'});
+    }
+    return {valid:true};
+  }}),{code:'EEXIST'});
+  assert.equal(await readFile(digest,'utf8'),'another writer');
+  assert.equal(await readFile(foreign,'utf8'),'independent output');
+  assert(!existsSync(join(interrupted,'plan.json')));
+  assert(!existsSync(join(interrupted,'private')));
+  await assert.rejects(prepareInterfaceRepair({...opts,directory:interrupted},deps),{code:'EEXIST'});
+
+  const replaced = join(root,'replaced');
+  const edited = join(replaced,'private','lossy.json');
+  let replacement, movedScan, scanBytes;
+  await assert.rejects(prepareInterfaceRepair({...opts,directory:replaced},{...deps,validateConfiguration:async path=>{
+    replacement = path;
+    const {adaptive:{snapshot_root:snapshot}} = JSON.parse(await readFile(path));
+    await writeFile(join(root,'replacement.json'),'replacement config');
+    await rename(join(root,'replacement.json'),path);
+    await writeFile(edited,'independent edit');
+    movedScan = join(snapshot,'scan.json');
+    scanBytes = await readFile(movedScan);
+    const previous = join(root,'previous-snapshot');
+    await rename(snapshot,previous);
+    await mkdir(snapshot);
+    await rename(join(previous,'scan.json'),movedScan);
+    throw new Error('configuration validation interrupted');
+  }}),/configuration validation interrupted/);
+  assert.equal(await readFile(replacement,'utf8'),'replacement config');
+  assert.equal(await readFile(edited,'utf8'),'independent edit');
+  assert.deepEqual(await readFile(movedScan),scanBytes);
+});
+
 test('a frozen episode isolates all snapshots and retains an unsuccessful authoring attempt',async t=>{
   const root = await mkdtemp(join(tmpdir(),'interface-repair-plan-'));
   t.after(()=>rm(root,{recursive:true,force:true}));
@@ -82,7 +121,7 @@ test('a frozen episode isolates all snapshots and retains an unsuccessful author
   const costModel = {...tariff};
   const opts = {binary:app,driver:app,applicationPath:app,config:structuredClone(config),costModel,directory:join(root,'episode'),route:'chatgpt'};
   const deps = {describeBuild:()=>({application_assets_sha256:sha('{}')}),
-    validateConfiguration:()=>({valid:true}),
+    admitConfiguration:fixtureConfiguration,validateConfiguration:()=>({valid:true}),
     exportSources:()=>({lossy:'sliced loss',adequate:'private reference program',study:studyAssets})};
   const preparing = prepareInterfaceRepair(opts,deps);
   costModel.output_per_million = 5;
@@ -125,7 +164,7 @@ test('a frozen episode isolates all snapshots and retains an unsuccessful author
   const dispatch = {...opts,chatgptAccount:'fixture'};
   await assert.rejects(runInterfaceRepair(alias,dispatch,{validateCredentials:(binary,args)=>{
     assert.equal(binary,opts.binary);
-    assert.deepEqual(args,['validate','--config',condition.author.config,'--chatgpt-account','fixture']);
+    assert.deepEqual(args,['--config',condition.author.config,'--chatgpt-account','fixture']);
     throw new Error('local credential unavailable');
   }}),/local credential unavailable/);
   assert.equal(existsSync(join(opts.directory,'run')),false);
@@ -166,6 +205,11 @@ test('a frozen episode isolates all snapshots and retains an unsuccessful author
   const packagedOpts = {...opts,directory:join(root,'packaged-episode')};
   await assert.rejects(packaged.prepareInterfaceRepair(packagedOpts,deps),/Loaded evaluator differs from its source/);
   await writeFile(oracle,original);
+  const helper = join(evaluatorDirectory,'../../test/support/stdio-client.mts');
+  const helperSource = await readFile(helper,'utf8');
+  await writeFile(helper,helperSource+'\nexport const changedHelper = true;\n');
+  await assert.rejects(packaged.prepareInterfaceRepair(packagedOpts,deps),/Loaded evaluator differs from its source: .*stdio-client\.mts/);
+  await writeFile(helper,helperSource);
   const packagedPlan = await packaged.prepareInterfaceRepair(packagedOpts,deps);
   assert.equal(packagedPlan.identities.repository_head,null);
   assert.equal(packagedPlan.identities.loaded_evaluator['interface_repair.mjs'],sha(original));
@@ -183,6 +227,10 @@ test('unstarted and timed out cases prevent an all-cases claim, irrespective of 
   assert.equal(measured.all_cases_completed,false);
   assert.equal(measured.supported_answers,1);
   assert.equal(measured.all_cases_supported,false);
+  assert.equal(measured.cases[1].initial_presentation_confirmed,null);
+  assert.equal(measured.cases[1].exposed_computed,null);
+  assert.equal(measured.cases[2].initial_presentation_confirmed,false);
+  assert.equal(measured.cases[2].exposed_computed,false);
   assert.equal(measured.end_to_end_resources.physical_attempts,null);
   assert.equal(measured.end_to_end_resources.monetary_cost,null);
 });
@@ -228,7 +276,7 @@ test('one exhausted condition preserves every later condition allowance', async 
     route:'api-key',seconds:1,study:'comparison'};
   const plan = await prepareInterfaceRepair(opts,{
     describeBuild:()=>({application_assets_sha256:sha('{}')}),
-    validateConfiguration:()=>({valid:true}),exportSources:()=>({lossy:'lossy',adequate:'adequate',study:studyAssets})
+    admitConfiguration:fixtureConfiguration,validateConfiguration:()=>({valid:true}),exportSources:()=>({lossy:'lossy',adequate:'adequate',study:studyAssets})
   });
   opts.authorizeInference = true;
   await assert.rejects(runInterfaceRepair(opts.directory,opts),/one inference source/);
@@ -272,7 +320,7 @@ test('a nested diagnostic survives condition and campaign publication with its t
   await writeFile(applicationPath,'{}');
   const opts = {binary:applicationPath,driver:applicationPath,applicationPath,config,directory:join(root,'episode')};
   await prepareInterfaceRepair(opts,{describeBuild:()=>({application_assets_sha256:sha('{}')}),
-    validateConfiguration:()=>({valid:true}),exportSources:()=>({lossy:'lossy',adequate:'adequate',study:studyAssets})});
+    admitConfiguration:fixtureConfiguration,validateConfiguration:()=>({valid:true}),exportSources:()=>({lossy:'lossy',adequate:'adequate',study:studyAssets})});
   let payload = 'retained';
   for (let i=0;i<6000;i++) payload=[payload];
   const {results} = await runInterfaceRepair(opts.directory,{...opts,authorizeInference:true,credential:'fixture'},{
