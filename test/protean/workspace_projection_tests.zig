@@ -170,6 +170,7 @@ test "projection owner authenticates observations schemas completion and result 
     var f: Fixture = undefined;
     try f.init();
     defer f.deinit();
+    const first_request = f.prepared.request;
     const program = try build(&f, .projected);
     const consumer = try f.consumer();
     const valid = try project(&f, program, consumer);
@@ -199,7 +200,54 @@ test "projection owner authenticates observations schemas completion and result 
     const impure = try project(&f, try build(&f, .impure), consumer);
     try rejectAction(&f, impure.result, "ImpureSlice");
     try assertPrepared(&f, valid.result);
+    try rejectLateViewAsInitial(&f, first_request);
     try presentationBoundary(&f, valid.result);
+}
+
+fn rejectLateViewAsInitial(f: *Fixture, first: t.P.AdaptiveRequest) !void {
+    const projection = struct {
+        input: t.P.AdaptiveRequest,
+
+        pub fn run(self: @This(), ctx: native.registry.ProjectionContext) ![]u8 {
+            return native.adaptive_responses.Adapter(t.P).prepare(
+                ctx,
+                try contracts.encodeOwned(t.P.AdaptiveRequest, ctx.allocator, self.input),
+            );
+        }
+    };
+    var task = try f.service.task(f.permanent, f.task);
+    defer task.deinit();
+    const binding: native.registry.ProjectionBinding = .{
+        .task = f.task,
+        .tenant = f.profile.authority.tenant,
+        .profile = f.profile.bytes,
+        .application = f.application.image_identity,
+        .resources = task.value.resources.items,
+        .consumer_cut = .{
+            .event_watermark = task.value.event_high,
+            .controller = task.value.controller,
+            .controller_epoch = task.value.controller_epoch,
+            .next_message = task.value.next_message,
+        },
+    };
+    var input = first;
+    input.plan.research = f.prepared.request.plan.research.?;
+    input.plan.research.?.selected_at = 0;
+    try std.testing.expectError(error.InvalidConsumer, f.namespace.store.project(
+        []u8,
+        f.permanent,
+        f.handlers,
+        binding,
+        projection{ .input = input },
+    ));
+    input.plan.research.?.selected_at = 1;
+    try std.testing.expectError(error.InvalidContext, f.namespace.store.project(
+        []u8,
+        f.permanent,
+        f.handlers,
+        binding,
+        projection{ .input = input },
+    ));
 }
 
 fn selectionOperation(f: *Fixture, selected: wc.Ref) ![]const u8 {

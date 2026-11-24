@@ -25,7 +25,32 @@ pub const State = struct {
     provider: native.responses.Environment,
     selection: ?*native.siwc.Selection = null,
     offline: bool,
+    initial_selection: ?struct {
+        task: [16]u8,
+        view: ?contracts.workspace.Ref = null,
+        program: ?contracts.workspace.Ref = null,
+        result: ?contracts.workspace.Ref = null,
+    } = null,
 };
+pub fn studyDeclarations() [handlers.len]native.Declaration {
+    var declarations = handlers;
+    for (&declarations) |*declaration| {
+        switch (declaration.controller_import orelse continue) {
+            .workspace => declaration.* = native.registry.controllerImport(
+                .workspace,
+                workspace.initialDeclaration(),
+            ),
+            .task_view => declaration.* = native.registry.controllerImport(.task_view, native.leaf(
+                void,
+                t.StudyBindings,
+                .{ .identity = t.bindings_identity, .resource_role = "snapshot" },
+                studyBindings,
+            )),
+            else => {},
+        }
+    }
+    return declarations;
+}
 pub fn release(value: *anyopaque) void {
     const owner: *State = @ptrCast(@alignCast(value));
     if (owner.selection) |selection| selection.deinit();
@@ -72,6 +97,22 @@ fn state(ctx: native.Context) !*const State {
         &value.profile_identity,
     )) return error.IncompatibleProfile;
     return value;
+}
+fn studyBindings(ctx: native.Context, _: void) !t.StudyBindings {
+    const frozen = try state(ctx);
+    const initial = if (frozen.initial_selection) |setup|
+        if (std.mem.eql(u8, ctx.task_id, &std.fmt.bytesToHex(setup.task, .lower))) setup else null
+    else
+        null;
+    return .{
+        .task_view = try bindings(ctx, {}),
+        .observe_initial_consumer = initial != null,
+        .initial_projection = if (initial) |setup| if (setup.view) |view| .{
+            .view = view,
+            .program = setup.program orelse return error.InvalidProjection,
+            .result = setup.result orelse return error.InvalidProjection,
+        } else null else null,
+    };
 }
 fn bindings(ctx: native.Context, _: void) !t.Bindings {
     const frozen = try state(ctx);
@@ -316,6 +357,41 @@ pub fn configure(
     return admission.finish();
 }
 
+pub fn readConfiguration(
+    a: std.mem.Allocator,
+    io: std.Io,
+    path: []const u8,
+    roots: ?native.configuration.ProtectedRoots,
+) !struct { parsed: std.json.Parsed(native.json.Value), value: t.ConfigurationV3 } {
+    const bytes = try native.configuration.readProtectedFile(
+        a,
+        io,
+        path,
+        null,
+        false,
+        roots,
+    );
+    var parsed = try native.json.parse(a, bytes, .{
+        .bytes = bytes.len,
+        .tokens = bytes.len,
+        .members = bytes.len,
+    });
+    if (parsed.value == .object and !parsed.value.object.contains("semantic_construction"))
+        try native.json.put(a, &parsed.value, "semantic_construction", .null);
+    if (parsed.value == .object) if (parsed.value.object.getPtr("tools")) |tools| {
+        if (tools.* == .object and !tools.object.contains(
+            "reconstruct",
+        )) try native.json.put(a, tools, "reconstruct", .{ .bool = false });
+    };
+    const value = try native.values.fromJson(t.ConfigurationV3, a, parsed.value);
+    if (!std.mem.eql(
+        u8,
+        value.schema.bytes,
+        "adaptive-agent.configuration.v3",
+    )) return error.InvalidConfiguration;
+    return .{ .parsed = parsed, .value = value };
+}
+
 const ConfigurationAdmission = struct {
     a: std.mem.Allocator,
     io: std.Io,
@@ -396,32 +472,9 @@ const ConfigurationAdmission = struct {
 
     fn loadConfiguration(s: *ConfigurationAdmission) !void {
         if (s.options.config_path) |path| {
-            const bytes = try native.configuration.readProtectedFile(
-                s.a,
-                s.io,
-                path,
-                null,
-                false,
-                s.protected_roots,
-            );
-            var parsed = try native.json.parse(s.a, bytes, .{
-                .bytes = bytes.len,
-                .tokens = bytes.len,
-                .members = bytes.len,
-            });
-            if (parsed.value == .object and !parsed.value.object.contains("semantic_construction"))
-                try native.json.put(s.a, &parsed.value, "semantic_construction", .null);
-            if (parsed.value == .object) if (parsed.value.object.getPtr("tools")) |tools| {
-                if (tools.* == .object and !tools.object.contains(
-                    "reconstruct",
-                )) try native.json.put(s.a, tools, "reconstruct", .{ .bool = false });
-            };
-            const value = try native.values.fromJson(t.ConfigurationV3, s.a, parsed.value);
-            if (!std.mem.eql(
-                u8,
-                value.schema.bytes,
-                "adaptive-agent.configuration.v3",
-            )) return error.InvalidConfiguration;
+            const admitted = try readConfiguration(s.a, s.io, path, s.protected_roots);
+            var parsed = admitted.parsed;
+            const value = admitted.value;
             s.config = value.adaptive;
             s.tool_config = value.tools;
             s.semantic_config = value.semantic_construction;

@@ -5,6 +5,48 @@ authorization and adjudicating its results. Deterministic fixtures
 establish available choices and runtime behavior; their scripted actions are not
 evidence that a model independently discovered a useful computation or pivot.
 
+## Directed interface repair
+
+The opt-in `interface-repair` suite tests whether a model can replace an executable presentation that loses a distinction required to classify a finite scan. The author sees a complete scan and a partial scan that collide under the supplied Boolean. It can inspect the executable seed, build an ordinary source program, run it on the original observations, and select the result into a subsequent model request.
+
+Build the product and private driver after the [repository setup](../../README.md).
+
+```sh
+zig build protean recurrence-driver check-recurrence-driver check-native-owner-adaptive -Doptimize=safe
+node --test test/protean/interface_repair*.test.mjs
+```
+
+Prepare one private episode using an operator-approved configuration with an initial Astra profile and explicit build and run permissions. The private driver reads the original configuration with the product’s configuration reader and checks the selected profile, its approved efforts, and the provider route before the runner freezes a single effort. Preparation makes zero provider calls. Use a new output directory for each plan. The example freezes the ChatGPT account route. When using a custom local account directory, pass the same `--siwc-auth-dir PATH` during preparation and execution. For a credential file, prepare with `--provider-route api-key` and run with `--credential-file PATH`.
+
+```sh
+node tools/evaluation/workspace.mjs prepare --suite interface-repair --study episode \
+  --config /private/approved-astra.json --provider-route chatgpt \
+  --binary zig-out/bin/protean --driver zig-out/bin/protean-recurrence-driver \
+  --application zig-out/protean/adaptive/application.json \
+  --out /private/interface-repair-episode --seconds 600
+
+node tools/evaluation/workspace.mjs run --plan /private/interface-repair-episode \
+  --binary zig-out/bin/protean --driver zig-out/bin/protean-recurrence-driver \
+  --application zig-out/protean/adaptive/application.json \
+  --authorize-inference --chatgpt-account ACCOUNT
+```
+
+Each episode freezes the executable slice, reference source, corpus, independent expected outcomes, profile, effort, route, program and evaluator identities. Only the designated case files enter each task snapshot. The adequate control can inspect its supplied projector. Source acquisition and explanation of conclusions use the original declaration and member bytes.
+
+Preparation verifies two application images offline. The `--application` file identifies the ordinary product. The private driver supplies a checked study controller that can select the initial projection before the first model request. Preparation exports a task archive from each image and checks that both name the driver executable recorded in the plan. The plan records both image identities. All four conditions run with the same study image, and the runner checks its identity against each task archive.
+
+The author nominates one admitted program in its terminal report. The evaluator binds that nomination to the observed model build and checks construction, canonical execution, selection and confirmed exposure separately. A model build that reproduces the supplied executable still counts as an attempt. It earns no replacement credit. The evaluator rebuilds the frozen source under a fresh task owner for each transfer and checks executable and schema identities. A same-consumer pair tests whether the candidate retains the known coverage distinction. For an unfamiliar payload schema, a supported interpretation can require manual adjudication. The private task report retains the presented value, schema, request identity, citation and independent expected facts for that judgment.
+
+The coverage-pair result concerns the complete and partial scans. A broader repair verdict requires a supported decision using the authored result on each tested transfer. The case table shows whether the cited view independently supports the answer and whether its use met the study conditions. Ordinary evidence access is recorded separately. When raw evidence establishes an answer but a cited unfamiliar projection still needs interpretation, the JSON case record flags it for adjudication. A timed-out replay or an answer supported only by ordinary evidence leaves the broader verdict open. The report lists cases that never started and preserves successful decisions on the other cases.
+
+Each planned condition gets its own `--seconds` allowance covering setup, authoring, diagnostic replay and ten fresh downstream decisions. Work stops at expiry. The enclosing campaign reserves one additional minute per condition for process closure and post-expiry archive measurement. A failed or absent nomination stays in the report, including its costs and any subsequent ordinary-evidence answers. A candidate rejected during transfer gets a separate replay result.
+
+The resource totals include builds issued during setup and replay. The report gives elapsed time for those build commands and leaves total compiler time unknown when the compiler provides no separate measurement. A captured provider error still counts as a physical attempt. The evaluator requires evidence of model output before crediting exposure to a selected result.
+
+Run a frozen plan from its original preparation directory. The runner starts the native product with the selected credentials before reserving the run directory. For the ChatGPT route, startup checks local account registration. After correcting a local admission error, retry the same frozen plan. A filesystem alias to that directory is supported. Inspect `run/results.md` and `run/results.json` alongside each private task report for decisions, fallback, unknown delivery, missing usage and unstarted cases. The final `run/timing.json` measures from plan validation through publication of both result files and measurement of their storage. Its charge calculation covers observed inference, elapsed host time, and subsequent retention of the frozen inputs and the campaign's run output present at that measurement. Complete task archives and provider captures belong in private storage. Raw request bytes and token counts are reported separately. Monetary comparisons require a frozen deployment tariff supplied via `--cost-model`.
+
+For a separate matched study, prepare `--study comparison --repetitions N` in a new directory. The arm order rotates across repetitions. Each repetition compares ordinary evidence, the selected lossy Boolean, the supplied adequate projector, and the authored repair on the same ten cases. Decisions share an authored candidate within a repetition. Count independent construction attempts across repetitions when assessing reliability.
+
 ## Recurring release investigations
 
 The [2026-11-07 comparison](results/recurrence-2026-11-07.md) reports measured

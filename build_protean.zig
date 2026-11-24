@@ -144,6 +144,9 @@ const BuildGraph = struct {
     sqlite_source: std.Build.LazyPath = undefined,
     adaptive_image: std.Build.LazyPath = undefined,
     adaptive_application: std.Build.LazyPath = undefined,
+    study_image: std.Build.LazyPath = undefined,
+    study_application: std.Build.LazyPath = undefined,
+    study_manifest: std.Build.LazyPath = undefined,
     runtime_source: std.Build.LazyPath = undefined,
     data: *std.Build.Module = undefined,
     horos: *std.Build.Module = undefined,
@@ -520,6 +523,15 @@ const BuildGraph = struct {
         );
         emitter_module.addImport("definition", adaptive_definition);
         emitter_module.addImport("application_types", adaptive_types);
+        const study = s.g.module("tools/evaluation/interface_repair_emit.zig");
+        study.addImport("emitter", emitter_module);
+        study.addImport("definition", adaptive_definition);
+        study.addImport("application_types", adaptive_types);
+        const study_emitter = s.g.emitter("protean-study-assets", study);
+        if (linuxX86(s.b.graph.host)) study_emitter.use_llvm = false;
+        const study_assets = s.b.addRunArtifact(study_emitter);
+        s.study_image = study_assets.addOutputFileArg2("program.bpi3", .{});
+        s.study_application = study_assets.addOutputFileArg2("application.json", .{});
         const adaptive_emitter = s.g.emitter("protean-assets", emitter_module);
         // Match the public builder's backend for this build-time authoring tool.
         // The emitted image is independently compared with the installed product.
@@ -1083,6 +1095,18 @@ const BuildGraph = struct {
             .clang_inputs = s.clang_inputs,
             .native_direct = s.native_direct,
         };
+        s.study_manifest = @import("build_native.zig").createManifest(
+            s.b,
+            native_modules,
+            "protean-study",
+            .{
+                .image = s.study_image,
+                .application = s.study_application,
+                .types = s.b.path("examples/adaptive/types.zig"),
+            },
+            s.public_environment.resolved_target.?,
+            s.public_environment.optimize.?,
+        );
         s.adaptive_product = @import(
             "build_native.zig",
         ).addWithModules(s.b, native_modules, .{
@@ -1103,10 +1127,41 @@ const BuildGraph = struct {
         s.native_executable.dependOn(adaptive_reference);
     }
 
+    fn repairSources(
+        s: *BuildGraph,
+        native: *std.Build.Module,
+        example: *std.Build.Module,
+    ) *std.Build.Module {
+        const module = s.b.createModule(.{
+            .root_source_file = s.b.path("tools/evaluation/interface_repair_sources.zig"),
+        });
+        module.addImport("projection_example", example);
+        module.addImport("protean_native", native);
+        module.addImport("protean_contracts", native.import_table.get("protean_contracts").?);
+        module.addImport("horos", native.import_table.get("horos").?);
+        return module;
+    }
+
+    fn studyAssets(s: *BuildGraph, module: *std.Build.Module) void {
+        module.addAnonymousImport("study_image", .{ .root_source_file = s.study_image });
+        module.addAnonymousImport("study_application", .{
+            .root_source_file = s.study_application,
+        });
+    }
+
     fn recurrenceDriver(s: *BuildGraph) void {
         const root = s.b.allocator.create(std.Build.Module) catch @panic("out of memory");
         root.init(s.b, .{ .existing = s.adaptive_product.executable.root_module });
         root.import_table = root.import_table.clone(s.b.allocator) catch @panic("out of memory");
+        s.studyAssets(root);
+        root.addAnonymousImport("study_manifest", .{ .root_source_file = s.study_manifest });
+        const example = s.b.createModule(.{
+            .root_source_file = s.b.path("examples/adaptive/projection_example.zig"),
+        });
+        example.addImport("horos", s.native_horos);
+        example.addImport("protean_contracts", s.native_contracts);
+        example.addImport("protean_native", s.public_environment);
+        root.addImport("interface_repair_sources", s.repairSources(s.public_environment, example));
         const crash_backend: ?bool = if (linuxX86(s.b.graph.host)) s.optimize != .debug else null;
         const shared = s.checked_environment == s.public_environment and
             s.adaptive_product.executable.use_llvm == crash_backend;
@@ -1141,10 +1196,16 @@ const BuildGraph = struct {
         );
         driver.dependOn(&install.step);
         driver.dependOn(s.adaptive_image_step);
+        s.recurrenceDriverChecks(executable);
+    }
+
+    fn recurrenceDriverChecks(s: *BuildGraph, executable: *std.Build.Step.Compile) void {
         const check = nativeCheckCommand(s.b);
+        const product = s.adaptive_product.executable.getEmittedBin();
         check.addArgs(&.{ "node", "test/protean/recurrence_driver.mjs" });
         check.addFileArg2(executable.getEmittedBin(), .{ .make_absolute = true });
         check.addFileArg2(s.adaptive_application, .{ .make_absolute = true });
+        check.addFileArg2(product, .{ .make_absolute = true });
         if (s.native_direct) s.directHashCheck(&check.step);
         s.b.step("check-recurrence-driver", "Check sealed capture and external crash recovery")
             .dependOn(&check.step);
@@ -1157,6 +1218,10 @@ const BuildGraph = struct {
             "test/protean/recurrence_delivery.test.mjs",
             "test/protean/recurrence_online.test.mjs",
             "test/protean/request_profile.test.mjs",
+            "test/protean/interface_repair.test.mjs",
+            "test/protean/interface_repair_campaign.test.mjs",
+            "test/protean/interface_repair_task.test.mjs",
+            "test/protean/interface_repair_trace.test.mjs",
         });
         s.native_owner_support.dependOn(&recurrence.step);
     }
@@ -1301,6 +1366,10 @@ const BuildGraph = struct {
             s.native_graph.module("examples/adaptive/projection_example.zig");
         projection_example.addImport("protean_native", s.checked_environment);
         s.native_suite.addImport("projection_example", projection_example);
+        s.native_suite.addImport(
+            "interface_repair_sources",
+            s.repairSources(s.checked_environment, projection_example),
+        );
         s.native_suite.addAnonymousImport(
             "adaptive_image",
             .{ .root_source_file = s.adaptive_image },
@@ -1308,6 +1377,7 @@ const BuildGraph = struct {
         s.native_suite.addAnonymousImport("adaptive_application", .{
             .root_source_file = s.adaptive_application,
         });
+        s.studyAssets(s.native_suite);
         const native_asset_writer = s.native_graph.module("tools/native/emit.zig");
         s.native_suite.addImport("native_asset_writer", native_asset_writer);
     }
@@ -1328,6 +1398,8 @@ const BuildGraph = struct {
                 );
                 _ = suite.import_table.swapRemove("adaptive_image");
                 _ = suite.import_table.swapRemove("adaptive_application");
+                _ = suite.import_table.swapRemove("study_image");
+                _ = suite.import_table.swapRemove("study_application");
             }
             const checks = s.b.step(
                 "check-native-owner-" ++ group[0],

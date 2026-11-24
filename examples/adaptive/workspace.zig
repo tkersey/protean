@@ -10,22 +10,57 @@ const Command = @FieldType(t.WorkspaceRequest, "action");
 fn authorize(ctx: native.registry.ProjectionContext, bytes: []const u8) ![]u8 {
     var request = try contracts.decodeOwned(t.WorkspaceRequest, ctx.allocator, bytes);
     defer request.deinit();
-    const action: t.Action = switch (request.value.action) {
+    return authorizeModelRequest(ctx, request.value);
+}
+fn initialAuthorize(ctx: native.registry.ProjectionContext, bytes: []const u8) ![]u8 {
+    var request = try contracts.decodeOwned(t.StudyWorkspaceRequest, ctx.allocator, bytes);
+    defer request.deinit();
+    return switch (request.value) {
+        .model => |value| authorizeModelRequest(ctx, value),
+        .initial_consumer => |input| initialInspection(ctx, input),
+    };
+}
+fn initialInspection(ctx: native.registry.ProjectionContext, input: t.Preparation) ![]u8 {
+    const source = ctx.root_workspace_request orelse return error.Unauthorized;
+    const app = ctx.application orelse return error.Unauthorized;
+    const protocol = @import("horos_data").invocation;
+    const bytes = try ctx.object(source.request, std.math.maxInt(usize));
+    var invoked = try protocol.decode(protocol.Request, ctx.allocator, bytes);
+    defer invoked.deinit();
+    if (!std.meta.eql(invoked.value.binding.program_identity, app)) return error.Unauthorized;
+    const submitted = try ctx.object(source.input, std.math.maxInt(usize));
+    var task = try contracts.decodeOwned(t.Input, ctx.allocator, submitted);
+    defer task.deinit();
+    if (!std.mem.eql(u8, task.value.task.bytes, input.state.task.bytes))
+        return error.InvalidConsumer;
+    return contracts.encodeOwned(native.workspace.Authorized, ctx.allocator, .{
+        .command = .{ .context = .{ .inspect = .{
+            .page = .{},
+            .consumer = .{ .target = .{ .controller = .{} } },
+        } } },
+        .consumer = try @import("context.zig").initialInterface(ctx, input, source.request),
+    });
+}
+fn authorizeModelRequest(
+    ctx: native.registry.ProjectionContext,
+    request: t.WorkspaceRequest,
+) ![]u8 {
+    const action: t.Action = switch (request.action) {
         .program => |v| .{ .program = .{ .command = v } },
         .work => |v| .{ .work = .{ .command = v } },
         .context => |v| .{ .context = .{ .command = v } },
         .placement => |v| .{ .placement = .{ .command = v } },
     };
-    try work.admitAction(ctx, request.value.context, request.value.call_id, action);
+    try work.admitAction(ctx, request.context, request.call_id, action);
     // Descriptions and retained observations grant no new execution. Mutations
     // retain the user's explicit construction/execution permission separately.
-    const command = request.value.action;
+    const command = request.action;
     const catalog = try authorizeCatalog(ctx, command);
     const snapshot = try authorizeSnapshot(ctx, command);
     const model = try authorizeModel(ctx, command);
     const input = try authorizeInput(ctx, command);
     const consumer = if (needsConsumer(command))
-        try native.adaptive_consumer.Protection(t.P).observe(ctx, request.value.context)
+        try native.adaptive_consumer.Protection(t.P).observe(ctx, request.context)
     else
         null;
     return contracts.encodeOwned(native.workspace.Authorized, ctx.allocator, .{
@@ -62,6 +97,16 @@ pub fn declaration() native.Declaration {
             }
         }.schema,
     };
+}
+pub fn initialDeclaration() native.Declaration {
+    var selected = declaration();
+    selected.workspace = initialAuthorize;
+    selected.payload_schema = struct {
+        fn schema(a: std.mem.Allocator) ![]u8 {
+            return native.values.schemaBytes(t.StudyWorkspaceRequest, a);
+        }
+    }.schema;
+    return selected;
 }
 
 fn authorizeCatalog(

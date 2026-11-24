@@ -241,6 +241,11 @@ of every distinct member of the known domain at the same identity and revision;
 duplicate visits cannot fill a missing member. These are authored computations,
 not native semantic certification or evidence of live-model efficacy.
 
+The [directed interface-repair evaluation](../tools/evaluation/README.md#directed-interface-repair)
+starts from that Boolean collision, lets a model construct and select a replacement,
+and tests the frozen program on ten fresh scans. Its reports bind selection to
+actual prepared requests and measure supported downstream decisions and costs.
+
 ## Semantic source, observations and construction
 
 These operations compose through the same program, work and context owners.

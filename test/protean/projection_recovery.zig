@@ -18,6 +18,7 @@ pub const Options = struct {
     begin: bool = true,
     reconstruct: bool = false,
     chatgpt_plan: bool = false,
+    study_root: bool = false,
 };
 
 pub const Fixture = struct {
@@ -30,6 +31,7 @@ pub const Fixture = struct {
     path: []const u8,
     assets: native.discovery.Assets,
     handlers: native.Registry,
+    study_handlers: ?native.Registry,
     application: native.discovery.Application,
     profile: native.tasks.Profile,
     namespace: native.Namespace,
@@ -57,16 +59,8 @@ pub const Fixture = struct {
         const length = try self.temporary.dir.realPath(self.io, &buffer);
         self.directory = try self.permanent.dupe(u8, buffer[0..length]);
         self.path = try std.fmt.allocPrint(self.permanent, "{s}/state", .{self.directory});
-        self.assets = try recovery.recoveryAssets(self.a, self.permanent);
-        self.handlers = try recovery.workspaceRecoveryHandlers(self.a);
-        errdefer self.handlers.deinit();
-        self.application = try native.discovery.Application.init(
-            t,
-            self.a,
-            self.assets,
-            self.handlers,
-        );
-        errdefer self.application.deinit();
+        try self.openApplication(options.study_root);
+        errdefer self.closeApplication();
         const configured = try configure(self, options);
         errdefer if (configured.environment) |owner| environment.release(owner);
         const grants = try self.permanent.alloc(native.registry.Grant, self.handlers.entries.len);
@@ -107,6 +101,36 @@ pub const Fixture = struct {
         if (options.begin) try self.next();
     }
 
+    fn openApplication(self: *Fixture, study_root: bool) !void {
+        self.assets = if (study_root)
+            try studyAssets(self.permanent)
+        else
+            try recovery.recoveryAssets(self.a, self.permanent);
+        self.handlers = try recovery.workspaceRecoveryHandlers(self.a);
+        errdefer self.handlers.deinit();
+        self.study_handlers = if (study_root)
+            try native.Registry.init(self.a, &environment.studyDeclarations())
+        else
+            null;
+        errdefer if (self.study_handlers) |*handlers| handlers.deinit();
+        self.application = try native.discovery.Application.init(
+            t,
+            self.a,
+            self.assets,
+            self.study_handlers orelse self.handlers,
+        );
+        if (self.study_handlers) |root| self.handlers.admitted_root = .{
+            .image = self.application.image_identity,
+            .entries = root.entries,
+        };
+    }
+
+    fn closeApplication(self: *Fixture) void {
+        self.application.deinit();
+        if (self.study_handlers) |*handlers| handlers.deinit();
+        self.handlers.deinit();
+    }
+
     pub fn deinit(self: *Fixture) void {
         if (self.live) {
             if (self.service.work) |work| cleanup(
@@ -117,8 +141,7 @@ pub const Fixture = struct {
             cleanup("projection namespace.close", self.namespace.close());
         }
         if (self.profile.environment) |owner| environment.release(owner);
-        self.application.deinit();
-        self.handlers.deinit();
+        self.closeApplication();
         self.temporary.cleanup();
         self.arena.deinit();
         self.* = undefined;
@@ -1192,4 +1215,134 @@ fn planResponse(a: std.mem.Allocator, body: []const u8, index: u64) ![]const u8 
         try native.json.canonical(a, terminal),
     });
     return events.toOwnedSlice();
+}
+
+test "directed repair admission exposes only the executable lossy dependency closure" {
+    const sources = @import("interface_repair_sources");
+    const a = std.testing.allocator;
+    const sliced = try sources.seed(a, .lossy);
+    defer a.free(sliced);
+    try sources.checkLossy(a, sliced);
+    const unsliced = try example.source(a, .bad_projector);
+    defer a.free(unsliced);
+    try std.testing.expectError(error.PrivateClassifierDependency, sources.checkLossy(a, unsliced));
+    var diagnostic: native.program_construction.Diagnostic = .{};
+    var compiled = try native.program_construction.build(a, sliced, null, &diagnostic);
+    defer compiled.deinit();
+    try std.testing.expectEqual(.complete, diagnostic.phase);
+}
+
+test "directed repair distinguishes observable computed data from hidden payload differences" {
+    const sources = @import("interface_repair_sources");
+    const a = std.testing.allocator;
+    const Result = wc.ProjectionResult(u64);
+    const schema = try native.values.schemaBytes(Result, a);
+    defer a.free(schema);
+    const consumer: wc.Ref = .{ .kind = .observation, .id = .{ .bytes = "observed consumer" } };
+    for ([_][]const wc.PresentationBlock{ &.{}, &.{.{ .computed = .{} }} }) |blocks| {
+        for ([_]u64{ 1, 2 }) |payload| {
+            const result = try contracts.encodeOwned(Result, a, .{
+                .proposal = .{ .consumer = consumer, .blocks = .{ .items = blocks } },
+                .value = payload,
+            });
+            defer a.free(result);
+            if (blocks.len == 0) {
+                try std.testing.expectError(
+                    error.ProjectionResultRejected,
+                    sources.requireComputed(a, consumer, schema, result),
+                );
+            } else try sources.requireComputed(a, consumer, schema, result);
+        }
+    }
+}
+
+test "directed repair canonical inputs use acquired values and retain missing observations" {
+    const sources = @import("interface_repair_sources");
+    const Owner = struct {
+        const manifest =
+            \\{"domain":{"identity":"18446744073709551615","revision":"7","known":true,
+            \\"members":["1","2"]},"visits":[{"domain_identity":"18446744073709551615",
+            \\"domain_revision":"7","member":"1","path":"r-a"},{"domain_identity":"44",
+            \\"domain_revision":"6","member":"2","path":"r-b"}]}
+        ;
+        observed: []const u8,
+        failed: bool = false,
+        pub fn acquireFile(self: *@This(), path: []const u8) !?sources.Acquired {
+            if (std.mem.eql(u8, path, "r-b")) {
+                self.failed = true;
+                return null;
+            }
+            const bytes = if (std.mem.eql(u8, path, "scan.json")) manifest else self.observed;
+            return .{ .reference = .{ .kind = .value, .id = .{ .bytes = path } }, .bytes = bytes };
+        }
+    };
+    var storage: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer storage.deinit();
+    var owner: Owner = .{ .observed = "18446744073709551614" };
+    const scan = try sources.acquireScan(storage.allocator(), &owner);
+    try std.testing.expectEqual(std.math.maxInt(u64), scan.evidence.domain.identity);
+    try std.testing.expectEqual(std.math.maxInt(u64) - 1, scan.evidence.visits.items[0].observed);
+    try std.testing.expectEqual(44, scan.evidence.visits.items[1].domain_identity);
+    try std.testing.expect(!scan.evidence.visits.items[1].available and owner.failed);
+    try std.testing.expectEqualDeep(scan.sources[0], scan.evidence.visits.items[1].evidence);
+    try std.testing.expectEqualDeep(scan.sources[1], scan.evidence.visits.items[0].evidence);
+    owner.observed = "01";
+    try std.testing.expectError(
+        error.InvalidParams,
+        sources.acquireScan(storage.allocator(), &owner),
+    );
+}
+
+fn studyAssets(a: std.mem.Allocator) !native.discovery.Assets {
+    const image = @embedFile("study_image");
+    const metadata = @embedFile("study_application");
+    var admitted = try horos.data.program_image.Admitted.decode(a, image);
+    defer admitted.deinit();
+    const manifest = try @import("native_test_support.zig").ownerManifest(
+        a,
+        image,
+        admitted.identity(),
+        metadata,
+    );
+    return .{ .image = image, .application = metadata, .manifest = manifest };
+}
+
+test "ordinary controller source builds with the original imports on both admitted roots" {
+    inline for (.{
+        .{ t.Bindings, "18b947d059d351a0dabc5a0cf4853c5a3d87c18e012c8b3eb2545b9d745fa824" },
+        .{ t.WorkspaceRequest, "4c06cdb70257f4deab6a36e957e668c678ff9ebe683b8217cb3f89ed1e90801c" },
+    }) |binding| {
+        const schema = try native.values.schemaBytes(binding[0], std.testing.allocator);
+        defer std.testing.allocator.free(schema);
+        try std.testing.expectEqualStrings(
+            binding[1],
+            &std.fmt.bytesToHex(native.testing.digest(schema), .lower),
+        );
+    }
+    const metadata = @embedFile("adaptive_application");
+    var public = try native.json.parseAsset(std.testing.allocator, metadata, metadata.len);
+    defer public.deinit();
+    const controller = native.json.get(public.value, "controller").?;
+    const source = try native.json.text(native.json.get(controller, "source_records").?);
+    const identity = native.testing.digest(@embedFile("adaptive_image"));
+    for ([_]bool{ false, true }) |study| {
+        var fixture: Fixture = undefined;
+        try fixture.initOptions(.{ .reconstruct = true, .study_root = study });
+        defer fixture.deinit();
+        const a = fixture.permanent;
+        const observed = try fixture.perform(.{ .program = .{ .command = .{ .build = .{
+            .source = .{ .json_text = .{ .bytes = source } },
+            .source_kind = .source_records,
+            .exposures = .{ .items = &.{} },
+            .role = .controller,
+        } } } });
+        const program = try fixture.ref(observed, "program");
+        var built = try fixture.service.workspaceProgram(a, fixture.task, try refId(program));
+        defer built.deinit();
+        try std.testing.expectEqual(identity, built.value.description.image.digest);
+        try std.testing.expectEqual(
+            native.testing.digest(source),
+            built.value.description.source.digest,
+        );
+    }
 }

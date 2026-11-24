@@ -165,7 +165,7 @@ pub fn addWithModules(b: *std.Build, modules: Modules, options: Options) Product
     };
 }
 
-fn createManifest(
+pub fn createManifest(
     b: *std.Build,
     modules: Modules,
     name: []const u8,

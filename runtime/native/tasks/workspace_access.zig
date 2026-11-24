@@ -29,16 +29,33 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             entry: registry.Entry,
             payload: []const u8,
         ) ![]u8 {
+            return authorizeWorkspaceRequest(self, a, initial, entry, payload, null);
+        }
+        fn authorizeWorkspaceRequest(
+            self: *Self,
+            a: std.mem.Allocator,
+            initial: state.Task,
+            entry: registry.Entry,
+            payload: []const u8,
+            root_request: ?registry.RootWorkspaceRequest,
+        ) ![]u8 {
             return store(self).project([]u8, a, self.handlers, projectionBinding(
                 self,
                 initial,
             ), struct {
                 authorize: *const fn (registry.ProjectionContext, []const u8) anyerror![]u8,
                 payload: []const u8,
+                root_request: ?registry.RootWorkspaceRequest,
                 pub fn run(this: @This(), ctx: registry.ProjectionContext) ![]u8 {
-                    return this.authorize(ctx, this.payload);
+                    var scoped = ctx;
+                    scoped.root_workspace_request = this.root_request;
+                    return this.authorize(scoped, this.payload);
                 }
-            }{ .authorize = entry.declaration.workspace.?, .payload = payload });
+            }{
+                .authorize = entry.declaration.workspace.?,
+                .payload = payload,
+                .root_request = root_request,
+            });
         }
         pub fn authorizeWorkspaceOccurrence(
             self: *Self,
@@ -48,7 +65,12 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             entry: registry.Entry,
             payload: []const u8,
         ) ![]u8 {
-            const bytes = try authorizeWorkspace(self, a, initial, entry, payload);
+            const root_request = pending.work == null and pending.residual == null;
+            const source: ?registry.RootWorkspaceRequest = if (root_request)
+                .{ .request = pending.request_object, .input = initial.input }
+            else
+                null;
+            const bytes = try authorizeWorkspaceRequest(self, a, initial, entry, payload, source);
             errdefer a.free(bytes);
             var authorized = try contracts.decodeOwned(workspace.Authorized, a, bytes);
             defer authorized.deinit();

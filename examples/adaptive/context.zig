@@ -473,8 +473,44 @@ fn preparedProduct(
     };
 }
 
+pub fn initialInterface(
+    ctx: native.registry.ProjectionContext,
+    input: t.Preparation,
+    source: native.registry.ObjectReference,
+) !native.workspace.ConsumerInterface {
+    if (input.state.replay != null or input.state.selected_view != null or input.control != null or
+        input.state.model_calls != 0 or input.state.work_calls != 0 or
+        input.state.results.items.len != 0 or input.request_mode != .complete)
+        return error.InvalidConsumer;
+    const a = ctx.allocator;
+    const policy = try A.policy(a, ctx.profile);
+    var catalog = try A.catalog(ctx, policy);
+    defer catalog.deinit();
+    const control = input.state.control;
+    const profile_choice = try profile(policy, control.selection.profile_id.bytes);
+    const tools = try prepareTools(a, policy, catalog.value, control, input.offered);
+    const request = try makeRequest(ctx, input, .{
+        .state = control,
+        .results = .{ .items = &.{} },
+    }, profile_choice, policy, tools);
+    const selected = try A.bind(ctx, policy, request, catalog.value);
+    const rendered = try Adapter.Context.render(ctx, request, policy, selected, catalog.value);
+    return .{
+        .request = source,
+        .protected_identity = try native.adaptive_consumer.Protection(P).boundIdentity(
+            a,
+            request,
+            rendered.history.array.items,
+            rendered.origins.items,
+        ),
+        .model_profile = request.selection.profile_digest,
+    };
+}
+
 fn evaluate(ctx: native.registry.ProjectionContext, input: t.Preparation) !Product {
     const a = ctx.allocator;
+    if (input.state.replay == null and input.state.selected_view != null)
+        try requireInitialProgram(ctx, input.state);
     const policy = try A.policy(a, ctx.profile);
     var catalog = try A.catalog(ctx, policy);
     defer catalog.deinit();
@@ -497,6 +533,46 @@ fn evaluate(ctx: native.registry.ProjectionContext, input: t.Preparation) !Produ
     if (input.request_mode == .checked_responder_template)
         request.invocation.tools = .{ .items = &.{} };
     return preparedProduct(a, request, pending, prepared_control);
+}
+fn requireInitialProgram(ctx: native.registry.ProjectionContext, state: t.State) !void {
+    var view = (try ctx.objects.workspaceView(ctx.allocator, state.selected_view.?)) orelse
+        return error.ProjectionUnavailable;
+    defer view.deinit();
+    const projection = view.value.description.projection orelse return error.InvalidProjection;
+    if (state.evidence.items.len != 1 or state.evidence.items[0] != .workspace or
+        state.programs.items.len != 1) return error.InvalidProjection;
+    const program = state.programs.items[0];
+    const result = state.evidence.items[0].workspace;
+    if (program.kind != .program or result.kind != .value or
+        !equal(program.id.bytes, &std.fmt.bytesToHex(projection.program.digest, .lower)) or
+        !equal(result.id.bytes, &std.fmt.bytesToHex(projection.result.digest, .lower)))
+        return error.InvalidProjection;
+    const observation = try ctx.object(projection.observation, std.math.maxInt(usize));
+    var saved = try contracts.decodeOwned(
+        native.workspace.ReplyObservation,
+        ctx.allocator,
+        observation,
+    );
+    defer saved.deinit();
+    if (!std.meta.eql(saved.value.task, ctx.task) or saved.value.evidence != .read or
+        saved.value.evidence.read != .consumer or
+        !std.meta.eql(saved.value.evidence.read.consumer.interface.request, saved.value.request))
+        return error.InvalidConsumer;
+    const invoked = @import("horos_data").invocation;
+    const source = try ctx.object(saved.value.request, std.math.maxInt(usize));
+    var envelope = try invoked.decode(invoked.Request, ctx.allocator, source);
+    defer envelope.deinit();
+    var original = try contracts.decodeOwned(
+        t.StudyWorkspaceRequest,
+        ctx.allocator,
+        envelope.value.binding.payload,
+    );
+    defer original.deinit();
+    if (original.value != .initial_consumer) return error.InvalidConsumer;
+    const before = original.value.initial_consumer.state;
+    if (!equal(before.task.bytes, state.task.bytes) or
+        !try encodedEqual(ctx.allocator, P.Messages, before.messages, state.messages))
+        return error.StaleConsumer;
 }
 
 fn prepare(ctx: native.registry.ProjectionContext, bytes: []const u8) ![]u8 {

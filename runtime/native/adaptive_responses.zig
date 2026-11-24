@@ -62,38 +62,42 @@ pub fn Admission(comptime P: type) type {
                 !permitted)
                 return error.InvalidConfiguration;
             for (value.profiles.items, 0..) |entry, index| {
-                if (!identifier(
-                    entry.id.bytes,
-                ) or entry.model.bytes.len == 0 or contracts.exceeds(
-                    entry.model.bytes.len,
-                    P.representation.model_id_bytes,
-                ) or
-                    !identifier(entry.opaque_family.bytes) or entry.efforts.items.len == 0 or
-                    entry.max_output_tokens == 0 or
-                    (P.representation.provider_response_bytes != null and
-                        (entry.response_bytes == null or
-                            entry.response_bytes.? > P.representation.provider_response_bytes.?)) or
-                    (entry.effort_update and
-                        entry.reasoning_mode != .standard))
-                    return error.InvalidConfiguration;
+                try validateProfile(value.endpoint.bytes, entry);
                 for (value.profiles.items[0..index]) |earlier| if (equal(
                     earlier.id.bytes,
                     entry.id.bytes,
                 )) return error.InvalidConfiguration;
-                for (entry.efforts.items, 0..) |effort, n| {
-                    for (entry.efforts.items[0..n]) |earlier| {
-                        if (effort == earlier) return error.InvalidConfiguration;
-                    }
-                }
-                _ = try (https.Config{
-                    .endpoint = value.endpoint.bytes,
-                    .token = "validation",
-                    .request_limit = entry.request_bytes,
-                    .response_limit = entry.response_bytes,
-                    .timeout_ms = entry.timeout_ms,
-                }).validate();
             }
             return value;
+        }
+
+        pub fn validateProfile(endpoint: []const u8, entry: Profile) !void {
+            if (!identifier(
+                entry.id.bytes,
+            ) or entry.model.bytes.len == 0 or contracts.exceeds(
+                entry.model.bytes.len,
+                P.representation.model_id_bytes,
+            ) or
+                !identifier(entry.opaque_family.bytes) or entry.efforts.items.len == 0 or
+                entry.max_output_tokens == 0 or
+                (P.representation.provider_response_bytes != null and
+                    (entry.response_bytes == null or
+                        entry.response_bytes.? > P.representation.provider_response_bytes.?)) or
+                (entry.effort_update and
+                    entry.reasoning_mode != .standard))
+                return error.InvalidConfiguration;
+            for (entry.efforts.items, 0..) |effort, n| {
+                for (entry.efforts.items[0..n]) |earlier| {
+                    if (effort == earlier) return error.InvalidConfiguration;
+                }
+            }
+            _ = try (https.Config{
+                .endpoint = endpoint,
+                .token = "validation",
+                .request_limit = entry.request_bytes,
+                .response_limit = entry.response_bytes,
+                .timeout_ms = entry.timeout_ms,
+            }).validate();
         }
 
         pub fn profileDigest(a: std.mem.Allocator, profile: Profile) ![32]u8 {

@@ -14,6 +14,8 @@ import {contract} from '../../test/protean/adaptive_capture_checks.mjs';
 import {createCorpus, createOnlineCorpus, gradeReport, gradeOnlineAnswers, combineOnlineGrading,
   parseOnlineAnswer, compareCampaign, parseReport, campaignIdentity} from './recurrence.mjs';
 import {profilePreparedRequest} from './request_profile.mjs';
+import {prepareInterfaceRepair, runInterfaceRepair} from './interface_repair_campaign.mjs';
+import {strictJson} from './interface_repair.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const json = value => JSON.stringify(value, (_key, v) => typeof v === 'bigint' ? v.toString() : v, 2);
@@ -39,7 +41,7 @@ const semanticArms = {
 const option = (args, name, fallback) => { const i = args.indexOf(name); return i < 0 ? fallback : args[i + 1]; };
 const [mode, ...args] = process.argv.slice(2);
 if (import.meta.main && !['prepare', 'run'].includes(mode)) {
-  console.log('prepare --config CONFIG --out DIRECTORY [--suite workspace|runtime|reconstruction|semantic|recurrence|recurrence-online] [--repetitions 1] [--seconds 600]\nrecurrence preparation also requires --binary BINARY --driver DRIVER --application APPLICATION_JSON [--cost-model JSON]\nrun --plan DIRECTORY --binary BINARY --application APPLICATION_JSON [--driver DRIVER] --authorize-inference (--credential-file PRIVATE_FILE | --chatgpt-account ACCOUNT)');
+  console.log('prepare --config CONFIG --out DIRECTORY [--suite workspace|runtime|reconstruction|semantic|recurrence|recurrence-online|interface-repair] [--repetitions 1] [--seconds 600]\nrecurrence and interface-repair preparation also require --binary BINARY --driver DRIVER --application APPLICATION_JSON [--cost-model JSON]\ninterface-repair options: --study episode|comparison --provider-route api-key|chatgpt\nrun --plan DIRECTORY --binary BINARY --application APPLICATION_JSON [--driver DRIVER] --authorize-inference (--credential-file PRIVATE_FILE | --chatgpt-account ACCOUNT)');
   process.exit(mode === '--help' || !mode ? 0 : 2);
 }
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -99,12 +101,12 @@ function guardCosts(archive) {
   }
   return {reference, candidate};
 }
-function command(binary, args) {
+export function command(binary, args) {
   const r = spawnSync(binary, args, {encoding: 'utf8', maxBuffer: 64 << 20});
   if (r.status !== 0) throw new Error(`native command ${args[0]} failed: ${r.stderr}`);
   return JSON.parse(r.stdout);
 }
-async function bytesUnder(path) {
+export async function bytesUnder(path) {
   let bytes = 0;
   for (const item of await readdir(path, {withFileTypes: true})) {
     const file = join(path, item.name);
@@ -115,7 +117,7 @@ async function bytesUnder(path) {
 }
 const validTokenCount = value => Number.isSafeInteger(value) && value >= 0;
 
-function capturedUsage(raw) {
+export function capturedUsage(raw) {
   const bytes = new TextDecoder('utf-8', {fatal: true}).decode(raw[3]);
   if (raw[7] !== 2) return null;
   if (raw[4] === 0) return JSON.parse(bytes)?.usage;
@@ -141,6 +143,22 @@ export function physicalProviderAttempt(id, disposition, state) {
   throw new Error('Unknown occurrence state');
 }
 
+export function providerRequestBodyBytes(prepared, role, schemas, application) {
+  if (!prepared) return null;
+  try {
+    if (role === 'controller') return decodeValue(contract(application, 'AdaptivePrepared'), prepared)[2].length;
+    assert.equal(role, 'delegated');
+    const {root, types} = schemas.get('workspace_delegation');
+    const [, , , , , , , , , , model, snapshot] = types[root].product;
+    const bytes = types.length + 1;
+    const schema = {root: types.length, types: [...types, {product: [bytes, bytes, model, snapshot]}, 'bytes']};
+    return decodeValue(schema, prepared)[1].length;
+  } catch (error) {
+    if (error.code === 'ValueCapacity') return null;
+    throw error;
+  }
+}
+
 export function workspaceMetrics(archive, application) {
   const captured = contract(application, 'CapturedResponse');
   const replySchema = contract(application, 'WorkspaceReply');
@@ -150,7 +168,7 @@ export function workspaceMetrics(archive, application) {
   const captures = new Map(archive.manifest[6].filter(([kind]) => kind === 4).map(([, id, ref]) => [Buffer.from(id).toString('hex'), decodeValue(archive.schemas.get('capture'), archive.object(ref))]));
   const occurrences = new Map(archive.manifest[6].filter(([kind]) => kind === 0).map(([, id, ref]) => [Buffer.from(id).toString('hex'), decodeValue(archive.schemas.get('occurrence'), archive.object(ref))]));
   const stats = {controller: {calls: 0, input_tokens: 0, output_tokens: 0, missing_usage: 0, prepared_bytes: 0}, delegated: {calls: 0, input_tokens: 0, output_tokens: 0, missing_usage: 0, prepared_bytes: 0}, builds: 0, rejected_builds: 0, compiler_nanoseconds: 0, native_publication_nanoseconds: 0, checkpoint_publications: 0, current_checkpoint_bytes: 0, work_items: 0, result_bytes: 0, actions: [], physical_attempts: [],
-    runtime_specializations_requested: 0, runtime_switches_requested: 0, guest_views_requested: 0,
+    build_attempts: 0, runtime_specializations_requested: 0, runtime_switches_requested: 0, guest_views_requested: 0,
     controller_adoptions: 0, rejected_adoptions: 0, controller_trials: 0, conversion_publication_nanoseconds: 0,
     admitted_runtimes: 0, distinct_runtime_artifact_bytes: 0, distinct_current_runtime_capsule_bytes: 0,
     runtime_specialization_nanoseconds: null, runtime_validation_nanoseconds: null,
@@ -181,11 +199,12 @@ export function workspaceMetrics(archive, application) {
     if (observation[0].tag === 1 && observation[1].tag === 1)
       validatedCandidates.add(Buffer.from(observation[0].value[0]).toString('hex'));
   }
-  const actions = [];
+  const actions = [], buildCommands = new Map();
   // Count possible provider delivery, including unknown delivery, but exclude
   // positive non-invocation evidence. Rearming an occurrence is only permitted
   // from not_sent, so older uncaptured attempts are also known not to have run.
   for (const [id, attempt] of attempts) {
+    if (attempt[8] === 1) stats.build_attempts++;
     const role = attempt[5] === 'agent.model.invoke.v13' ? 'controller' : attempt[5] === 'protean.workspace.inference/2' ? 'delegated' : null;
     if (!role) continue;
     const capture = captures.get(id);
@@ -195,7 +214,9 @@ export function workspaceMetrics(archive, application) {
     if (attempt[7].tag === 1) count.prepared_bytes += Number(attempt[7].value[1]);
     if (!physicalProviderAttempt(id, capture?.[5], state)) continue;
     count.calls++;
-    const physical = {id, role, usage: null, capture_disposition: capture?.[5] ?? null};
+    const prepared = attempt[7].tag === 1 ? archive.object(attempt[7].value) : null;
+    const physical = {id, role, usage: null, capture_disposition: capture?.[5] ?? null,
+      request_body_bytes: providerRequestBodyBytes(prepared, role, archive.schemas, application), prepared_bytes: prepared?.length ?? null};
     stats.physical_attempts.push(physical);
     if (!capture || capture[4].tag !== 1) { count.missing_usage++; continue; }
     const raw = decodeValue(captured, archive.object(capture[4].value));
@@ -221,7 +242,10 @@ export function workspaceMetrics(archive, application) {
         const request = decodeValue(adaptivePrepared, archive.object(attempt[7].value))[1];
         if (call[4].tag === 0 && call[4].value.tag === ordinal && request[5][ordinal] &&
             request[0][4].some(tool => tool[0] === ordinal && tool[2] === call[1])) {
-          actions.push({watermark: BigInt(request[3][2]), action: {name: call[1], arguments: JSON.parse(Buffer.from(call[2]).toString())}});
+          const action = {name: call[1], arguments: JSON.parse(Buffer.from(call[2]).toString())};
+          actions.push({watermark: BigInt(request[3][2]), action});
+          if (action.name === 'program' && action.arguments.command?.tag === 'build')
+            buildCommands.set(buildCommandKey(normalized[1].value, call[0]), null);
         }
       }
     }
@@ -239,7 +263,14 @@ export function workspaceMetrics(archive, application) {
     if (name === 'work' && ['realize', 'realize_controller'].includes(command?.tag)) stats.runtime_switches_requested++;
     if (name === 'context' && command?.tag === 'materialize' && command.value?.input?.tag === 'guest_view') stats.guest_views_requested++;
   }
+  const buildOccurrences = new Set([...attempts.values()].filter(a => a[8] === 1).map(a => digestHex(a[2])));
+  stats.settled_builds = 0;
+  stats.timed_builds = 0;
   for (const [kind, id, reference] of archive.manifest[6]) {
+    if (kind === 17) {
+      const reply = decodeValue(archive.schemas.get('workspace_reply'), archive.object(reference));
+      if (reply[4].tag === 3) buildOccurrences.add(digestHex(reply[0]));
+    }
     if (kind === 18) {
       const selected = decodeValue(archive.schemas.get('workspace_runtime'), archive.object(reference));
       assert.equal(selected.length, 5);
@@ -271,9 +302,14 @@ export function workspaceMetrics(archive, application) {
     const capture = decodeValue(archive.schemas.get('capture'), archive.object(reference));
     if (attempt[8] === 1) {
       stats.builds++;
-      if (capture[6].tag !== 1) continue;
+      if (capture[5] !== 0 || capture[6].tag !== 1) continue;
       const reply = decodeValue(replySchema, resultValue(archive.object(capture[6].value[0])));
       const observation = JSON.parse(Buffer.from(reply[1]).toString());
+      const settlement = settledOccurrence(occurrences.get(digestHex(attempt[2])));
+      if (settlement && digestHex(settlement[0]) === digestHex(id) && digestHex(settlement[1]) === digestHex(capture[6].value[0][0])) {
+        stats.settled_builds++;
+        if (Number.isSafeInteger(observation.compiler_nanoseconds) && observation.compiler_nanoseconds >= 0) stats.timed_builds++;
+      }
       stats.compiler_nanoseconds += Number(observation.compiler_nanoseconds ?? 0);
       if (observation.error) stats.rejected_builds++;
       if (observation.validation === 'validated' && observation.candidate?.kind === 'candidate' &&
@@ -282,6 +318,7 @@ export function workspaceMetrics(archive, application) {
       continue;
     }
   }
+  Object.assign(stats, workspaceBuildOutcomes(archive, occurrences, buildOccurrences, buildCommands, replySchema));
   stats.distinct_runtime_artifact_bytes = [...runtimeArtifacts.values()].reduce((sum, bytes) => sum + bytes, 0);
   stats.distinct_current_runtime_capsule_bytes = [...runtimeCapsules.values()].reduce((sum, bytes) => sum + bytes, 0);
   stats.distinct_candidate_code_bytes = [...candidateCode.values()].reduce((sum, bytes) => sum + bytes, 0);
@@ -293,11 +330,64 @@ export function workspaceMetrics(archive, application) {
   return stats;
 }
 
+export function workspaceBuildOutcomes(archive, occurrences, buildOccurrences, buildCommands, replySchema) {
+  for (const occurrenceId of buildOccurrences) {
+    const occurrence = occurrences.get(occurrenceId);
+    if (!occurrence || occurrence[5].tag === 1) continue;
+    const key = workspaceBuildCommand(archive.object(occurrence[4]));
+    if (!key) continue;
+    if (!buildCommands.has(key)) buildCommands.set(key, null);
+    const settlement = settledOccurrence(occurrence);
+    if (!settlement) continue;
+    const result = archive.objects.get(digestHex(settlement[1]));
+    if (!result) continue;
+    const [requestId, bytes] = decodeEffectResult(result);
+    assert.equal(digestHex(requestId), digestHex(occurrence[2]));
+    const reply = decodeValue(replySchema, bytes);
+    if ([1, 2].includes(reply[0])) buildCommands.set(key, reply[0] === 2);
+  }
+  const outcomes = [...buildCommands.values()].filter(value => value !== null);
+  const rejected = outcomes.filter(Boolean).length;
+  return {build_commands: buildCommands.size, settled_build_commands: outcomes.length, known_rejected_build_commands: rejected,
+    rejected_build_commands: outcomes.length === buildCommands.size ? rejected : null};
+}
+
+function settledOccurrence(occurrence) {
+  const state = occurrence?.[3];
+  if (state?.tag === 4) return state.value;
+  return state?.tag === 5 && state.value.tag === 0 ? state.value.value : null;
+}
+
+function buildCommandKey(context, callId) {
+  return digestHex(context[0][0]) + '/' + callId;
+}
+
+function workspaceBuildCommand(request) {
+  assert.equal(request.subarray(0, 8).toString(), 'ABL_ERQ3');
+  assert.equal(request.readBigUInt64LE(12), BigInt(request.length - 20));
+  const effectOffset = 20 + 2 * 32;
+  let offset = effectOffset;
+  while (request[offset] & 0x80) {
+    offset++;
+    assert(offset < effectOffset + 10 && offset < request.length);
+  }
+  const fields = {root: 0, types: [{product: [1, 1, 1, 1, 2]}, 'bytes', {array: {element: 3, length: 32}}, 'u8']};
+  const [identity, schema, , payload] = decodeValue(fields, request.subarray(offset + 1));
+  if (Buffer.from(identity).toString() !== 'protean.controller/1/workspace') return null;
+  const value = decodeValue(decodeSchema(schema), payload);
+  const model = Array.isArray(value) ? value : value.tag === 0 ? value.value : null;
+  return model?.[2]?.tag === 0 && model[2].value.tag === 1 ? buildCommandKey(model[0], model[1]) : null;
+}
+
 const resultSchema = {root: 0, types: [{product: [1, 3]}, {array: {element: 2, length: 32}}, 'u8', 'bytes']};
-function resultValue(bytes) {
+export function decodeEffectResult(bytes) {
   assert.equal(bytes.subarray(0, 8).toString(), 'ABL_ERS3');
   assert.equal(bytes.readBigUInt64LE(12), BigInt(bytes.length - 20));
-  return Buffer.from(decodeValue(resultSchema, bytes.subarray(20))[1]);
+  return decodeValue(resultSchema, bytes.subarray(20));
+}
+
+function resultValue(bytes) {
+  return Buffer.from(decodeEffectResult(bytes)[1]);
 }
 
 // Return an observation even when the runner fails after a potentially paid
@@ -512,21 +602,23 @@ export class RecurrenceDelivery {
   }
 }
 
-export function recurrenceCost(report, model, usages) {
-  const result = {model_id: model.id ?? null, currency: model.currency ?? null,
-    total: null, complete: false, inference: null, host: null, storage: null, missing: []};
-  if (model.kind !== 'tariff' || model.predeclared !== true) {
-    result.missing.push('No predeclared deployment tariff.');
-    return result;
-  }
+export function tariffErrors(model) {
+  if (model?.kind !== 'tariff' || model.predeclared !== true) return ['No predeclared deployment tariff.'];
+  const missing = [];
   for (const field of ['input_per_million', 'cached_input_per_million', 'output_per_million',
     'host_per_second', 'storage_per_byte_second', 'retention_seconds']) {
-    if (!Number.isFinite(model[field]) || model[field] < 0) result.missing.push(field);
+    if (!Number.isFinite(model[field]) || model[field] < 0) missing.push(field);
   }
   if (!model.id || !model.currency || !model.provider_source || !model.deployment_source)
-    result.missing.push('Tariff identity and sources.');
+    missing.push('Tariff identity and sources.');
   if (model.host_includes_attempt_storage !== true)
-    result.missing.push('Deployment price must include storage during execution.');
+    missing.push('Deployment price must include storage during execution.');
+  return missing;
+}
+
+export function recurrenceCost(report, model, usages) {
+  const result = {model_id: model?.id ?? null, currency: model?.currency ?? null,
+    total: null, complete: false, inference: null, host: null, storage: null, missing: tariffErrors(model)};
   if (result.missing.length) return result;
   const calls = report.metrics ? report.metrics.controller.calls + report.metrics.delegated.calls : null;
   if (calls === null || calls !== usages.length) result.missing.push('Complete physical attempt inventory.');
@@ -720,7 +812,7 @@ function mergeRanges(ranges) {
   return merged;
 }
 
-function acquiredPageRanges(bytes, utf8, pages) {
+export function acquiredPageRanges(bytes, utf8, pages) {
   const spans = mergeRanges(pages), ranges = [];
   let span = 0, encoded = 1;
   for (let index = 0; index < bytes.length; index++) {
@@ -1456,7 +1548,7 @@ export async function resolveQuestion(client, taskId, question) {
     prompt_b64: bytes.toString('base64')};
 }
 
-async function readOutcome(client, taskId, result) {
+export async function readOutcome(client, taskId, result) {
   if (!result.outcome?.value_ref) return result;
   const bytes = await readArtifact(client, taskId, result.outcome.value_ref);
   result.outcome.value = JSON.parse(bytes.toString());
@@ -1721,7 +1813,18 @@ async function runRecurrence(directory, options) {
 }
 
 if (import.meta.main) {
-if (mode === 'prepare' && ['recurrence', 'recurrence-online'].includes(option(args, '--suite'))) {
+if (mode === 'prepare' && option(args, '--suite') === 'interface-repair') {
+  const directory = resolve(option(args, '--out', '')), costPath = option(args, '--cost-model');
+  const plan = await prepareInterfaceRepair({directory,
+    configPath:resolve(option(args,'--config','')), siwcAuthDir:option(args,'--siwc-auth-dir'),
+    binary:resolve(option(args, '--binary', '')), driver:resolve(option(args, '--driver', '')),
+    applicationPath:resolve(option(args, '--application', '')), study:option(args, '--study', 'episode'),
+    repetitions:Number(option(args, '--repetitions', '1')), seconds:Number(option(args, '--seconds', '600')),
+    route:option(args, '--provider-route', 'api-key'),
+    ...(costPath ? {costModel:strictJson(await readFile(resolve(costPath), 'utf8'))} : {})});
+  console.log(json({plan:join(directory,'plan.json'), study:plan.study, conditions:plan.conditions.length,
+    live_calls:0, efficacy:'unmeasured'}));
+} else if (mode === 'prepare' && ['recurrence', 'recurrence-online'].includes(option(args, '--suite'))) {
   const directory = resolve(option(args, '--out', ''));
   const costPath = option(args, '--cost-model');
   const plan = await prepareRecurrence({config: JSON.parse(await readFile(resolve(option(args, '--config', '')), 'utf8')),
@@ -1781,13 +1884,17 @@ if (mode === 'prepare' && ['recurrence', 'recurrence-online'].includes(option(ar
   await writeFile(join(directory,'plan.json'), json(plan));
   console.log(json({plan: join(directory,'plan.json'), cases: plan.cases.length, live_calls: 0, efficacy: 'unmeasured'}));
 } else {
-  assert(args.includes('--authorize-inference'), 'Live evaluation requires explicit --authorize-inference. prepare makes no provider calls.');
+  const authorizeInference = args.includes('--authorize-inference');
+  assert(authorizeInference, 'Live evaluation requires explicit --authorize-inference. prepare makes no provider calls.');
   const credential = option(args, '--credential-file'), chatgptAccount = option(args, '--chatgpt-account'),
     siwcBin = option(args, '--siwc-bin'), siwcAuthDir = option(args, '--siwc-auth-dir');
   inferenceArguments({credential, chatgptAccount, siwcBin, siwcAuthDir});
   const directory = resolve(option(args,'--plan','')), binary = resolve(option(args,'--binary','')), application = JSON.parse(await readFile(resolve(option(args,'--application','')),'utf8'));
   const plan = JSON.parse(await readFile(join(directory,'plan.json'),'utf8'));
-  if (['protean-recurrence-evaluation/1', 'protean-recurrence-evaluation/2'].includes(plan.format)) {
+  if (plan.format === 'protean-interface-repair/1') {
+    console.log(json(await runInterfaceRepair(directory,{binary, driver:resolve(option(args, '--driver', '')),
+      applicationPath:resolve(option(args, '--application', '')), authorizeInference,credential,chatgptAccount,siwcBin,siwcAuthDir})));
+  } else if (['protean-recurrence-evaluation/1', 'protean-recurrence-evaluation/2'].includes(plan.format)) {
     console.log(json(await runRecurrence(directory, {binary, driver: resolve(option(args, '--driver', '')),
       applicationPath: resolve(option(args, '--application', '')), credential, chatgptAccount, siwcBin, siwcAuthDir})));
   } else {

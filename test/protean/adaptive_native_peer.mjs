@@ -116,7 +116,11 @@ export function verifyCandidateMetrics(measuredBytes, application) {
     archive.manifest[6].push([5, id, record('attempt', [id, task, id, code, code, 'fixture.workspace', false, none, 1, none, none, none, none])],
       [4, id, record('capture', [task, id, id, code, none, 0, some([bound, [], none]), none])]);
   }
+  const unfinished = reference(Buffer.from('unfinished validation attempt'))[0];
+  archive.manifest[6].push([5, unfinished, record('attempt',
+    [unfinished, task, unfinished, code, code, 'fixture.workspace', false, none, 1, none, none, none, none])]);
   const captured = workspaceMetrics(archive, application);
+  assert.equal(captured.build_attempts, 5);
   assert.equal(captured.validated_candidates, 2);
   assert.equal(captured.unvalidated_candidates, 1);
   assert.equal(captured.builds, 4);
