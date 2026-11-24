@@ -162,7 +162,7 @@ export function workspaceMetrics(archive, application) {
   const captures = new Map(archive.manifest[6].filter(([kind]) => kind === 4).map(([, id, ref]) => [Buffer.from(id).toString('hex'), decodeValue(archive.schemas.get('capture'), archive.object(ref))]));
   const occurrences = new Map(archive.manifest[6].filter(([kind]) => kind === 0).map(([, id, ref]) => [Buffer.from(id).toString('hex'), decodeValue(archive.schemas.get('occurrence'), archive.object(ref))]));
   const stats = {controller: {calls: 0, input_tokens: 0, output_tokens: 0, missing_usage: 0, prepared_bytes: 0}, delegated: {calls: 0, input_tokens: 0, output_tokens: 0, missing_usage: 0, prepared_bytes: 0}, builds: 0, rejected_builds: 0, compiler_nanoseconds: 0, native_publication_nanoseconds: 0, checkpoint_publications: 0, current_checkpoint_bytes: 0, work_items: 0, result_bytes: 0, actions: [], physical_attempts: [],
-    runtime_specializations_requested: 0, runtime_switches_requested: 0, guest_views_requested: 0,
+    build_attempts: 0, runtime_specializations_requested: 0, runtime_switches_requested: 0, guest_views_requested: 0,
     controller_adoptions: 0, rejected_adoptions: 0, controller_trials: 0, conversion_publication_nanoseconds: 0,
     admitted_runtimes: 0, distinct_runtime_artifact_bytes: 0, distinct_current_runtime_capsule_bytes: 0,
     runtime_specialization_nanoseconds: null, runtime_validation_nanoseconds: null,
@@ -198,6 +198,7 @@ export function workspaceMetrics(archive, application) {
   // positive non-invocation evidence. Rearming an occurrence is only permitted
   // from not_sent, so older uncaptured attempts are also known not to have run.
   for (const [id, attempt] of attempts) {
+    if (attempt[8] === 1) stats.build_attempts++;
     const role = attempt[5] === 'agent.model.invoke.v13' ? 'controller' : attempt[5] === 'protean.workspace.inference/2' ? 'delegated' : null;
     if (!role) continue;
     const capture = captures.get(id);
@@ -740,7 +741,7 @@ function mergeRanges(ranges) {
   return merged;
 }
 
-function acquiredPageRanges(bytes, utf8, pages) {
+export function acquiredPageRanges(bytes, utf8, pages) {
   const spans = mergeRanges(pages), ranges = [];
   let span = 0, encoded = 1;
   for (let index = 0; index < bytes.length; index++) {
@@ -1812,7 +1813,8 @@ if (mode === 'prepare' && option(args, '--suite') === 'interface-repair') {
   await writeFile(join(directory,'plan.json'), json(plan));
   console.log(json({plan: join(directory,'plan.json'), cases: plan.cases.length, live_calls: 0, efficacy: 'unmeasured'}));
 } else {
-  assert(args.includes('--authorize-inference'), 'Live evaluation requires explicit --authorize-inference. prepare makes no provider calls.');
+  const authorizeInference = args.includes('--authorize-inference');
+  assert(authorizeInference, 'Live evaluation requires explicit --authorize-inference. prepare makes no provider calls.');
   const credential = option(args, '--credential-file'), chatgptAccount = option(args, '--chatgpt-account'),
     siwcBin = option(args, '--siwc-bin'), siwcAuthDir = option(args, '--siwc-auth-dir');
   inferenceArguments({credential, chatgptAccount, siwcBin, siwcAuthDir});
@@ -1820,7 +1822,7 @@ if (mode === 'prepare' && option(args, '--suite') === 'interface-repair') {
   const plan = JSON.parse(await readFile(join(directory,'plan.json'),'utf8'));
   if (plan.format === 'protean-interface-repair/1') {
     console.log(json(await runInterfaceRepair(directory,{binary, driver:resolve(option(args, '--driver', '')),
-      applicationPath:resolve(option(args, '--application', '')), credential,chatgptAccount,siwcBin,siwcAuthDir})));
+      applicationPath:resolve(option(args, '--application', '')), authorizeInference,credential,chatgptAccount,siwcBin,siwcAuthDir})));
   } else if (['protean-recurrence-evaluation/1', 'protean-recurrence-evaluation/2'].includes(plan.format)) {
     console.log(json(await runRecurrence(directory, {binary, driver: resolve(option(args, '--driver', '')),
       applicationPath: resolve(option(args, '--application', '')), credential, chatgptAccount, siwcBin, siwcAuthDir})));

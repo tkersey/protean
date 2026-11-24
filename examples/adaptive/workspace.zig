@@ -5,27 +5,19 @@ const contracts = @import("protean_contracts");
 const t = @import("application_types");
 const work = @import("work.zig");
 const resources = @import("tool_resources.zig");
-const Command = @FieldType(t.ModelWorkspaceRequest, "action");
+const Command = @FieldType(t.WorkspaceRequest, "action");
 
 fn authorize(ctx: native.registry.ProjectionContext, bytes: []const u8) ![]u8 {
-    return authorizeRequest(ctx, bytes, false);
+    var request = try contracts.decodeOwned(t.WorkspaceRequest, ctx.allocator, bytes);
+    defer request.deinit();
+    return authorizeModelRequest(ctx, request.value);
 }
 fn initialAuthorize(ctx: native.registry.ProjectionContext, bytes: []const u8) ![]u8 {
-    return authorizeRequest(ctx, bytes, true);
-}
-fn authorizeRequest(
-    ctx: native.registry.ProjectionContext,
-    bytes: []const u8,
-    initial: bool,
-) ![]u8 {
-    var request = try contracts.decodeOwned(t.WorkspaceRequest, ctx.allocator, bytes);
+    var request = try contracts.decodeOwned(t.StudyWorkspaceRequest, ctx.allocator, bytes);
     defer request.deinit();
     return switch (request.value) {
         .model => |value| authorizeModelRequest(ctx, value),
-        .initial_consumer => |input| if (initial)
-            initialInspection(ctx, input)
-        else
-            error.Unauthorized,
+        .initial_consumer => |input| initialInspection(ctx, input),
     };
 }
 fn initialInspection(ctx: native.registry.ProjectionContext, input: t.Preparation) ![]u8 {
@@ -51,7 +43,7 @@ fn initialInspection(ctx: native.registry.ProjectionContext, input: t.Preparatio
 }
 fn authorizeModelRequest(
     ctx: native.registry.ProjectionContext,
-    request: t.ModelWorkspaceRequest,
+    request: t.WorkspaceRequest,
 ) ![]u8 {
     const action: t.Action = switch (request.action) {
         .program => |v| .{ .program = .{ .command = v } },
@@ -109,6 +101,11 @@ pub fn declaration() native.Declaration {
 pub fn initialDeclaration() native.Declaration {
     var selected = declaration();
     selected.workspace = initialAuthorize;
+    selected.payload_schema = struct {
+        fn schema(a: std.mem.Allocator) ![]u8 {
+            return native.values.schemaBytes(t.StudyWorkspaceRequest, a);
+        }
+    }.schema;
     return selected;
 }
 

@@ -33,7 +33,11 @@ node tools/evaluation/workspace.mjs run --plan /private/interface-repair-episode
 
 Each episode freezes the executable slice, reference source, corpus, independent expected outcomes, profile, effort, route, program and evaluator identities. Only the designated case files enter each task snapshot. The adequate control can inspect its supplied projector. Source acquisition and explanation of conclusions use the original declaration and member bytes.
 
+Preparation verifies two application images offline. The `--application` file identifies the ordinary product. The private driver supplies a checked study controller that can select the initial projection before the first model request. The plan records both identities. All four conditions run with the same study image, and the runner checks its identity against each task archive.
+
 The author nominates one admitted program in its terminal report. The evaluator binds that nomination to the observed model build and checks construction, canonical execution, selection and confirmed exposure separately. It rebuilds the frozen source under a fresh task owner for each transfer and checks executable and schema identities. A same-consumer pair tests whether the candidate retains the known coverage distinction. For an unfamiliar payload schema, a supported interpretation can require manual adjudication. The private task report retains the presented value, schema, request identity, citation and independent expected facts for that judgment.
+
+The coverage-pair result concerns the complete and partial scans. A broader repair verdict requires a supported decision using the authored result on each tested transfer. A timed-out replay or an answer supported only by ordinary evidence leaves that verdict open. The report lists cases that never started and preserves successful decisions on the other cases.
 
 Each planned condition gets its own `--seconds` allowance covering setup, authoring, diagnostic replay and ten fresh downstream decisions. Work stops at expiry. The enclosing campaign reserves one additional minute per condition for process closure and post-expiry archive measurement. A failed or absent nomination stays in the report, including its costs and any subsequent ordinary-evidence answers. A candidate rejected during transfer gets a separate replay result.
 

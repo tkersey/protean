@@ -118,9 +118,31 @@ pub const ControllerSystem = protean.system(.{
     .Failure = t.Failure,
     .application = ControllerApplication,
 });
+pub const StudyControllerSystem = protean.system(.{
+    .InitialArgs = t.ControllerInput,
+    .Result = t.Output,
+    .Failure = t.Failure,
+    .application = struct {
+        pub fn emit(context: protean.Context) !horos.source.Module {
+            return Application.emitMode(context, .study);
+        }
+    },
+});
+const Mode = enum {
+    plain,
+    controller,
+    study,
+
+    fn bindings(comptime mode: Mode) type {
+        return if (mode == .study) t.StudyBindings else t.Bindings;
+    }
+    fn workspaceRequest(comptime mode: Mode) type {
+        return if (mode == .study) t.StudyWorkspaceRequest else t.WorkspaceRequest;
+    }
+};
 const ControllerApplication = struct {
     pub fn emit(context: protean.Context) !horos.source.Module {
-        return Application.emitMode(context, true);
+        return Application.emitMode(context, .controller);
     }
 };
 
@@ -168,21 +190,21 @@ const Emit = struct {
     }
 };
 
-fn Ops(comptime controller: bool) type {
+fn Ops(comptime mode: Mode) type {
     return struct {
-        bindings: Op(void, t.Bindings),
+        bindings: Op(void, mode.bindings()),
         prepare: Op(t.Preparation, t.PreparationResult),
         work: Op(t.WorkRequest, t.WorkReply),
         ask: Op(t.Question, t.Answer),
         inspect: Op(t.WorkRequest, t.WorkReply),
-        workspace: Op(t.WorkspaceRequest, @import("protean_contracts").workspace.Reply),
+        workspace: Op(mode.workspaceRequest(), @import("protean_contracts").workspace.Reply),
         inbox: Op(void, Inbox.Reply),
         model: Op(
-            if (controller) protean.responders.ControllerRequest(
+            if (mode != .plain) protean.responders.ControllerRequest(
                 P,
                 t.ControllerCarry,
             ) else P.AdaptiveRequest,
-            if (controller) @import("protean_contracts").controller.Reply(
+            if (mode != .plain) @import("protean_contracts").controller.Reply(
                 P.AdaptiveResult,
             ) else P.AdaptiveResult,
         ),
@@ -190,9 +212,9 @@ fn Ops(comptime controller: bool) type {
 }
 const Application = struct {
     pub fn emit(context: protean.Context) !horos.source.Module {
-        return emitMode(context, false);
+        return emitMode(context, .plain);
     }
-    fn emitMode(context: protean.Context, comptime controller: bool) !horos.source.Module {
+    fn emitMode(context: protean.Context, comptime mode: Mode) !horos.source.Module {
         const c = context.author;
         errdefer {
             const diagnostic = c.lastDiagnostic();
@@ -201,21 +223,21 @@ const Application = struct {
             });
         }
         const e: Emit = .{ .context = context, .author = c };
-        const ops = try declareOps(context, controller);
-        const program = try declareProgram(controller, e, ops);
+        const ops = try declareOps(context, mode);
+        const program = try declareProgram(mode, e, ops);
         try program.defineEvidence();
         try program.defineLoop();
         try program.defineProviderRecovery();
-        const entry = try defineEntry(controller, program);
-        if (controller) importController(context);
+        const entry = try defineEntry(mode, program);
+        if (mode != .plain) importController(context);
         return c.module(entry, try e.context.schema(t.Failure));
     }
-    fn declareOps(context: protean.Context, comptime controller: bool) !Ops(controller) {
+    fn declareOps(context: protean.Context, comptime mode: Mode) !Ops(mode) {
         return .{
             .bindings = try context.external(
                 t.bindings_identity,
                 try context.schema(void),
-                try context.schema(t.Bindings),
+                try context.schema(mode.bindings()),
                 .read,
             ),
             .prepare = try context.external(
@@ -244,12 +266,12 @@ const Application = struct {
             ),
             .workspace = try context.external(
                 t.workspace_identity,
-                try context.schema(t.WorkspaceRequest),
+                try context.schema(mode.workspaceRequest()),
                 try context.schema(@import("protean_contracts").workspace.Reply),
                 .read,
             ),
             .inbox = try Inbox.declare(context),
-            .model = if (controller) try protean.responders.controllerModelOperation(
+            .model = if (mode != .plain) try protean.responders.controllerModelOperation(
                 P,
                 t.ControllerCarry,
                 context,
@@ -257,11 +279,11 @@ const Application = struct {
         };
     }
     fn declareProgram(
-        comptime controller: bool,
+        comptime mode: Mode,
         e: Emit,
-        ops: Ops(controller),
+        ops: Ops(mode),
     ) !Program(
-        controller,
+        mode,
     ) {
         const c = e.author;
         const context = e.context;
@@ -291,7 +313,7 @@ const Application = struct {
                 .evidence = try e.context.schema(t.EvidenceList),
                 .index = try e.context.schema(u64),
             }, try e.context.schema(bool), &.{}),
-            .responder = if (controller) try protean.responders.defineControllerModelObserved(
+            .responder = if (mode != .plain) try protean.responders.defineControllerModelObserved(
                 P,
                 t.ControllerCarry,
                 context,
@@ -329,15 +351,15 @@ const Application = struct {
             ops.model,
         });
     }
-    fn defineEntry(comptime controller: bool, program: Program(controller)) !F(
-        struct { input: if (controller) t.ControllerInput else t.Input },
+    fn defineEntry(comptime mode: Mode, program: Program(mode)) !F(
+        struct { input: if (mode != .plain) t.ControllerInput else t.Input },
         t.Output,
     ) {
         const e = program.e;
         const c = e.author;
         const ops = program.ops;
         const entry = try c.function("protean", .{
-            .input = try e.context.schema(if (controller) t.ControllerInput else t.Input),
+            .input = try e.context.schema(if (mode != .plain) t.ControllerInput else t.Input),
         }, try e.context.schema(t.Output), .{
             ops.bindings,
             ops.prepare,
@@ -350,7 +372,7 @@ const Application = struct {
         });
         const root = try c.body(entry);
         const input = try root.parameter("input");
-        const result = if (controller) blk: {
+        const result = if (mode != .plain) blk: {
             const private = try root.field(input, "private");
             const fresh = try root.caseOf(private, "initial");
             const resumed = try root.caseOf(private, "resume");
@@ -393,11 +415,11 @@ const Application = struct {
     }
 };
 
-fn Program(comptime controller: bool) type {
+fn Program(comptime mode: Mode) type {
     return struct {
         const Self = @This();
         e: Emit,
-        ops: Ops(controller),
+        ops: Ops(mode),
         loop: F(struct { bindings: t.PolicyView, state: t.State }, t.Output),
         provider_recovery: F(ProviderRetry, t.Output),
         report: *const @import("report.zig").Function,
@@ -406,14 +428,15 @@ fn Program(comptime controller: bool) type {
         responder: *const protean.responders.ObservedFunction(
             P,
             false,
-            if (controller) t.ControllerCarry else null,
+            if (mode != .plain) t.ControllerCarry else null,
         ),
         inference: *const t.controls.Function(t.controls.InferenceInput),
         skill: *const t.controls.Function(t.controls.SkillInput(P)),
 
         fn initialize(p: Self, root: anytype, input: V(t.Input)) !V(t.Output) {
             const e = p.e;
-            const frozen = try root.perform(p.ops.bindings, try root.constant(void, {}));
+            const bound = try root.perform(p.ops.bindings, try root.constant(void, {}));
+            const frozen = if (mode == .study) try root.field(bound, "task_view") else bound;
             const task = try root.field(input, "task");
             const empty = try e.context.literal(t.State, .{
                 .task = .{ .bytes = "" },
@@ -466,11 +489,22 @@ fn Program(comptime controller: bool) type {
                 .profiles = try root.field(frozen, "profiles"),
                 .catalog = try root.field(frozen, "catalog"),
             });
+            if (mode != .study) return root.call(p.loop, .{ .bindings = policy, .state = initial });
+            return p.startStudy(root, bound, policy, initial);
+        }
+
+        fn startStudy(
+            p: Self,
+            root: anytype,
+            bound: V(t.StudyBindings),
+            policy: V(t.PolicyView),
+            initial: V(t.State),
+        ) !V(t.Output) {
             const setup = try root.branch();
             const ordinary = try root.branch();
             const started = try ordinary.call(p.loop, .{ .bindings = policy, .state = initial });
             return root.conditional(
-                try root.field(frozen, "observe_initial_consumer"),
+                try root.field(bound, "observe_initial_consumer"),
                 try setup.ret(try p.selectInitial(setup, policy, initial)),
                 try ordinary.ret(started),
             );
@@ -486,7 +520,7 @@ fn Program(comptime controller: bool) type {
                 .request_mode = try e.context.literal(t.PreparationMode, .complete),
             });
             _ = try b.perform(p.ops.workspace, try b.variant(
-                try e.context.schema(t.WorkspaceRequest),
+                try e.context.schema(t.StudyWorkspaceRequest),
                 "initial_consumer",
                 input,
             ));
@@ -631,12 +665,44 @@ fn Program(comptime controller: bool) type {
                 try e.failure(),
             );
         }
+        fn recoverSelectedView(
+            p: Self,
+            b: anytype,
+            state: anytype,
+            rejection: anytype,
+        ) !V(t.State) {
+            const e = p.e;
+            const previous_control = try b.field(state, "control");
+            const replay = try b.field(state, "replay");
+            const present = try b.caseOf(replay, "some");
+            const absent = try b.caseOf(replay, "none");
+            const previous_epoch = try b.match(replay, .{
+                .some = try present.ret(try present.body().field(present.payload(), "epoch")),
+                .none = try absent.ret(try absent.body().field(previous_control, "epoch")),
+            });
+            const next_control = try b.update(previous_control, .{
+                .epoch = try b.checkedAdd(previous_epoch, try b.constant(u64, 1), try e.failure()),
+                .epoch_reason = try e.context.literal(t.model.EpochReason, .projection_recovery),
+            });
+            const messages = try b.append(try b.field(state, "messages"), try e.message(
+                b,
+                .assistant,
+                try p.projectionDiagnostic(b, rejection),
+            ), .{});
+            return b.update(state, .{
+                .control = next_control,
+                .selected_view = try e.context.literal(?protean.contracts.workspace.Ref, null),
+                .selected_view_at = try b.constant(u64, 0),
+                .messages = messages,
+            });
+        }
         fn projectionRecoveryState(
             p: Self,
             b: anytype,
             state: anytype,
             rejection: anytype,
         ) !V(t.State) {
+            if (mode != .study) return p.recoverSelectedView(b, state, rejection);
             const e = p.e;
             const previous_control = try b.field(state, "control");
             const replay = try b.field(state, "replay");
@@ -798,16 +864,18 @@ fn Program(comptime controller: bool) type {
             normalized: anytype,
             bindings: anytype,
         ) !V(t.Output) {
-            const diagnostic = if (controller) try interaction.field(
+            const diagnostic = if (mode != .plain) try interaction.field(
                 turn.observation,
                 "diagnostic",
             ) else {};
-            const rejected_control = if (controller) try interaction.caseOf(
+            const rejected_control = if (mode != .plain) try interaction.caseOf(
                 diagnostic,
                 "some",
             ) else {};
-            const unchanged = if (controller) try interaction.caseOf(diagnostic, "none") else {};
-            const work = if (controller) unchanged.body() else interaction;
+            const unchanged = if (mode != .plain)
+                try interaction.caseOf(diagnostic, "none")
+            else {};
+            const work = if (mode != .plain) unchanged.body() else interaction;
             const ordinary = try p.interpret(
                 work,
                 turn.observation,
@@ -816,7 +884,7 @@ fn Program(comptime controller: bool) type {
                 turn.counted,
                 turn.retry,
             );
-            return if (controller) try p.controlDiagnostic(
+            return if (mode != .plain) try p.controlDiagnostic(
                 interaction,
                 diagnostic,
                 rejected_control,
@@ -852,7 +920,7 @@ fn Program(comptime controller: bool) type {
                 .messages = try e.context.literal(P.Messages, .{ .items = &.{} }),
                 .results = try e.context.literal(t.PendingResults, .{ .items = &.{} }),
             });
-            const observation = if (controller)
+            const observation = if (mode != .plain)
                 try interaction.call(p.responder, .{
                     .request = request,
                     .offered = try interaction.field(request, "offered"),
@@ -1385,7 +1453,7 @@ fn Program(comptime controller: bool) type {
                 "placement",
             )) "placement" else "context";
             const request = try b.product(try e.context.schema(
-                t.ModelWorkspaceRequest,
+                t.WorkspaceRequest,
             ), .{
                 .context = try b.variantPayload(
                     try b.field(state, "replay"),
@@ -1394,16 +1462,17 @@ fn Program(comptime controller: bool) type {
                 ),
                 .call_id = call_id,
                 .action = try b.variant(
-                    try e.context.schema(@FieldType(t.ModelWorkspaceRequest, "action")),
+                    try e.context.schema(@FieldType(t.WorkspaceRequest, "action")),
                     command,
                     try b.field(value, "command"),
                 ),
             });
-            const reply = try b.perform(p.ops.workspace, try b.variant(
-                try e.context.schema(t.WorkspaceRequest),
+            const payload = if (mode == .study) try b.variant(
+                try e.context.schema(t.StudyWorkspaceRequest),
                 "model",
                 request,
-            ));
+            ) else request;
+            const reply = try b.perform(p.ops.workspace, payload);
             var updated = try p.selectedView(b, state, reply);
             const evidence_index = try p.workspaceEvidenceIndex(b, state, reply);
             updated = try p.appendWorkspaceObservations(b, updated, reply);

@@ -212,6 +212,7 @@ test/protean/workspace_semantics.zig
 test/protean/workspace_sources.zig
 test/protean/workspace_test_support.zig
 tools/evaluation/interface_repair_driver.zig
+tools/evaluation/interface_repair_emit.zig
 tools/evaluation/interface_repair_fixture.zig
 tools/evaluation/interface_repair_sources.zig
 tools/evaluation/recurrence_acquisition.zig

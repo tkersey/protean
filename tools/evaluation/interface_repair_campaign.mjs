@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import {createHash, randomBytes} from 'node:crypto';
-import {execFileSync} from 'node:child_process';
+import {spawnSync} from 'node:child_process';
 import {mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
-import {join} from 'node:path';
+import {join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {readArchive} from '../../test/protean/native_archive.mjs';
 import {makeRepairCorpus, assessScan, scanContract, taskContract, candidateContract} from './interface_repair.mjs';
@@ -21,39 +21,79 @@ const sourcesUsed = ['interface_repair.mjs', 'interface_repair_campaign.mjs', 'i
   '../../test/support/stdio-client.mts', '../../test/support/values.mjs', '../../test/protean/adaptive_capture_checks.mjs',
   '../native/qualification_process.mjs'];
 
+let loadedEvaluator;
+async function loadedSources() {
+  const {Session} = await import('node:inspector/promises');
+  const wanted = new Map(sourcesUsed.map(path=>[new URL(path,import.meta.url).href,path]));
+  const hashes = new Map();
+  const session = new Session();
+  session.connect();
+  try {
+    session.on('Debugger.scriptParsed',({params})=>{
+      const path = wanted.get(params.url);
+      if (path) hashes.set(path,!hashes.has(path) || hashes.get(path) === params.hash ? params.hash : null);
+    });
+    await session.post('Debugger.enable');
+    for (const path of sourcesUsed) assert(/^[a-f0-9]{64}$/.test(hashes.get(path) ?? ''),'Missing loaded evaluator identity: '+path);
+    return Object.fromEntries(hashes);
+  } finally { session.disconnect(); }
+}
+
+function repositoryHead() {
+  const git = args=>spawnSync('git',['-C',repository,'rev-parse',...args],{encoding:'utf8'});
+  const root = git(['--show-toplevel']);
+  if (root.status !== 0 || resolve(root.stdout.trim()) !== resolve(repository)) return null;
+  const head = git(['--verify','HEAD']);
+  return head.status === 0 ? head.stdout.trim() : null;
+}
+
 async function identities({binary, driver}, applicationBytes) {
+  loadedEvaluator ??= loadedSources();
+  const loaded = await loadedEvaluator;
   const hashes = await Promise.all([binary, driver].map(async path => hash(await readFile(path))));
   const evaluator = Object.fromEntries(await Promise.all(sourcesUsed.map(async path =>
     [path, hash(await readFile(new URL(path, import.meta.url)))])));
-  return {binary_sha256:hashes[0], driver_sha256:hashes[1], application_sha256:hash(applicationBytes), evaluator,
-    repository_head:execFileSync('git', ['-C',repository,'rev-parse','HEAD'], {encoding:'utf8'}).trim()};
+  for (const path of sourcesUsed.filter(path=>path.endsWith('.mjs')))
+    assert.equal(evaluator[path],loaded[path],'Loaded evaluator differs from its source: '+path);
+  return {binary_sha256:hashes[0], driver_sha256:hashes[1], application_sha256:hash(applicationBytes),
+    evaluator,loaded_evaluator:{...loaded},repository_head:repositoryHead()};
 }
 
 async function exportSources(driver, build) {
   const scratch = await realpath(await mkdtemp(join(tmpdir(), 'protean-repair-sources-')));
-  try {
-    const client = new RecurrenceDriver(driver, ['--offline','--state-dir',join(scratch,'state')]);
+  async function preflight(name, study) {
+    const args = ['--offline','--state-dir',join(scratch,name)];
+    if (study) args.push('--interface-repair-bootstrap',hash('offline preparation'));
+    const client = new RecurrenceDriver(driver, args);
     const timer = setTimeout(() => client.kill(), 30000);
+    let verified = false;
     try {
-      const sources = await client.call('evaluation.interface_repair.sources');
-      for (const key of ['adequate','lossy']) assert.equal(typeof sources[key], 'string');
-      assert.notEqual(sources.adequate, sources.lossy);
+      const sources = study ? null : await client.call('evaluation.interface_repair.sources');
+      const assets = study ?? await client.call('evaluation.interface_repair.assets');
       const description = await client.call('describe');
       assert.equal(description.execution_mode,'offline');
       const task = await client.call('task.submit',{client_operation_id:'repair-preparation',
         application_id:'adaptive-agent',profile_id:description.profile.id,
         input:{schema_id:'adaptive-agent.input.v2',value:{task:'Validate the frozen experiment assets.'}}});
-      const path = join(scratch,'admitted.agnx');
+      const path = join(scratch,name+'.agnx');
       await client.call('evaluation.export',{task_id:task.task_id,path});
       const archive = readArchive(await readFile(path));
       assert.equal(archive.task.inference_attempts,0n);
-      for (const field of ['program_sha256','application_assets_sha256'])
+      if (study) assert.deepEqual(archive.build,study.build,'Admitted study build differs from the private manifest.');
+      else for (const field of ['program_sha256','application_assets_sha256'])
         assert.equal(archive.build[field],build[field],`Driver and product disagree on ${field}.`);
-      return sources;
+      verified = true;
+      return {...sources,study:assets};
     } finally {
       clearTimeout(timer);
-      await client.close();
+      const exit = await client.close();
+      if (verified) assert.deepEqual(exit,{code:0,signal:null},'Offline preparation driver did not exit cleanly.');
     }
+  }
+  try {
+    const raw = await preflight('ordinary',null);
+    await preflight('study',raw.study);
+    return raw;
   } finally { await rm(scratch,{recursive:true,force:true}); }
 }
 
@@ -146,6 +186,15 @@ export async function prepareInterfaceRepair({config,directory,binary,driver,app
   const raw = await (deps.exportSources ?? exportSources)(driver,build);
   const privateRoot = join(directory,'private');
   await mkdir(privateRoot);
+  assert.equal(typeof raw.study.application,'string');
+  assert.match(raw.study.build.program_sha256,/^[0-9a-f]{64}$/);
+  assert.equal(hash(raw.study.application),raw.study.build.application_assets_sha256);
+  assert.equal(JSON.parse(raw.study.application).program_sha256,raw.study.build.program_sha256);
+  assert.equal(typeof raw.lossy,'string');
+  assert.equal(typeof raw.adequate,'string');
+  assert.notEqual(raw.lossy,raw.adequate);
+  const studyAssets = {application:await frozenFile(join(privateRoot,'application.json'),raw.study.application),
+    build:raw.study.build};
   const sources = {};
   for (const key of ['lossy','adequate'])
     sources[key] = await frozenFile(join(privateRoot,key+'.json'),raw[key]);
@@ -184,7 +233,7 @@ export async function prepareInterfaceRepair({config,directory,binary,driver,app
   const condition_ms = seconds*1000;
   const campaign_ceiling_ms = conditions.length*(condition_ms+60_000);
   assert(Number.isSafeInteger(campaign_ceiling_ms));
-  const plan = {format,suite:'interface-repair',study,seed,repetitions,identities:ids,build,profile,
+  const plan = {format,suite:'interface-repair',study,seed,repetitions,identities:ids,build,study_assets:studyAssets,profile,
     initial_effort:config.adaptive.initial_effort,approved_efforts:approvedEfforts,route,cost_model:costModel,
     approved_tools:{build:config.tools.build,run:config.tools.run},
     condition_ms,campaign_ceiling_ms,
@@ -239,7 +288,11 @@ async function readRepairPlan(directory,options) {
     for (const file of subject.evidence)
       await validateFile({path:join(subject.snapshot,file.path),sha256:file.sha256});
   }
-  return {plan,plan_sha256,application:JSON.parse(applicationBytes)};
+  const studyBytes = await validateFile(plan.study_assets.application);
+  const application = JSON.parse(studyBytes);
+  assert.equal(hash(studyBytes),plan.study_assets.build.application_assets_sha256);
+  assert.equal(application.program_sha256,plan.study_assets.build.program_sha256);
+  return {plan,plan_sha256,application};
 }
 
 export async function validateRepairPlan(directory,options) {
@@ -262,6 +315,30 @@ function bootstrapBuild(report) {
     elapsed:ns('build_elapsed_nanoseconds'),compiler:ns('compiler_nanoseconds')};
 }
 
+function knownCharges(report, model) {
+  const charge = value=>Number.isFinite(value) && value >= 0;
+  const count = value=>Number.isSafeInteger(value) && value >= 0;
+  const complete = report?.cost?.complete === true && charge(report.cost.total);
+  if (tariffErrors(model).length) return {inference:0,total:complete ? report.cost.total : 0};
+  const attempts = report?.execution_mode === 'scripted_fixture' ? [] :
+    report?.metrics?.physical_attempts ?? report?.observed_provider_attempts ?? [];
+  let inference = 0;
+  for (const {usage} of attempts) {
+    const input = usage?.input_tokens, cached = usage?.input_tokens_details?.cached_tokens, output = usage?.output_tokens;
+    if (count(input)) {
+      const minimumRate = Math.min(model.input_per_million,model.cached_input_per_million);
+      inference += count(cached) && cached <= input ?
+        ((input-cached)*model.input_per_million+cached*model.cached_input_per_million)/1000000 : input*minimumRate/1000000;
+    } else if (input == null && count(cached)) inference += cached*model.cached_input_per_million/1000000;
+    if (count(output)) inference += output*model.output_per_million/1000000;
+  }
+  if (charge(report?.cost?.inference)) inference = report.cost.inference;
+  const host = charge(report?.elapsed_ms) ? report.elapsed_ms/1000*model.host_per_second : 0;
+  const storage = count(report?.retained_namespace_bytes) ?
+    report.retained_namespace_bytes*model.retention_seconds*model.storage_per_byte_second : 0;
+  return {inference,total:complete ? report.cost.total : inference+host+storage};
+}
+
 function resources(tasks, costModel) {
   const started = tasks.filter(t=>t.state !== 'not_started');
   const attempts = started.flatMap(t=>t.report?.metrics?.physical_attempts ?? t.report?.observed_provider_attempts ?? []);
@@ -280,32 +357,43 @@ function resources(tasks, costModel) {
   const namespaces = started.map(t=>t.report?.retained_namespace_bytes);
   const bootstrap = started.map(t=>bootstrapBuild(t.report));
   const bootstrapCommands = bootstrap.map(b=>b.commands), capturedBuilds = taskMetric('builds');
+  const issuedBuilds = taskMetric('build_attempts');
+  const buildsCaptured = issuedBuilds !== null && issuedBuilds === capturedBuilds;
   const capturedRejected = taskMetric('rejected_builds'), capturedCompiler = taskMetric('compiler_nanoseconds');
   const rss = started.map(t=>t.report?.peak_rss_sampled_bytes).filter(count);
   const charges = started.map(t=>t.report?.cost).filter(c=>c?.complete === true &&
     Number.isFinite(c.total) && c.total >= 0);
-  const knownCost = charges.reduce((sum,c)=>sum+c.total,0);
+  const known = costModel.kind === 'tariff' ? started.map(t=>knownCharges(t.report,costModel)) : [];
   return {known_physical_attempts:attempts.length, physical_attempts:countKnown ? attempts.length : null,
     usage_complete:countKnown && !missingUsage, known_input_tokens:knownSum(attempts.map(a=>a.usage?.input_tokens)),
     known_output_tokens:knownSum(attempts.map(a=>a.usage?.output_tokens)), missing_usage_attempts:missingUsage,
     known_request_body_bytes:knownBodyBytes, request_body_bytes:countKnown && bodyBytes.every(count) ? knownBodyBytes : null,
     captured_builds:capturedBuilds,bootstrap_builds:total(bootstrapCommands),known_bootstrap_builds:knownSum(bootstrapCommands),
-    builds:total([capturedBuilds,...bootstrapCommands]),rejected_builds:total([capturedRejected,...bootstrap.map(b=>b.rejected)]),
+    dispatched_builds:issuedBuilds,builds:total([issuedBuilds,...bootstrapCommands]),
+    rejected_builds:buildsCaptured ? total([capturedRejected,...bootstrap.map(b=>b.rejected)]) : null,
     work_items:taskMetric('work_items'),captured_compiler_nanoseconds:capturedCompiler,
     bootstrap_build_elapsed_nanoseconds:total(bootstrap.map(b=>b.elapsed)),
-    compiler_nanoseconds:total([capturedCompiler,...bootstrap.map(b=>b.compiler)]),result_bytes:taskMetric('result_bytes'),
+    compiler_nanoseconds:buildsCaptured ? total([capturedCompiler,...bootstrap.map(b=>b.compiler)]) : null,result_bytes:taskMetric('result_bytes'),
     retained_namespace_bytes:namespaces.every(count) ? knownSum(namespaces) : null,
     max_sampled_rss_bytes:rss.length ? rss.reduce((a,b)=>Math.max(a,b)) : null,
     monetary_scope:'task_execution_and_retention',
-    monetary_cost:costModel.kind === 'tariff' && charges.length === started.length ? knownCost : null,
-    known_monetary_cost:costModel.kind === 'tariff' ? knownCost : null,
+    monetary_cost:costModel.kind === 'tariff' && charges.length === started.length ? charges.reduce((sum,c)=>sum+c.total,0) : null,
+    known_monetary_cost:costModel.kind === 'tariff' ? known.reduce((sum,c)=>sum+c.total,0) : null,
+    known_inference_cost:costModel.kind === 'tariff' ? known.reduce((sum,c)=>sum+c.inference,0) : null,
     cost_model:costModel.id ?? costModel.kind};
+}
+
+function zeroControllerAttempts(report) {
+  const inventory = report?.metrics?.physical_attempts;
+  return report?.final_metrics_complete === true && (report.metrics?.controller?.calls === 0 ||
+    Array.isArray(inventory) && inventory.every(a=>a.role === 'delegated'));
 }
 
 function initialPresentation(report) {
   const trace = report?.adjudication;
   const attempts = trace?.delivery?.filter(a=>a.delivery !== 'not_sent' && a.model_response !== false);
   const unknown = {confirmed:null,one_computed_block:null};
+  if (!attempts?.length && zeroControllerAttempts(report)) return {confirmed:false,one_computed_block:null};
   if (!attempts?.length || attempts.some(a => a.preparation_cut == null)) return unknown;
   const first = attempts.reduce((a, b) => BigInt(a.preparation_cut) <= BigInt(b.preparation_cut) ? a : b);
   const sameCut = attempts.filter(a => BigInt(a.preparation_cut) === BigInt(first.preparation_cut));
@@ -314,9 +402,9 @@ function initialPresentation(report) {
   if (!confirmed) return unknown;
   if (report.effective_condition === 'ordinary') return {confirmed:confirmed.selected_view === null,one_computed_block:null};
   const view = report.bootstrap?.view;
-  const exposure = view && view.id === confirmed.selected_view ?
-    trace.projection?.exposures.find(e=>e.id === confirmed.id && e.rendered) : null;
-  return {confirmed:Boolean(exposure),one_computed_block:exposure?.one_computed_block ?? null};
+  if (!view || view.id !== confirmed.selected_view) return {confirmed:false,one_computed_block:false};
+  const exposure = trace.projection?.exposures.find(e=>e.id === confirmed.id);
+  return {confirmed:exposure?.rendered ?? null,one_computed_block:exposure?.one_computed_block ?? null};
 }
 
 function decisionState(report) {
@@ -359,7 +447,8 @@ export function gradeCondition(condition, tasks, costModel) {
       trace.delivery?.some(e=>e.model_response === true) && trace.delivery.every(e=>
         e.selected_view === null || e.delivery === 'not_sent' || e.model_response === false);
     const exposed = exposures.some(e=>e.rendered && e.delivery === 'confirmed' && e.model_response === true) ? true :
-      ordinaryOnly || exposures.length && exposures.every(e=>!e.rendered || e.delivery === 'not_sent' || e.model_response === false) ? false : null;
+      zeroControllerAttempts(r) || ordinaryOnly || exposures.length && exposures.every(e=>e.rendered === false ||
+        e.delivery === 'not_sent' || e.model_response === false) ? false : null;
     const projectionBinding = condition.arm === 'repair' ? trace?.transfer_bound : projection?.canonical_input;
     const supportedUse = !answered ? null : allObserved([grade.supported, citedProjection || citedAlias, compliant, exposed,
       projectionBinding, projection?.semantic_judgment === 'unestablished' ? null : projection?.semantic_judgment === 'supported',
@@ -413,7 +502,8 @@ export function gradeCondition(condition, tasks, costModel) {
     collision,coverage_pair:condition.coverage_pair ?? null,
     coverage_repair_demonstrated:condition.arm === 'repair' ? coverageDemonstrated : null,
     incorrect_projection_cases:incorrectProjections,rejected_replay_cases:rejectedReplays,
-    supported_repair:condition.arm !== 'repair' ? null : coverageDemonstrated && !incorrectProjections.length && !rejectedReplays.length ?
+    supported_repair:condition.arm !== 'repair' ? null : coverageDemonstrated && !incorrectProjections.length && !rejectedReplays.length &&
+      cases.every(c=>c.state === 'not_started' || c.state === 'completed' && c.supported_view_use === true) ?
       'demonstrated_on_tested_cases' : 'unestablished',
     supported_view_use_cases:supportedUses.map(c=>c.case_id),
     answered_cases:cases.filter(c=>c.decision === 'answered').length,
@@ -463,7 +553,9 @@ function markdown(results) {
       (r.usage_complete ? '' : ' These are lower bounds.')+
       ' Prepared request bodies for confirmed or possible provider attempts accounted for '+r.known_request_body_bytes+' known bytes.'+
       (r.request_body_bytes === null ? ' Their total size is unknown.' : '')+
-      (r.monetary_cost === null ? ' Total task charges are unknown.' : ' Task charges under the frozen tariff were '+r.monetary_cost+'.'),'',
+      (r.monetary_cost === null ? r.known_monetary_cost === null ? ' Total task charges are unknown.' :
+        ' Known task charges under the frozen tariff were at least '+r.known_monetary_cost+'.' :
+        ' Task charges under the frozen tariff were '+r.monetary_cost+'.'),'',
       '| Case | Status | Answer | Supported | Ordinary evidence use | Supported view use |',
       '|---|---|---|---|---|---|');
     for (const row of c.cases) lines.push('| '+[row.case_id,row.state,row.answer ?? '—',label(row.supported),
@@ -475,6 +567,7 @@ function markdown(results) {
 
 export async function runInterfaceRepair(directory, options, {execute=executeRepairTask,now=()=>performance.now()} = {}) {
   options = {...options};
+  assert(options.authorizeInference === true,'Explicit --authorize-inference is required.');
   inferenceArguments(options);
   const campaignStart = now();
   const {plan,plan_sha256,application} = await readRepairPlan(directory,options);
@@ -497,7 +590,7 @@ export async function runInterfaceRepair(directory, options, {execute=executeRep
       await mkdir(dir);
       let report;
       try {
-        report = await execute({...options,output:dir,subject,candidate,deadline,build:plan.build,
+        report = await execute({...options,output:dir,subject,candidate,deadline,build:plan.study_assets.build,
           application,plan,plan_sha256});
       } catch (error) {
         report = {subject,errors:[{stage:'task_runner',name:error.name,message:error.message}],status:null,
@@ -521,7 +614,8 @@ export async function runInterfaceRepair(directory, options, {execute=executeRep
     }
     const measured = gradeCondition(condition,tasks,plan.cost_model);
     measured.elapsed_ms = now()-start;
-    measured.deadline_overrun_ms = Math.max(0,measured.elapsed_ms-plan.condition_ms);
+    measured.effective_allowance_ms = Math.max(0,deadline-start);
+    measured.deadline_overrun_ms = Math.max(0,measured.elapsed_ms-measured.effective_allowance_ms);
     results.conditions.push(measured);
     await save(join(output,condition.repetition+'-'+condition.arm+'.json'),encode(measured));
   }
@@ -539,9 +633,12 @@ export async function runInterfaceRepair(directory, options, {execute=executeRep
   const host = model.kind === 'tariff' ? elapsed_ms / 1000 * model.host_per_second : null;
   const storage = model.kind === 'tariff' ? retained_bytes * model.storage_per_byte_second * model.retention_seconds : null;
   const total = inferenceCost !== null ? inferenceCost + host + storage : null;
+  const knownInference = model.kind === 'tariff' ?
+    results.conditions.reduce((sum,c)=>sum+c.end_to_end_resources.known_inference_cost,0) : null;
   await save(timing,encode({plan_sha256,elapsed_ms,campaign_ceiling_ms:plan.campaign_ceiling_ms,
     campaign_ceiling_exceeded:elapsed_ms>plan.campaign_ceiling_ms,retained_bytes,
-    cost:{model:model.id ?? model.kind,currency:model.currency ?? null,inference:inferenceCost,host,storage,
+    cost:{model:model.id ?? model.kind,currency:model.currency ?? null,inference:inferenceCost,known_inference:knownInference,
+      known_total:knownInference === null ? null : knownInference+host+storage,host,storage,
       total:Number.isFinite(total) ? total : null}}));
   return {results:join(output,'results.json'),summary:join(output,'results.md'),timing,conditions:results.conditions.length};
 }

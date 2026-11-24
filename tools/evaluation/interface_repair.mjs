@@ -221,13 +221,29 @@ export function inspectProjection(specimen, sourceRefs, schemaKind, payload) {
     exact_evidence_preservation: exact, paths: supported ? paths : []};
 }
 
+export function samePresentedValue(left, right) {
+  const pending = [[left, right]];
+  while (pending.length) {
+    const [a, b] = pending.pop();
+    if (a === b) continue;
+    if (!a || !b || typeof a !== 'object' || typeof b !== 'object' || Array.isArray(a) !== Array.isArray(b)) return false;
+    const keys = Object.keys(a);
+    if (keys.length !== Object.keys(b).length) return false;
+    for (const key of keys) {
+      if (!Object.hasOwn(b, key)) return false;
+      pending.push([a[key], b[key]]);
+    }
+  }
+  return true;
+}
+
 export function collisionProbe(left, right) {
   if (!left || !right || !outcomes.includes(left.expected) || !outcomes.includes(right.expected) ||
       left.expected === right.expected || !left.consumer || !left.program ||
       !isDeepStrictEqual(left.consumer, right.consumer) || !isDeepStrictEqual(left.program, right.program) ||
       left.payload === undefined || right.payload === undefined)
     return {distinction_preserved: null, semantic_judgment: 'unestablished'};
-  const distinct = !isDeepStrictEqual(left.payload, right.payload);
+  const distinct = !samePresentedValue(left.payload, right.payload);
   return {distinction_preserved: distinct, semantic_judgment: distinct ? 'unestablished' : 'lost_distinction'};
 }
 

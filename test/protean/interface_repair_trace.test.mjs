@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {adjudicateRepairTrace, canonicalProjectionInput, capturedModelResponse, confirmedApplication, diagnosticPresentation, inspectProjectionResult,
+import {adjudicateRepairTrace, canonicalProjectionInput, capturedModelResponse, computedRendering, confirmedApplication, diagnosticPresentation, inspectProjectionResult,
   selectedPresentation} from '../../tools/evaluation/interface_repair_trace.mjs';
 import {canonicalEvidence, collisionProbe, makeRepairCorpus} from '../../tools/evaluation/interface_repair.mjs';
 import {encodeValue} from '../support/values.mjs';
@@ -16,12 +16,13 @@ const mistaken = [{role: 'assistant', content: [part]}, {type: 'function_call_ou
 
 test('successful HTTP transport and explicit model response are independent evidence', () => {
   const raw = (body, format = 0, status = 200) => [status, true, null, Buffer.from(body), format, null, null, 2];
-  const body = {status: 'completed', error: null, output: [{type: 'function_call', status: 'completed',
+  const body = {id: 'r', status: 'completed', error: null, output: [{type: 'function_call', status: 'completed',
     name: 'report', call_id: 'x', arguments: '{}'}]};
   const sse = (type, response) => 'data: ' + JSON.stringify({type, response}) + '\n\n';
   assert.equal(capturedModelResponse(raw(JSON.stringify(body))), true);
-  assert.equal(capturedModelResponse(raw(sse('response.completed', body), 1)), true);
-  assert.equal(capturedModelResponse(raw(sse('response.failed', {status: 'failed'}), 1)), false);
+  const done = 'data: ' + JSON.stringify({type: 'response.output_item.done', output_index: 0, item: body.output[0]}) + '\n\n';
+  assert.equal(capturedModelResponse(raw(done + sse('response.completed', body), 1)), true);
+  assert.equal(capturedModelResponse(raw(sse('response.failed', {status: 'failed', id: 'r'}), 1)), false);
   assert.equal(capturedModelResponse(raw(JSON.stringify({status: 'failed', error: {code: 'invalid_user'}}))), false);
   assert.equal(capturedModelResponse(raw('{}', 0, 403)), false);
   assert.equal(capturedModelResponse(raw('unparseable')), null);
@@ -35,6 +36,26 @@ test('successful HTTP transport and explicit model response are independent evid
     assert.equal(capturedModelResponse(raw(sse('response.incomplete', incomplete), 1)), true);
   }
   assert.equal(capturedModelResponse(raw(sse('response.incomplete', {...body, status:'incomplete', output:[]}), 1)), null);
+});
+
+test('the provider terminal and finalized items bind generated output to a single response', () => {
+  const frame = value => 'data: ' + JSON.stringify(value) + '\n\n';
+  const read = events => capturedModelResponse([200,true,null,Buffer.from(events.map(frame).join('')),1,null,null,2]);
+  const created = {type:'response.created', sequence_number: 1, response:{id:'r'}};
+  const call = {type:'function_call', status:'completed', id:'fc', call_id:'c', name:'choose', arguments:'{}'};
+  const done = {type:'response.output_item.done', sequence_number: 2, output_index:0, item:call};
+  const finish = output => ({type:'response.completed', sequence_number: 3, response:{id:'r', status:'completed', error:null, output}});
+  for (const roster of [[], [{type:'function_call', id:'fc'}], [call]]) assert.equal(read([created, done, finish(roster)]), true);
+  assert.equal(read([created, done, finish([{...call, name:'other'}])]), null);
+  assert.equal(read([created, done, {...finish([]), sequence_number: 1}]), null);
+  const partial = {type:'response.incomplete', response:{id:'r', status:'incomplete', output:[
+    {type:'reasoning', summary:[{type:'summary_text',text:'Observed scan facts.'}]}]}};
+  assert.equal(read([created, partial]), true);
+  assert.equal(read([created, {...partial,response:{...partial.response,id:'other'}}]), null);
+  const json = output => [200,true,null,Buffer.from(JSON.stringify({status:'completed',error:null,output})),0,null,null,2];
+  const empty = {type:'message',role:'assistant',status:'completed',content:[{type:'output_text',text:''}]};
+  assert.equal(capturedModelResponse(json([empty]), [{tag:0,value:[[{tag:1,value:[3,'']}],[]]}]), null);
+  assert.equal(capturedModelResponse(json([]), [{tag:0,value:[[{tag:0,value:['c','choose','{}']}],[]]}]), null);
 });
 
 test('canonical scan work requires the task-owned consumer observation as well as source-backed scan facts', () => {
@@ -80,6 +101,25 @@ const resultSchema = {root: 0, types: [{product: [1, 11]}, {product: [2, 5]}, {p
   {sum: [2, 7, 8, 10]}, {product: []}, {product: [2, 9, 9]}, 'u64', 'text', 'boolean']};
 const consumer = [12, view], program = {kind: 'program', id: 'b'.repeat(64)};
 const computed = {tag: 1, value: []};
+
+test('rendered credit binds the actual displayed schema and retains unknown host inspection', () => {
+  const result = {kind:'value',id:view};
+  const inspected = inspectProjectionResult(resultSchema, encodeValue(resultSchema, [[consumer,[computed]],true]));
+  const block = {kind:'computed',result,schema_identity:inspected.schema,schema:inspected.display,value:true};
+  const rendered = (b, payload = true) => computedRendering([b], result, inspected.schema, payload, inspected.display);
+  assert.equal(rendered(block), true);
+  assert.equal(rendered({...block,schema:undefined}), false);
+  assert.equal(rendered({...block,schema:{root:'0',types:[{tag:'u64',value:{}}]}}), false);
+  assert.equal(computedRendering([block], result, inspected.schema, undefined, inspected.display), null);
+  let a = [], b = [];
+  for (let i = 0; i < 4000; i++) { a = [a]; b = [b]; }
+  const recursive = {root:0, types:[...resultSchema.types.slice(0, 11), {seq:11}]};
+  const recursiveOutput = inspectProjectionResult(recursive, encodeValue(recursive, [[consumer,[computed]],[]]));
+  assert.equal(computedRendering([{...block,schema:recursiveOutput.display,schema_identity:recursiveOutput.schema,value:a}],
+    result, recursiveOutput.schema, b, recursiveOutput.display), true);
+  const pair = {program, consumer, expected:'incomplete',payload:a};
+  assert.equal(collisionProbe(pair, {...pair,expected:'exhausted_declared_domain',payload:b}).distinction_preserved, false);
+});
 
 test('diagnostic credit compares the payloads both executions propose to their shared consumer', () => {
   const proposal = (blocks, payload, observed = consumer) => {

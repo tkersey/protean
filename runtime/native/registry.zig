@@ -496,6 +496,7 @@ fn validateDeclaration(declaration: Declaration) !void {
 }
 
 pub const Registry = struct {
+    admitted_root: ?struct { image: [32]u8, entries: []const Entry } = null,
     arena: std.heap.ArenaAllocator,
     entries: []const Entry,
 
@@ -595,7 +596,14 @@ pub const Registry = struct {
             contracts.controller.Import,
             request.binding.semantic_identity[contracts.controller.effect_prefix.len..],
         ) orelse return error.MissingCapability;
-        for (self.entries) |entry| {
+        const entries = if (self.admitted_root) |root|
+            if (std.meta.eql(root.image, request.binding.program_identity))
+                root.entries
+            else
+                self.entries
+        else
+            self.entries;
+        for (entries) |entry| {
             if (entry.declaration.controller_import != imported) continue;
             if (!std.mem.eql(
                 u8,

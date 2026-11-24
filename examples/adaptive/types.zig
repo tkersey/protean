@@ -176,6 +176,9 @@ pub const Bindings = struct {
     initial: controls.State,
     instructions: P.MessageText,
     status: P.MessageText,
+};
+pub const StudyBindings = struct {
+    task_view: Bindings,
     observe_initial_consumer: bool = false,
     initial_projection: ?InitialProjection = null,
 };
@@ -247,13 +250,13 @@ pub const WorkReply = struct {
     artifact: model.ArtifactReference,
     evidence: ?SourceEvidenceReference,
 };
-pub const ModelWorkspaceRequest = struct {
+pub const WorkspaceRequest = struct {
     context: model.AdaptiveContextReference,
     call_id: P.CallId,
     action: contracts.workspace.Command,
 };
-pub const WorkspaceRequest = union(enum) {
-    model: ModelWorkspaceRequest,
+pub const StudyWorkspaceRequest = union(enum) {
+    model: WorkspaceRequest,
     initial_consumer: Preparation,
 };
 pub const ControllerCarry = struct { bindings: PolicyView, state: State };

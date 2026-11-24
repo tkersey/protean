@@ -22,8 +22,14 @@ async function setup(t) {
   await writeFile(subject.config, '{}');
   const cases = {[subject.case_id]: {specimen: {path: subject.case_path, sha256: hash(bytes)}}};
   return {output, subject, build: {}, plan: {cases, cost_model: {kind: 'unpriced'}}, plan_sha256: 'a'.repeat(64),
-    application: {}, driver: 'unused', credential: '/unopened', deadline: performance.now() + 2000};
+    application: {}, driver: 'unused', credential: '/unopened', authorizeInference:true, deadline: performance.now() + 2000};
 }
+
+test('live task execution requires explicit inference authorization before a driver can start', async t => {
+  const options = await setup(t);
+  delete options.authorizeInference;
+  await assert.rejects(executeRepairTask(options), /explicit --authorize-inference/);
+});
 
 test('a failed preflight retains the isolated task, reopens it only for measurements and charges unknowns', async t => {
   const options = await setup(t);
@@ -159,7 +165,7 @@ function decisionFixture() {
   const step = (tag, command, observation, {disposition = 'observed', selected = null, block = null, mismatch = false} = {}) => {
     const id = String(history.length + 1), call_id = 'call-' + id;
     const reply = {disposition, observation_json: JSON.stringify(observation), evidence: observation.value};
-    const input = [{type: 'function_call_output', call_id, output: [{type: 'input_text', text: JSON.stringify({
+    const input = [{type: 'function_call', call_id}, {type: 'function_call_output', call_id, output: [{type: 'input_text', text: JSON.stringify({
       disposition, observation: mismatch ? {} : observation})}]}];
     if (block) input.push({role: 'user', content: [{type: 'input_text', text: JSON.stringify({selected_context_data: [block]})}]});
     history.push({interaction_id: id, event_cut: id, attempt: {id, delivery: 'confirmed', model_response: true, selected_view: selected, body: {input}},
@@ -177,11 +183,11 @@ function decisionFixture() {
     const text = JSON.stringify(rendered);
     const artifact = put(encodeValue(workSchema, [2, task, null, null, call_id, null, result, null, text]));
     history.push({interaction_id: id, task_id: task.toString('hex'), event_cut: id, previous: {delivery: 'confirmed', model_response: true},
-      attempt: {id, delivery: 'confirmed', model_response: true, body: {input: [{type:'function_call_output', call_id, output: text}]}},
+      attempt: {id, delivery: 'confirmed', model_response: true, body: {input: [{type:'function_call', call_id}, {type:'function_call_output', call_id, output: text}]}},
       results: [{call_id, output: {tag: 'work', value: {digest: [...artifact[0]], bytes: String(artifact[1])}}}], result_actions: []});
   };
-  const support = (uses = [], projector = null) => decisionSupport(archive, {support: {WorkArtifact: schemaSupport(workSchema)}},
-    specimen, refs, values, history, uses, history.at(-1), projector);
+  const support = (uses = [], projector = null, consumers) => decisionSupport(archive, {support: {WorkArtifact: schemaSupport(workSchema)}},
+    specimen, refs, values, history, uses, history.at(-1), projector, consumers);
   return {step, support, expand, acquire, materialize, work, snapshot, history, page, path, member, absent, file, slice, full, witness, input, result, value, put};
 }
 
@@ -195,6 +201,28 @@ test('verified partial snapshot handles each carry only their own source interva
     assert.deepEqual(entry.paths, []);
     assert.deepEqual(entry.range, {path: f.path, start, end});
   }
+});
+
+test('a reused settled call ID binds the current materialization output', () => {
+  const f = decisionFixture();
+  f.materialize(f.full);
+  const [call, output] = f.history[0].attempt.body.input;
+  f.history[0].attempt.body.input.unshift({...call}, {...output, output:'old output'});
+  assert(f.support().exposure.some(r => r.ref.id === f.full.handle.id));
+  f.history[0].attempt.body.input[1] = output;
+  f.history[0].attempt.body.input[3] = {...output, output:'wrong current output'};
+  assert(!f.support().exposure.some(r => r.ref.id === f.full.handle.id));
+});
+
+test('escaped value pages and ordinary byte reads can jointly establish a complete source', () => {
+  const f = decisionFixture(), split = 12;
+  const shown = JSON.stringify(f.file), end = Buffer.byteLength(JSON.stringify(f.file.slice(0, split))) - 1;
+  f.expand(f.full.handle, shown, 0, end);
+  assert(!f.support().exposure.some(r => r.paths.includes(f.path)));
+  const text = f.file.slice(split), size = BigInt(f.file.length), found = [f.snapshot[0], f.path,hash(f.file),BigInt(split),size,size,text];
+  f.work({tag:1,value:[[f.path,BigInt(split),text.length],{tag:0,value:found}]},
+    {tag:'found',value:{snapshot:[...f.snapshot[0]],path:f.path,sha256:hash(f.file),start:String(split),end:String(size),file_bytes:String(size),content:text}});
+  assert(f.support().exposure.some(r => r.ref.id === f.full.handle.id && r.paths.includes(f.path)));
 });
 
 test('confirmed range rejections distinguish file presence from returned file contents', () => {
@@ -212,16 +240,16 @@ test('a bound report correction discloses metadata only', () => {
   f.step('context', {tag: 'inspect', value: {}}, {});
   const i = f.history[0];
   i.results[0].output = {tag: 'report_rejection', value: rejection};
-  i.attempt.body.input[0].output[0].text = JSON.stringify(rejection);
+  i.attempt.body.input[1].output[0].text = JSON.stringify(rejection);
   assert.deepEqual(f.support().unresolved, []);
-  i.attempt.body.input[0].output[0].text = 'different text';
+  i.attempt.body.input[1].output[0].text = 'different text';
   assert.equal(f.support().unresolved[0].kind, 'unbound_report_rejection');
 });
 
 test('unfamiliar projected results retain verified copy ancestry after projector inspection', () => {
   const f = decisionFixture(), selected = 'b'.repeat(64), descriptor = {root: '0', types: [{tag:'text',value:{}}]};
   const use = {input: f.input.handle, result: f.result.handle, paths: [], one_computed_block: true, payload: 'value',
-    payload_schema_sha256: 'schema', schema_kind: 'other', semantic_judgment: 'unestablished',
+    payload_schema_sha256: 'schema', payload_descriptor: descriptor, schema_kind: 'other', semantic_judgment: 'unestablished',
     exposures: [{id: '1', rendered: true, model_response: true, delivery: 'confirmed'}]};
   const projector = {program: {kind:'program', id:'c'.repeat(64)}, source:f.slice.source, source_bytes:Buffer.from('projector')};
   f.step('program', {tag: 'inspect', value: {target: {tag: 'program', value: projector.program}}},
@@ -230,7 +258,7 @@ test('unfamiliar projected results retain verified copy ancestry after projector
   f.expand(projector.source, 'projector', 0, 5);
   const alias = f.value('copy', f.result.text, [3, [f.witness.raw[2], f.result.raw[2]], null, null, {tag: 0}]);
   const cmd = {tag: 'materialize', value: {sources: [f.witness.handle], input: {tag: 'value', value: {tag: 'reference', value: use.result}}}};
-  f.step('context', cmd, {value: alias.handle, preview: f.page(JSON.stringify(alias.text))});
+  f.step('context', cmd, {value: alias.handle, preview: f.page(JSON.stringify(alias.text), 0, 3)});
   const linked = f.support([use], projector);
   assert.deepEqual(linked.routes, []);
   assert.deepEqual(linked.unresolved, []);
@@ -291,10 +319,10 @@ test('same-result previews retain projection credit and paged canonical-input re
   const row = ['1','1','1',true,'2',[3,f.witness.handle.id]];
   const payload = [[1, 1, true, [1]], [row]];
   const use = {canonical_input: true, input: f.input.handle, result: f.result.handle, paths: [f.path, f.member],
-    one_computed_block: true, payload, payload_schema_sha256: 's', schema_kind: 'ScanEvidence', semantic_judgment: 'supported',
+    one_computed_block: true, payload, payload_schema_sha256: 's', payload_descriptor: {root:'0',types:[]}, schema_kind: 'ScanEvidence', semantic_judgment: 'supported',
     exposures: [{id: '1', rendered: true, delivery: 'confirmed', model_response: true}]};
   f.step('work', {tag: 'inspect'}, {result: use.result, result_preview: f.page(JSON.stringify(f.result.text))},
-    {selected, block: {kind: 'computed', schema_identity: 's', result: use.result, value: payload}});
+    {selected, block: {kind: 'computed', schema_identity: 's', schema: use.payload_descriptor, result: use.result, value: payload}});
   assert.deepEqual(f.support([use]).routes, []);
   assert.deepEqual(f.support([use]).unresolved, []);
   assert(f.support([use]).exposure.some(e => e.ref.id === f.witness.handle.id && e.paths.length === 1 && e.paths[0] === f.member));
@@ -305,6 +333,25 @@ test('same-result previews retain projection credit and paged canonical-input re
   f.expand(f.input.handle, text, 0, 3);
   assert(f.support([use]).routes.some(row => row.ref?.id === f.input.handle.id));
   assert(f.support([use]).exposure.some(row => row.ref.id === f.input.handle.id && row.paths.includes(f.absent)));
+});
+
+test('static guidance, bound controller metadata and a verified same-view reread do not disclose fresh scan evidence', () => {
+  const f = decisionFixture(), descriptor = {root:'0', types:[{tag:'text',value:{}}]};
+  const use = {view:{kind:'view',id:'d'.repeat(64)}, consumer:{kind:'observation',id:'e'.repeat(64)}, input:f.input.handle,
+    result:f.result.handle, canonical_input:true, paths:[], payload:'shown', payload_descriptor: descriptor,
+    payload_schema_sha256:'s', schema_kind:'other', semantic_judgment:'unestablished', one_computed_block:true,
+    exposures:[{id:'1',rendered:true,delivery:'confirmed',model_response:true}]};
+  f.step('program',{tag:'describe',value:{section:'projection'}},f.page('static projection documentation'),
+    {selected:use.view.id,block:{kind:'computed',value:'shown',schema:descriptor,schema_identity:'s',result:use.result}});
+  f.step('context',{tag:'inspect',value:{consumer:{target:{tag:'controller',value:{}}}}},
+    {consumer:use.consumer,binding:f.page('binding metadata')});
+  f.step('context',{tag:'expand',value:{reference:use.view}},
+    {view:use.view,consumer:use.consumer,projection_result:use.result,coverage:'selected_blocks_only',selection:f.page(JSON.stringify(f.result.text))});
+  const read = () => f.support([use], null, new Set([use.consumer.id]));
+  assert.deepEqual(read().unresolved, []);
+  assert.deepEqual(read().routes, []);
+  f.expand(f.input.handle, JSON.stringify(f.input.text), 0, 0);
+  assert(read().routes.some(r => r.kind === 'expansion' && r.ref.id === f.input.handle.id));
 });
 
 test('delivered ordinary listings establish scoped absence and ordinary read pages bind to a visible source handle', () => {

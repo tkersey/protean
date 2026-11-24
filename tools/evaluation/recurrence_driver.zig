@@ -10,10 +10,16 @@ const Json = native.json;
 const acquisition = @import("recurrence_acquisition.zig");
 const presentation = @import("recurrence_presentation.zig");
 const repair = @import("interface_repair_driver.zig");
-const assets: native.discovery.Assets = .{
+const ordinary_assets: native.discovery.Assets = .{
     .image = @embedFile("native_image"),
     .application = @embedFile("native_application"),
     .manifest = @embedFile("native_manifest"),
+};
+
+const study_assets: native.discovery.Assets = .{
+    .image = @embedFile("study_image"),
+    .application = @embedFile("study_application"),
+    .manifest = @embedFile("study_manifest"),
 };
 
 const Options = struct {
@@ -128,7 +134,13 @@ fn configure(
     application: *native.discovery.Application,
 ) !void {
     const frozen = if (options.profile_task) |task| try service.frozenInputs(a, task) else null;
-    const admitted = try environment.configure(a, io, options.configuration, frozen, assets);
+    const admitted = try environment.configure(
+        a,
+        io,
+        options.configuration,
+        frozen,
+        service.assets,
+    );
     errdefer if (admitted.environment) |owner| environment.release(owner);
     if (frozen) |saved| {
         if (!std.mem.eql(u8, saved.profile, admitted.bytes) or
@@ -161,37 +173,69 @@ pub fn main(init: std.process.Init) void {
     run(init) catch |err| std.process.exit(native.reportFailure(err));
 }
 
+const Package = struct {
+    assets: native.discovery.Assets,
+    handlers: native.Registry,
+    root: ?native.Registry,
+    application: native.discovery.Application,
+
+    fn open(a: std.mem.Allocator, study: bool) !Package {
+        const assets = if (study) study_assets else ordinary_assets;
+        var handlers = try native.Registry.init(a, &environment.handlers);
+        errdefer handlers.deinit();
+        var root = if (study)
+            try native.Registry.init(a, &environment.studyDeclarations())
+        else
+            null;
+        errdefer if (root) |*registry| registry.deinit();
+        const application = try native.discovery.Application.init(
+            types,
+            a,
+            assets,
+            root orelse handlers,
+        );
+        if (root) |registry| handlers.admitted_root = .{
+            .image = application.image_identity,
+            .entries = registry.entries,
+        };
+        return .{
+            .assets = assets,
+            .handlers = handlers,
+            .root = root,
+            .application = application,
+        };
+    }
+    fn close(self: *Package) void {
+        self.application.deinit();
+        if (self.root) |*registry| registry.deinit();
+        self.handlers.deinit();
+    }
+};
+
 fn run(init: std.process.Init) !void {
     const options = try Options.parse(init);
     var arena = std.heap.ArenaAllocator.init(init.gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    var declarations = environment.handlers;
-    if (options.bootstrap_digest != null) {
-        for (&declarations) |*entry| {
-            if (std.mem.eql(u8, entry.identity, types.workspace_identity))
-                entry.* = environment.initialWorkspaceDeclaration();
-        }
-    }
-    var handlers = try native.Registry.init(init.gpa, &declarations);
-    defer handlers.deinit();
-    var application = try native.discovery.Application.init(types, init.gpa, assets, handlers);
-    defer application.deinit();
+    var package = try Package.open(init.gpa, options.bootstrap_digest != null);
+    defer package.close();
+    const application = &package.application;
+    const handlers = package.handlers;
     var namespace = try native.Namespace.open(init.gpa, init.io, options.state_path);
     defer namespace.close() catch |err| std.debug.panic("namespace: {t}", .{err});
     var service = try Service.init(
         init.gpa,
         init.io,
         &namespace,
-        assets,
-        &application,
+        package.assets,
+        application,
         handlers,
         try initialProfile(a, init.io, handlers),
     );
     var environment_owner: ?*anyopaque = null;
     defer if (environment_owner) |owner| environment.release(owner);
     defer service.close(init.gpa) catch |err| std.debug.panic("service: {t}", .{err});
-    try configure(a, init.io, &service, options, &application);
+    try configure(a, init.io, &service, options, application);
     environment_owner = service.profile.environment;
     const worker = try Worker.init(init.gpa, init.io);
     defer worker.deinit(init.gpa) catch |err| std.debug.panic("worker: {t}", .{err});
@@ -283,7 +327,9 @@ const Driver = struct {
         const method = try Json.text(try field(request, "method"));
         const params = Json.get(request, "params") orelse Json.object();
         if (std.mem.eql(u8, method, "evaluation.interface_repair.sources"))
-            return self.repairSources(a, params);
+            return self.preparationAssets(a, params, false);
+        if (std.mem.eql(u8, method, "evaluation.interface_repair.assets"))
+            return self.preparationAssets(a, params, true);
         if (std.mem.eql(u8, method, "evaluation.observe")) return self.observe(a, params);
         if (std.mem.eql(u8, method, "evaluation.export")) {
             const task = try native.client.identifier(16, try field(params, "task_id"));
@@ -394,15 +440,28 @@ const Driver = struct {
         return controlled.run(self.service, self.worker, a, task, input);
     }
 
-    fn repairSources(self: *Driver, a: std.mem.Allocator, params: Json.Value) !Json.Value {
+    fn preparationAssets(
+        self: *Driver,
+        a: std.mem.Allocator,
+        params: Json.Value,
+        metadata: bool,
+    ) !Json.Value {
         if (self.service.application.execution_mode != .offline)
             return error.OfflineFixtureRequired;
         if (params != .object or params.object.count() != 0) return error.InvalidParams;
         const tasks = try self.service.namespace.store.taskIds(a, false);
         defer a.free(tasks);
         if (tasks.len != 0) return error.PreparationNamespaceRequired;
-        const sources = @import("interface_repair_sources");
         var result = Json.object();
+        if (metadata) {
+            if (self.repair_session.expected != null) return error.PreparationNamespaceRequired;
+            var parsed = try Json.parseAsset(a, study_assets.manifest, study_assets.manifest.len);
+            defer parsed.deinit();
+            try Json.put(a, &result, "application", Json.string(study_assets.application));
+            try Json.put(a, &result, "build", try Json.copy(a, parsed.value));
+            return result;
+        }
+        const sources = @import("interface_repair_sources");
         inline for (.{ sources.Seed.lossy, .adequate }) |kind|
             try Json.put(a, &result, @tagName(kind), Json.string(try sources.seed(a, kind)));
         return result;

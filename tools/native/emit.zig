@@ -219,7 +219,8 @@ pub fn write(comptime definition: type, comptime types: type, init: std.process.
     };
     var writer = std.Io.Writer.Allocating.init(a);
     try std.json.Stringify.value(metadata, .{}, &writer.writer);
-    try appendSupportMetadata(types, a, &writer);
+    const support = if (@hasDecl(definition, "support_types")) definition else types;
+    try appendSupportMetadata(support, a, &writer);
     try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = image_path, .data = image });
     try std.Io.Dir.cwd().writeFile(init.io, .{
         .sub_path = application_path,

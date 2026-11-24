@@ -2,8 +2,8 @@ import {createHash} from 'node:crypto';
 import {isDeepStrictEqual as equal} from 'node:util';
 import {contract} from '../../test/protean/adaptive_capture_checks.mjs';
 import {decodeSchema, decodeValue, encodeSchema, ValueCodecError} from '../../test/support/values.mjs';
-import {decodeEffectResult, physicalProviderAttempt} from './workspace.mjs';
-import {assessScan, canonicalEvidence, collisionProbe, inspectProjection, parseCandidate} from './interface_repair.mjs';
+import {acquiredPageRanges, decodeEffectResult, physicalProviderAttempt} from './workspace.mjs';
+import {assessScan, canonicalEvidence, collisionProbe, inspectProjection, parseCandidate, samePresentedValue} from './interface_repair.mjs';
 
 const hex = bytes => Buffer.from(bytes).toString('hex');
 const digest = ref => ref && hex(ref[0]);
@@ -26,20 +26,28 @@ const proposalSchemaId = schemaId([{product: [1, 4]}, {product: [2, 3]}, scanTyp
 function payloadSchema(descriptor) {
   const fields = descriptor.types[descriptor.root].product;
   return fields?.length === 2 && schemaId(descriptor.types, fields[0]) === proposalSchemaId ?
-    schemaId(descriptor.types, fields[1]) : null;
+    encodeSchema({types: descriptor.types, root: fields[1]}) : null;
 }
 
 export function inspectProjectionResult(descriptor, bytes) {
-  const schema = payloadSchema(descriptor);
-  if (!schema) return {inspection_error: 'InvalidProjectionSchema'};
+  const bytesSchema = payloadSchema(descriptor);
+  if (!bytesSchema) return {inspection_error: 'InvalidProjectionSchema'};
+  const schema = sha(bytesSchema), canonical = decodeSchema(bytesSchema);
+  const display = {root: '0', types: canonical.types.map(type => {
+    if (typeof type === 'string') return {tag: type, value: {}};
+    const [[tag, raw]] = Object.entries(type);
+    const value = tag === 'enumeration' ? raw : Array.isArray(raw) ? raw.map(String) :
+      typeof raw === 'object' ? Object.fromEntries(Object.entries(raw).map(([key, n]) => [key, String(n)])) : String(raw);
+    return {tag, value};
+  })};
   try {
     const [proposal, value] = decodeValue(descriptor, bytes);
     const computed = proposal[1].some(b => b.tag === 1);
     return {consumer: proposal[0], has_computed_block: computed, one_computed_block: computed && proposal[1].length === 1,
-      schema, value, payload: renderedValue(value)};
+      schema, display, value, payload: renderedValue(value)};
   } catch (error) {
     if (!(error instanceof ValueCodecError || error instanceof RangeError)) throw error;
-    return {schema, inspection_error: error.code ?? 'ValueCapacity'};
+    return {schema, display, inspection_error: error.code ?? 'ValueCapacity'};
   }
 }
 
@@ -119,47 +127,109 @@ function scanInput(archive, input) {
   }
 }
 
+const nonempty = value => typeof value === 'string' && value.length > 0;
+
+function modelItem(item, incomplete) {
+  if (item?.status !== 'completed' && !(incomplete && item?.status === 'incomplete') &&
+      !(item?.type === 'reasoning' && item.status === undefined)) return false;
+  if (item.type === 'function_call') return nonempty(item.call_id) && nonempty(item.name) && nonempty(item.arguments);
+  if (item.type === 'reasoning') return nonempty(item.encrypted_content) ||
+    Array.isArray(item.summary) && item.summary.some(p => p?.type === 'summary_text' && nonempty(p.text)) ||
+    Array.isArray(item.content) && item.content.some(p => p?.type === 'reasoning_text' && nonempty(p.text));
+  return item.type === 'message' && item.role === 'assistant' && Array.isArray(item.content) &&
+    item.content.some(p => p?.type === 'output_text' && nonempty(p.text) || p?.type === 'refusal' && nonempty(p.refusal));
+}
+
+function reconcileOutput(items, roster) {
+  if (!Array.isArray(roster) || roster.length > items.size) return null;
+  const ordered = Array.from({length: items.size}, (_, i) => items.get(i));
+  if (ordered.some(item => !item || !['function_call', 'message', 'reasoning'].includes(item.type) ||
+      !(item.status === 'completed' || item.type === 'reasoning' && item.status === undefined))) return null;
+  let previous = -1;
+  for (const [i, part] of roster.entries()) {
+    if (!part || typeof part !== 'object') return null;
+    const k = ordered.length === roster.length ? i : ordered.findIndex(item =>
+      ['id', 'call_id'].some(key => nonempty(part[key]) && part[key] === item[key]));
+    if (k <= previous || part.type !== ordered[k].type) return null;
+    const pending = [[ordered[k], part]];
+    while (pending.length) {
+      const [target, patch] = pending.pop();
+      if (target === patch) continue;
+      if (!target || !patch || typeof target !== 'object' || typeof patch !== 'object' ||
+          Array.isArray(target) !== Array.isArray(patch) || Array.isArray(target) && target.length !== patch.length) return null;
+      for (const key of Object.keys(patch)) {
+        if (Object.hasOwn(target, key)) pending.push([target[key], patch[key]]);
+        else Object.defineProperty(target, key, {value: patch[key], enumerable: true});
+      }
+    }
+    previous = k;
+  }
+  for (const key of ['id', 'call_id']) {
+    const ids = ordered.filter(item => Object.hasOwn(item, key)).map(item => item[key]);
+    if (!ids.every(nonempty) || ids.length !== new Set(ids).size) return null;
+  }
+  return ordered;
+}
+
+function responseStream(text) {
+  const frames = text.replaceAll('\r\n', '\n').replaceAll('\r', '\n').split('\n\n');
+  if (frames.pop() !== '') return null;
+  const items = new Map();
+  let responseId, sequence;
+  for (const [i, frame] of frames.entries()) {
+    const lines = frame.split('\n');
+    const data = lines.filter(s => s === 'data' || s.startsWith('data:')).map(s => s.slice(5).replace(/^ /, '')).join('\n');
+    if (!data || data === '[DONE]') continue;
+    const event = JSON.parse(data);
+    if (!nonempty(event.type) || lines.filter(s => s.startsWith('event:')).some(s => s.slice(6).replace(/^ /, '') !== event.type)) return null;
+    for (const id of [event.response_id, event.response?.id]) {
+      if (id === undefined) continue;
+      if (!nonempty(id) || responseId !== undefined && responseId !== id) return null;
+      responseId = id;
+    }
+    if (event.sequence_number !== undefined) {
+      if (!Number.isSafeInteger(event.sequence_number) || event.sequence_number < 0 || event.sequence_number <= sequence) return null;
+      sequence = event.sequence_number;
+    }
+    if (event.type === 'response.output_item.done') {
+      if (!Number.isSafeInteger(event.output_index) || event.output_index < 0 || items.has(event.output_index) || !event.item) return null;
+      items.set(event.output_index, event.item);
+    }
+    if (!['response.completed', 'response.incomplete', 'response.failed', 'error'].includes(event.type)) continue;
+    if (i + 1 !== frames.length) return null;
+    if (event.type === 'error') return {status: 'failed'};
+    const body = event.response;
+    if (!nonempty(body?.id) || body.status !== event.type.slice('response.'.length)) return null;
+    if (body.status === 'completed') {
+      const output = reconcileOutput(items, body.output);
+      if (!output) return null;
+      return {...body, output};
+    }
+    return body;
+  }
+  return null;
+}
+
 export function capturedModelResponse(raw, normalizedResult = null) {
   if (!raw || raw[7] !== 2) return null;
   if (raw[0] < 200 || raw[0] >= 300) return false;
   if (!raw[1]) return null;
-  let body, terminal;
+  let body;
   try {
     const bytes = new TextDecoder('utf-8', {fatal: true}).decode(raw[3]);
     if (raw[4] === 0) body = JSON.parse(bytes);
     else if (raw[4] === 1) {
       const media = some(raw[5]);
       if (media && media.split(';')[0].trim().toLowerCase() !== 'text/event-stream') return null;
-      for (const frame of bytes.replaceAll('\r\n', '\n').replaceAll('\r', '\n').split('\n\n').slice(0, -1)) {
-        const lines = frame.split('\n');
-        const data = lines.filter(s => s === 'data' || s.startsWith('data:')).map(s => s.slice(5).replace(/^ /, '')).join('\n');
-        if (!data || data === '[DONE]') continue;
-        const event = JSON.parse(data);
-        if (lines.filter(s => s.startsWith('event:')).some(s => s.slice(6).trimStart() !== event.type)) return null;
-        if (!['response.completed', 'response.incomplete', 'response.failed', 'error'].includes(event.type)) continue;
-        if (terminal) return null;
-        terminal = event.type;
-        body = event.response;
-      }
-      if (terminal === 'error' || terminal === 'response.failed') return false;
-      if (!['response.completed', 'response.incomplete'].includes(terminal) ||
-          body?.status !== terminal.slice('response.'.length)) return null;
+      body = responseStream(bytes);
     } else return null;
   } catch { return null; }
   if (body?.status === 'failed') return false;
   const incomplete = body?.status === 'incomplete';
   if ((!incomplete && body?.status !== 'completed') || (incomplete ? body.error != null : body.error !== null) ||
       !Array.isArray(body.output)) return null;
-  if (normalizedResult && !incomplete) return normalizedResult[0].tag === 1 ||
-    (normalizedResult[0].tag === 0 && normalizedResult[0].value[0].length > 0) ? true : null;
-  const nonempty = value => typeof value === 'string' && value.length > 0;
-  const generated = body.output.some(item => {
-    if (item?.status !== 'completed' && !(incomplete && item?.status === 'incomplete')) return false;
-    if (item.type === 'function_call') return nonempty(item.call_id) && nonempty(item.name) && nonempty(item.arguments);
-    return item.type === 'message' && item.role === 'assistant' && Array.isArray(item.content) &&
-      item.content.some(p => p?.type === 'output_text' && nonempty(p.text) || p?.type === 'refusal' && nonempty(p.refusal));
-  });
-  return generated ? true : null;
+  if (normalizedResult && !(incomplete ? normalizedResult[0].tag === 3 : [0, 1].includes(normalizedResult[0].tag))) return null;
+  return body.output.some(item => modelItem(item, incomplete)) ? true : null;
 }
 
 function normalizedResult(archive, application, capture, occurrence) {
@@ -319,13 +389,15 @@ function execution(archive, programs, values, specimen, sourceRefs, programRef, 
   return {program, actual, presented, schemaKind, proof, semantic};
 }
 
-export function computedPresentation(block, result, schema, payload) {
-  if (block?.kind !== 'computed' || !same(block.result, result) || block.schema_identity !== schema) return false;
-  try { return equal(block.value, payload); }
-  catch (error) {
-    if (error instanceof RangeError) return false;
-    throw error;
-  }
+export function computedPresentation(block, result, schema, payload, expectedDescriptor) {
+  if (block?.kind !== 'computed' || !same(block.result, result) || block.schema_identity !== schema ||
+      !expectedDescriptor || !samePresentedValue(block.schema, expectedDescriptor) || !Object.hasOwn(block, 'value')) return false;
+  return payload === undefined ? null : samePresentedValue(block.value, payload);
+}
+
+export function computedRendering(blocks, result, schema, payload, expectedDescriptor) {
+  const matches = blocks.map(block => computedPresentation(block, result, schema, payload, expectedDescriptor));
+  return matches.includes(true) || (matches.includes(null) ? null : false);
 }
 
 function projectionUse(archive, view, programs, values, specimen, sourceRefs, attempts, actions, lossySourceDigest, build, schemas) {
@@ -355,14 +427,15 @@ function projectionUse(archive, view, programs, values, specimen, sourceRefs, at
   const exposures = attempts.filter(row => row.selected_view === viewReference.id).map(row => {
     const material = selectedPresentation(row.selected_view, row.body);
     const blocks = material?.blocks ?? [];
-    const computed = presented.has_computed_block && blocks.find(b => computedPresentation(b, resultReference, presented.schema, presented.payload));
-    const rendered = Boolean(computed);
-    if (computed?.schema && row.model_response === true) schemas[presented.schema] = computed.schema;
-    return {...publicAttempt(row), rendered, one_computed_block: rendered && blocks.length === 1, input_index: material?.index ?? null};
+    const rendered = presented.has_computed_block !== false &&
+      computedRendering(blocks, resultReference, presented.schema, presented.payload, presented.display);
+    if (rendered !== false && row.model_response === true) schemas[presented.schema] = presented.display;
+    return {...publicAttempt(row), rendered, one_computed_block: blocks.length === 1 ? rendered : false, input_index: material?.index ?? null};
   });
   return {view: viewReference, program: ref('program', digest(programRef)), input: ref('value', digest(inputRef)),
     result: resultReference, work: ref('work', hex(work[1])), consumer: ref('observation', actual[0][1]),
-    canonical_input: proof, payload: presented.payload, payload_schema_sha256: presented.schema ?? null, schema_kind: schemaKind,
+    canonical_input: proof, payload: presented.payload, payload_schema_sha256: presented.schema ?? null,
+    payload_descriptor: presented.display ?? null, schema_kind: schemaKind,
     inspection_error: presented.inspection_error ?? null,
     known_lossy: digest(result.program.raw[3][1]) === lossySourceDigest,
     ...semantic, one_computed_block: presented.one_computed_block ?? null,
@@ -437,14 +510,20 @@ function pageRange(page, bytes) {
 }
 
 function receivedOutput(attempt, callId) {
-  const items = attempt.body.input.filter(item => item.type === 'function_call_output' && item.call_id === callId);
+  const input = attempt.body.input;
+  const last = input.findLastIndex(item => item.type === 'function_call');
+  if (last < 0 || input[last].call_id !== callId) return null;
+  const items = input.slice(last + 1).filter(item => item.type === 'function_call_output' && item.call_id === callId);
   if (items.length !== 1) return null;
   const output = items[0].output;
   if (typeof output === 'string') return output;
   return output?.length === 1 && output[0].type === 'input_text' ? output[0].text : null;
 }
 
-export function decisionSupport(archive, application, specimen, sourceRefs, values, interactions, uses, producer, projector = null) {
+const staticDescriptions = new Set(['source_records', 'source_derivations', 'values', 'bindings', 'runtimes',
+  'examples', 'projection', 'retention_query', 'divergence_query', 'hypothetical_reply', 'controller_contract']);
+
+export function decisionSupport(archive, application, specimen, sourceRefs, values, interactions, uses, producer, projector = null, consumers = new Set()) {
   const exposure = [], routes = [], unresolved = [];
   if (!producer) return {exposure, routes, unresolved};
   const history = interactions.filter(i => i.controller_id === producer.controller_id &&
@@ -511,7 +590,7 @@ export function decisionSupport(archive, application, specimen, sourceRefs, valu
     const item = wanted?.kind === 'source' ? bySource.get(wanted.id) : wanted?.kind === 'value' && byValue.get(wanted.id);
     const computed = !item && wanted?.kind === 'value' && computation.get(wanted.id);
     if (!item && !computed) { note(unresolved, kind, i, {ref: wanted}); return; }
-    let text, scanStart = 0, scanEnd = 0;
+    let text;
     if (item) text = wanted.kind === 'source' ? specimen.files[item.path] : JSON.stringify(item.text);
     else {
       const raw = values.get(wanted.id)?.raw;
@@ -519,13 +598,6 @@ export function decisionSupport(archive, application, specimen, sourceRefs, valu
       try {
         const value = renderedValue(typed(archive, raw[3][1], raw[3][2]));
         text = JSON.stringify(value);
-        if (computed.input) {
-          scanEnd = Buffer.byteLength(text);
-          if (Array.isArray(value) && value.length === 2) {
-            scanStart = 2 + Buffer.byteLength(JSON.stringify(value[0]));
-            scanEnd--;
-          }
-        }
       }
       catch (error) {
         if (error.code !== 'ValueCapacity' && !(error instanceof RangeError)) throw error;
@@ -542,10 +614,15 @@ export function decisionSupport(archive, application, specimen, sourceRefs, valu
       if (same(source, item.source)) remember(source, item.path);
       note(routes, kind, i, {path: item.path});
       if (wanted.kind === 'source') markSource(i, kind, item.path, start, end);
-      else if (complete) {
-        markSource(i, kind, item.path, item.start, item.end);
-        if (item.start !== 0 || item.end !== files.get(item.path).bytes.length)
-          exposure.push({ref: wanted, paths: [], range: {path: item.path, start: item.start, end: item.end}});
+      else {
+        const ranges = complete ? [[0, item.end - item.start]] :
+          acquiredPageRanges(Buffer.from(item.text), true, pages.get(wanted.kind + wanted.id));
+        for (const [lo, hi] of ranges) {
+          const start = item.start + lo, end = item.start + hi;
+          markSource(i, kind, item.path, start, end);
+          if (start !== 0 || end !== files.get(item.path).bytes.length)
+            exposure.push({ref: wanted, paths: [], range: {path: item.path, start, end}});
+        }
       }
       return;
     }
@@ -554,16 +631,14 @@ export function decisionSupport(archive, application, specimen, sourceRefs, valu
     if (complete) partialComputations.delete(wanted.id);
     if (alreadyShown) {
       if (!use.one_computed_block) note(unresolved, kind, i, {ref: wanted});
-    } else if (input) {
-      if (end > start && end > scanStart && start < scanEnd) note(routes, kind, i, {ref: wanted});
-    }
+    } else if (input) note(routes, kind, i, {ref: wanted});
     else if (!complete) partialComputations.set(wanted.id, {kind, i, wanted});
     else if (input || use.semantic_judgment === 'supported') note(routes, kind, i, {ref: wanted});
     else note(unresolved, kind, i, {ref: wanted});
-    if (complete && (input || alreadyShown || use.semantic_judgment === 'supported')) {
-      if (alreadyShown && !same(wanted, use.result)) exposure.push({...presented.get(use.result.id),
-        ref: wanted, projected_result: use.result, alias_preview_attempt: i.attempt.id});
-      else if (input || use.semantic_judgment === 'supported') credit(wanted, input ? [...relevant] : use.paths);
+    if (alreadyShown && !same(wanted, use.result)) exposure.push({...presented.get(use.result.id),
+      ref: wanted, projected_result: use.result, alias_preview_attempt: i.attempt.id});
+    if (complete && (input || use.semantic_judgment === 'supported')) {
+      if (!alreadyShown || same(wanted, use.result)) credit(wanted, input ? [...relevant] : use.paths);
       if (input) embedded({schema_kind: 'ScanEvidence', semantic_judgment: 'supported',
         paths: [...relevant], payload: renderedValue(canonicalEvidence(specimen, sourceRefs))});
       else embedded(use);
@@ -583,7 +658,7 @@ export function decisionSupport(archive, application, specimen, sourceRefs, valu
     const selection = selectedPresentation(i.attempt.selected_view, i.attempt.body);
     for (const block of selection?.blocks ?? []) {
       if (block.kind === 'computed' && uses.some(use => use.exposures.some(e => e.id === i.attempt.id && e.rendered) &&
-          computedPresentation(block, use.result, use.payload_schema_sha256, use.payload))) continue;
+          computedPresentation(block, use.result, use.payload_schema_sha256, use.payload, use.payload_descriptor))) continue;
       const val = block.value_reference;
       const item = val?.kind === 'value' && byValue.get(val.id);
       if (item && block.kind === (item.source ? 'acquisition' : 'judgment')) {
@@ -646,10 +721,20 @@ export function decisionSupport(archive, application, specimen, sourceRefs, valu
           preview(i, path ? 'snapshot_acquisition' : 'materialized_value', wanted, observation.preview, observation.source);
         } else if (action.tag === 'program' && command.tag === 'inspect' && command.value.target?.tag === 'program' &&
             same(command.value.target.value, projector?.program) && reply.disposition === 'observed') continue;
+        else if (action.tag === 'program' && command.tag === 'describe' && staticDescriptions.has(command.value.section) &&
+            reply.disposition === 'observed') continue;
+        else if (action.tag === 'context' && command.tag === 'inspect' && reply.disposition === 'observed' &&
+            command.value.consumer?.target.tag === 'controller' && observation.consumer?.kind === 'observation' &&
+            consumers.has(observation.consumer.id) && typeof observation.binding?.text === 'string') continue;
         else if (action.tag === 'context' && command.tag === 'expand' && reply.disposition === 'observed' &&
             same(command.value.reference, projector?.source) && pageRange(observation, projector.source_bytes)) continue;
-        else if (action.tag === 'context' && command.tag === 'expand' && reply.disposition === 'observed')
-          preview(i, 'expansion', command.value.reference, observation);
+        else if (action.tag === 'context' && command.tag === 'expand' && reply.disposition === 'observed') {
+          const wanted = command.value.reference;
+          const use = wanted.kind === 'view' && uses.find(u => same(u.view, wanted) && same(wanted, observation.view) &&
+            same(u.result, observation.projection_result) && same(u.consumer, observation.consumer) &&
+            observation.coverage === 'selected_blocks_only');
+          preview(i, 'expansion', use ? use.result : wanted, use ? observation.selection : observation);
+        }
         else if ((action.tag === 'work' || action.tag === 'placement' && command.tag === 'control') && reply.disposition === 'observed') {
           const op = action.tag === 'work' ? command : command.value.command;
           const items = op.tag === 'wait' ? observation.works : op.tag === 'collect' ? observation : [observation];
@@ -786,7 +871,7 @@ export function adjudicateRepairTrace({archive, application, observations = [], 
   });
   const projector = actual && {program: actual.program, source: ref('source', actual.source_sha256),
     source_bytes: archive.objects.get(actual.source_sha256)};
-  const support = decisionSupport(archive, application, specimen, sourceRefs, values, history, uses, producer, projector);
+  const support = decisionSupport(archive, application, specimen, sourceRefs, values, history, uses, producer, projector, consumers);
   const evidenceComplete = Boolean(producer && !support.unresolved.length && !attempts.some(a => a.model_response === null) &&
     history.length === inventory(archive, 26, 'controller_interaction').length &&
     observations.some(o => o.acquisition_records_complete && o.report_producer?.attempt_id === producer.attempt.id));

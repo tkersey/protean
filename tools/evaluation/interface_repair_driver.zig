@@ -85,9 +85,15 @@ pub const Session = struct {
         cut: Cut,
     ) !Json.Value {
         const expected = self.expected orelse return error.BootstrapNotEnabled;
-        if (self.started) return error.InitialCutRequired;
+        const completed_only = if (Json.get(params, "completed_only")) |flag| blk: {
+            if (flag != .bool or !flag.bool) return error.InvalidParams;
+            break :blk true;
+        } else false;
+        const fields = @as(usize, 3) + @intFromBool(completed_only);
+        if (params != .object or params.object.count() != fields)
+            return error.InvalidParams;
+        if (!completed_only and self.started) return error.InitialCutRequired;
         if (worker.future != null or service.work != null) return error.WorkerOutstanding;
-        if (params != .object or params.object.count() != 3) return error.InvalidParams;
         const task = try native.client.identifier(16, try field(params, "task_id"));
         const descriptor = try Json.text(try field(params, "descriptor"));
         if (!std.meta.eql(expected, native.testing.digest(descriptor))) return error.ChangedPlan;
@@ -102,7 +108,15 @@ pub const Session = struct {
         const env: *environment.State = @ptrCast(@alignCast(service.profile.environment orelse
             return error.MissingConfiguration));
         try validatePlan(a, plan, source, env);
-        const remaining = try requireCut(service, a, task, plan, expected);
+        const submission = try originalSubmission(service, a, task, plan);
+        if (completed_only) {
+            if (cut != .complete) return error.InvalidParams;
+            return self.completed(service, a, task, plan) catch |err| switch (err) {
+                error.BootstrapEvidencePending => .null,
+                else => return err,
+            };
+        }
+        const remaining = try requireCut(service, a, task, plan, expected, submission);
         self.started = true;
         self.task = task;
         self.metrics = .{};
@@ -121,6 +135,62 @@ pub const Session = struct {
         else
             try self.projected(&run, worker, env, plan, source);
         try Json.put(a, &output, "build_metrics", try self.metrics.?.json(a));
+        return output;
+    }
+
+    fn completed(
+        self: *const @This(),
+        service: *Service,
+        a: Allocator,
+        task: [16]u8,
+        plan: Plan,
+    ) !Json.Value {
+        const digest = self.expected.?;
+        const env: *environment.State = @ptrCast(@alignCast(service.profile.environment.?));
+        var run: Bootstrap = .{
+            .a = a,
+            .service = service,
+            .task = task,
+            .snapshot = try snapshotRef(a, service.profile.bytes),
+            .prefix = try progressPrefix(a, digest),
+            .cut = .complete,
+            .remaining = 0,
+            .read_only = true,
+        };
+        var copy = self.*;
+        const ordinary_case = plan.condition == .ordinary;
+        const label = if (ordinary_case) "ordinary" else @tagName(plan.phase);
+        const key = try receiptKey(a, digest, label);
+        if (plan.phase != .diagnostic) {
+            const kind: @FieldType(wc.Ref, "kind") = if (ordinary_case) .value else .view;
+            const id = try retainedId(service, a, task, key, kind);
+            if (!ordinary_case) {
+                var view = try retainedView(service, a, task, id);
+                defer view.deinit();
+                const projection = view.value.description.projection orelse
+                    return error.InvalidBootstrapReceipt;
+                const bytes = try service.namespace.store.object(a, projection.observation, null);
+                var read = try C.decodeOwned(native.workspace.ReplyObservation, a, bytes);
+                defer read.deinit();
+                if (!std.meta.eql(read.value.task, task)) return error.InvalidBootstrapReceipt;
+                run.consumer = try workspaceRef(a, .observation, read.value.id);
+            }
+        } else {
+            const read = try observedConsumer(service, a, task) orelse
+                return error.BootstrapEvidencePending;
+            run.consumer = read.reference;
+        }
+        var output = if (ordinary_case)
+            try copy.ordinary(&run)
+        else
+            try copy.selectProgram(&run, env, plan, try run.builtReceipt(try run.nextOperation(a)));
+        const metrics = if (std.meta.eql(self.task, @as(?[16]u8, task)) and self.metrics != null)
+            self.metrics.?
+        else if (ordinary_case)
+            BuildMetrics{}
+        else
+            BuildMetrics{ .build_commands = 1, .elapsed_ns = null };
+        try Json.put(a, &output, "build_metrics", try metrics.json(a));
         return output;
     }
 
@@ -180,7 +250,7 @@ pub const Session = struct {
         const a = run.a;
         const program = try ref(a, built, "program");
         const schema = try ref(a, built, "input_schema");
-        try run.admitProgram(program, plan);
+        if (!run.read_only) try run.admitProgram(program, plan);
         var output = try run.project(program, schema, .primary);
         if (run.cut == .primary) return error.FixtureCut;
         try Json.put(a, &output, "program", try field(built, "program"));
@@ -206,6 +276,10 @@ pub const Session = struct {
         if (phase == .diagnostic) return Json.put(run.a, output, "view", .null);
         const result = try ref(run.a, output.*, "result");
         const key = try receiptKey(run.a, self.expected.?, @tagName(phase));
+        if (run.read_only) {
+            const view = try retainedId(run.service, run.a, run.task, key, .view);
+            return putRef(run.a, output, "view", .view, view);
+        }
         const authorized: native.workspace.Authorized = .{
             .command = .{ .context = .{ .select = .{ .projected = result } } },
             .consumer = run.interface,
@@ -296,11 +370,7 @@ pub const Session = struct {
             var receipt = (try service.operationLookup(a, key)) orelse continue;
             defer receipt.deinit();
             const id = try receiptObject(receipt.value, task, .view);
-            const store = &service.namespace.store;
-            const custody = try native.workspace.custodyId(a, task, id);
-            const record = (try store.recordBytes(a, "workspace_view", custody, task)) orelse
-                return error.InvalidBootstrapReceipt;
-            var view = try C.decodeOwned(native.workspace.View, a, record);
+            var view = try retainedView(service, a, task, id);
             defer view.deinit();
             const run = view.value.description.projection orelse
                 return error.InvalidBootstrapReceipt;
@@ -330,6 +400,47 @@ pub const Session = struct {
         };
     }
 };
+
+fn retainedView(
+    service: *Service,
+    a: Allocator,
+    task: [16]u8,
+    id: [32]u8,
+) !C.Decoded(native.workspace.View) {
+    const custody = try native.workspace.custodyId(a, task, id);
+    const store = &service.namespace.store;
+    const record = (try store.recordBytes(a, "workspace_view", custody, task)) orelse
+        return error.InvalidBootstrapReceipt;
+    return C.decodeOwned(native.workspace.View, a, record);
+}
+
+fn retainedId(
+    service: *Service,
+    a: Allocator,
+    task: [16]u8,
+    key: []const u8,
+    kind: @FieldType(wc.Ref, "kind"),
+) ![32]u8 {
+    var receipt = (try service.operationLookup(a, key)) orelse
+        return error.BootstrapEvidencePending;
+    defer receipt.deinit();
+    return receiptObject(receipt.value, task, kind);
+}
+
+fn workspaceRef(a: Allocator, kind: @FieldType(wc.Ref, "kind"), id: [32]u8) !wc.Ref {
+    return .{ .kind = kind, .id = .{ .bytes = try a.dupe(u8, &std.fmt.bytesToHex(id, .lower)) } };
+}
+
+fn putRef(
+    a: Allocator,
+    output: *Json.Value,
+    name: []const u8,
+    kind: @FieldType(wc.Ref, "kind"),
+    id: [32]u8,
+) !void {
+    const value = try workspaceRef(a, kind, id);
+    try Json.put(a, output, name, try native.values.toJson(wc.Ref, a, value));
+}
 
 fn receiptObject(
     receipt: State.Receipt,
@@ -505,7 +616,9 @@ fn progressPrefix(a: Allocator, digest: [32]u8) ![]u8 {
     return std.fmt.allocPrint(a, "ir-{s}-", .{&std.fmt.bytesToHex(digest, .lower)});
 }
 
-fn requireCut(service: *Service, a: Allocator, task: [16]u8, plan: Plan, digest: [32]u8) !u64 {
+const Submission = struct { id: [32]u8, revision: u64 };
+
+fn originalSubmission(service: *Service, a: Allocator, task: [16]u8, plan: Plan) !Submission {
     const tasks = try service.namespace.store.taskIds(a, false);
     if (tasks.len != 1 or !std.meta.eql(tasks[0], task)) return error.InitialCutRequired;
     var submitted = (try service.operationLookup(a, plan.submission_id.bytes)) orelse
@@ -513,8 +626,7 @@ fn requireCut(service: *Service, a: Allocator, task: [16]u8, plan: Plan, digest:
     defer submitted.deinit();
     var parent = try service.task(a, task);
     defer parent.deinit();
-    if (submitted.value.method != .submit or !std.meta.eql(submitted.value.task, task) or
-        parent.value.inference_attempts != 0 or parent.value.terminal())
+    if (submitted.value.method != .submit or !std.meta.eql(submitted.value.task, task))
         return error.InitialCutRequired;
     const bytes = try service.namespace.store.object(a, parent.value.input, null);
     var input = try C.decodeOwned(types.Input, a, bytes);
@@ -522,16 +634,57 @@ fn requireCut(service: *Service, a: Allocator, task: [16]u8, plan: Plan, digest:
     const expected = try native.client.identifier(32, Json.string(plan.prompt_sha256.bytes));
     if (!std.meta.eql(native.testing.digest(input.value.task.bytes), expected))
         return error.ChangedSubmission;
-    if (submitted.value.revision == parent.value.revision) return 0;
+    return .{ .id = submitted.value.id, .revision = submitted.value.revision };
+}
+
+fn requireCut(
+    service: *Service,
+    a: Allocator,
+    task: [16]u8,
+    plan: Plan,
+    digest: [32]u8,
+    submission: Submission,
+) !u64 {
+    var parent = try service.task(a, task);
+    defer parent.deinit();
+    if (parent.value.inference_attempts != 0 or parent.value.terminal())
+        return error.InitialCutRequired;
+    if (submission.revision == parent.value.revision) return 0;
     const prefix = try progressPrefix(a, digest);
     const first = try std.fmt.allocPrint(a, "{s}1", .{prefix});
-    var started = (try service.operationLookup(a, first)) orelse return error.InitialCutRequired;
+    const count = try setupOperations(service, a, task, prefix, submission);
+    var started = (try service.operationLookup(a, first)) orelse {
+        if (count != 0) return error.InitialCutRequired;
+        try requireResumeOnly(service, a, task, submission.revision, parent.value.revision);
+        return 0;
+    };
     defer started.deinit();
     const kind: @FieldType(wc.Ref, "kind") = if (plan.condition == .ordinary) .value else .program;
     _ = try receiptObject(started.value, task, kind);
-    if (started.value.revision != try std.math.add(u64, submitted.value.revision, 1))
-        return error.InitialCutRequired;
-    return setupOperations(service, a, task, prefix, submitted.value);
+    if (started.value.revision <= submission.revision) return error.InitialCutRequired;
+    try requireResumeOnly(service, a, task, submission.revision, started.value.revision - 1);
+    return count;
+}
+
+fn requireResumeOnly(service: *Service, a: Allocator, task: [16]u8, from: u64, to: u64) !void {
+    if (from == to) return;
+    var events = try service.namespace.store.database.prepare(
+        "SELECT o.body FROM events e JOIN objects o ON o.digest=e.body " ++
+            "WHERE e.task=? AND e.revision>? AND e.revision<=? ORDER BY e.seq",
+        &.{ .{ .blob = &task }, .{ .integer = @intCast(from) }, .{ .integer = @intCast(to) } },
+    );
+    defer events.deinit();
+    var revision = from;
+    while (try events.step() == .row) {
+        var event = try C.decodeOwned(State.Event, a, try events.bytes(0));
+        defer event.deinit();
+        if (!std.meta.eql(event.value.task, task) or
+            (event.value.kind != .parked and event.value.kind != .resumed) or
+            event.value.revision != try std.math.add(u64, revision, 1))
+            return error.InitialCutRequired;
+        revision = event.value.revision;
+    }
+    if (revision != to) return error.InitialCutRequired;
 }
 
 fn setupOperations(
@@ -539,7 +692,7 @@ fn setupOperations(
     a: Allocator,
     task: [16]u8,
     prefix: []const u8,
-    submitted: State.Receipt,
+    submitted: Submission,
 ) !u64 {
     var count: u64 = 0;
     const store = &service.namespace.store;
@@ -716,8 +869,9 @@ const Bootstrap = struct {
     cut: Cut,
     remaining: u64,
     sequence: u64 = 0,
+    read_only: bool = false,
 
-    fn id(self: *@This(), a: Allocator) ![]const u8 {
+    fn nextOperation(self: *@This(), a: Allocator) ![]const u8 {
         self.sequence += 1;
         return std.fmt.allocPrint(a, "{s}{d}", .{ self.prefix, self.sequence });
     }
@@ -741,9 +895,9 @@ const Bootstrap = struct {
         };
     }
 
-    fn expectReplay(self: *@This(), operation: []const u8, missing: bool) !void {
+    fn expectReplay(self: *@This(), a: Allocator, operation: []const u8, missing: bool) !void {
         if (self.remaining == 0) return;
-        var saved = (try self.service.operationLookup(self.a, operation)) orelse {
+        var saved = (try self.service.operationLookup(a, operation)) orelse {
             if (missing) return;
             return error.InitialCutRequired;
         };
@@ -754,24 +908,52 @@ const Bootstrap = struct {
     }
 
     fn command(self: *@This(), operation: wc.Command) !Json.Value {
-        const id_value = try self.id(self.a);
-        try self.expectReplay(id_value, false);
+        const id_value = try self.nextOperation(self.a);
+        if (self.read_only) {
+            const work = operation == .work and operation.work == .start;
+            if (!work and (operation != .context or operation.context != .materialize))
+                return error.InvalidBootstrapReceipt;
+            const kind: @FieldType(wc.Ref, "kind") = if (work) .work else .value;
+            const id = try retainedId(self.service, self.a, self.task, id_value, kind);
+            var result = Json.object();
+            try putRef(self.a, &result, @tagName(kind), kind, id);
+            return result;
+        }
+        try self.expectReplay(self.a, id_value, false);
         const reply = try self.service.workspaceCommand(self.a, id_value, self.task, operation);
         return observation(self.a, reply, operation);
     }
 
+    fn builtReceipt(self: *@This(), key: []const u8) !Json.Value {
+        const a = self.a;
+        const id = try retainedId(self.service, a, self.task, key, .program);
+        var program = try self.service.workspaceProgram(a, self.task, id);
+        defer program.deinit();
+        var output = Json.object();
+        try putRef(a, &output, "program", .program, id);
+        const built = program.value.description;
+        try putRef(a, &output, "input_schema", .schema, built.input_schema.digest);
+        try putRef(a, &output, "result_schema", .schema, built.result_schema.digest);
+        return output;
+    }
+
     pub fn acquireFile(self: *@This(), path: []const u8) !?sources.Acquired {
-        const file = try self.acquireAt(path, try self.id(self.a));
+        const file = try self.acquireAt(path, try self.nextOperation(self.a));
         if (self.cut == .acquisition) return error.FixtureCut;
         return file;
     }
 
     fn acquireAt(self: *@This(), path: []const u8, operation: []const u8) !?sources.Acquired {
         const a = self.a;
+        const env: *const environment.State =
+            @ptrCast(@alignCast(self.service.profile.environment.?));
+        if (self.read_only) {
+            if (env.snapshot.get(path) == null) return null;
+            const id = try retainedId(self.service, a, self.task, operation, .value);
+            return try self.acquiredValue(try workspaceRef(a, .value, id));
+        }
         if (self.remaining != 0) {
-            const env: *const environment.State =
-                @ptrCast(@alignCast(self.service.profile.environment.?));
-            try self.expectReplay(operation, env.snapshot.get(path) == null);
+            try self.expectReplay(a, operation, env.snapshot.get(path) == null);
         }
         const reply = try Commands.workspaceCommandFrom(self.service, a, operation, self.task, .{
             .command = .{ .context = .{ .materialize = .{
@@ -791,7 +973,11 @@ const Bootstrap = struct {
                 return null;
             return error.BootstrapAcquisitionRejected;
         }
-        const value = try ref(a, observed, "value");
+        return try self.acquiredValue(try ref(a, observed, "value"));
+    }
+
+    fn acquiredValue(self: *@This(), value: wc.Ref) !sources.Acquired {
+        const a = self.a;
         const digest = try native.client.identifier(32, Json.string(value.id.bytes));
         const store = &self.service.namespace.store;
         const key = try native.workspace.custodyId(a, self.task, digest);
@@ -927,8 +1113,15 @@ const Bootstrap = struct {
             if (current.outcome_kind == .failed or current.current_port != null)
                 return error.ProjectionWorkFailed;
             if (current.outcome_kind == .cancelled) return error.BootstrapWorkCancelled;
-            const operation = try self.id(a);
-            try self.expectReplay(operation, false);
+            const operation = try self.nextOperation(a);
+            if (self.read_only) {
+                var receipt = (try self.service.operationLookup(a, operation)) orelse
+                    return error.BootstrapEvidencePending;
+                defer receipt.deinit();
+                frozen = try self.workSnapshot(receipt.value, index);
+                continue;
+            }
+            try self.expectReplay(a, operation, false);
             const next = try self.service.workspacePump(a, operation, self.task, .{ .expected = .{
                 .work = work,
                 .execution_revision = current.execution_revision,

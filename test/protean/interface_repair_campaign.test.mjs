@@ -1,17 +1,24 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp, readFile, writeFile, rm} from 'node:fs/promises';
+import {copyFile, mkdir, mkdtemp, readFile, writeFile, rm} from 'node:fs/promises';
 import {existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
-import {join} from 'node:path';
+import {dirname, join} from 'node:path';
+import {pathToFileURL} from 'node:url';
 import {createHash} from 'node:crypto';
 import {prepareInterfaceRepair, validateRepairPlan, selectRepairProfile, gradeCondition, repairOrder,
   runInterfaceRepair} from '../../tools/evaluation/interface_repair_campaign.mjs';
 import {makeRepairCorpus, canonicalEvidence, inspectProjection} from '../../tools/evaluation/interface_repair.mjs';
 
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
+const studyProgram = sha('directed study');
+const studyApplication = JSON.stringify({program_sha256:studyProgram});
+const studyAssets = {application:studyApplication,build:{program_sha256:studyProgram,application_assets_sha256:sha(studyApplication)}};
 const config = JSON.parse(await readFile(new URL('../../examples/adaptive/adaptive.chatgpt.example.json',import.meta.url)));
 config.tools = {build:true,run:true,reconstruct:false,inputs:[]};
+const tariff = {kind:'tariff',predeclared:true,id:'synthetic',currency:'USD',provider_source:'fixture',
+  deployment_source:'fixture',host_includes_attempt_storage:true,input_per_million:1,cached_input_per_million:1,
+  output_per_million:2,host_per_second:0,storage_per_byte_second:0,retention_seconds:0};
 
 test('preparation rejects absent authoring permissions and invalid tariffs before starting any work', async () => {
   for (const tools of [null, {...config.tools,build:false}, {...config.tools,run:false}])
@@ -44,17 +51,16 @@ test('a frozen episode isolates all snapshots and retains an unsuccessful author
   t.after(()=>rm(root,{recursive:true,force:true}));
   const app = join(root,'application.json');
   await writeFile(app,'{}');
-  const costModel = {kind:'tariff',predeclared:true,id:'synthetic',currency:'USD',provider_source:'fixture',
-    deployment_source:'fixture',host_includes_attempt_storage:true,input_per_million:1,cached_input_per_million:1,
-    output_per_million:2,host_per_second:0,storage_per_byte_second:0,retention_seconds:0};
+  const costModel = {...tariff};
   const opts = {binary:app,driver:app,applicationPath:app,config:structuredClone(config),costModel,directory:join(root,'episode'),route:'chatgpt'};
   const deps = {describeBuild:()=>({application_assets_sha256:sha('{}')}),
     validateConfiguration:()=>({valid:true}),
-    exportSources:()=>({lossy:'sliced loss',adequate:'private reference program'})};
+    exportSources:()=>({lossy:'sliced loss',adequate:'private reference program',study:studyAssets})};
   const preparing = prepareInterfaceRepair(opts,deps);
   costModel.output_per_million = 5;
   opts.config.adaptive.profiles[0].efforts.push('max');
   const plan = await preparing;
+  assert.notEqual(plan.study_assets.application.sha256,plan.identities.application_sha256);
   assert.equal(plan.cost_model.output_per_million,2);
   assert.deepEqual(plan.approved_efforts,config.adaptive.profiles[0].efforts);
   assert.equal(plan.conditions.length,1);
@@ -72,6 +78,9 @@ test('a frozen episode isolates all snapshots and retains an unsuccessful author
   }
   await validateRepairPlan(opts.directory,opts);
   await assert.rejects(prepareInterfaceRepair(opts,deps),{code:'EEXIST'});
+  await assert.rejects(runInterfaceRepair(opts.directory,{...opts,chatgptAccount:'fixture'}),/authorize-inference/);
+  assert.equal(existsSync(join(opts.directory,'run')),false);
+  opts.authorizeInference = true;
   await assert.rejects(runInterfaceRepair(opts.directory,{...opts,credential:'dummy'}),/route differs/);
   await assert.rejects(runInterfaceRepair(opts.directory,opts),/one inference source/);
   await assert.rejects(runInterfaceRepair(opts.directory,{...opts,credential:'dummy',chatgptAccount:'fixture'}),/one inference source/);
@@ -98,6 +107,23 @@ test('a frozen episode isolates all snapshots and retains an unsuccessful author
   assert.equal(measured.downstream_resources.known_physical_attempts,10);
   assert.equal(measured.end_to_end_resources.usage_complete,false);
   assert.equal(measured.supported_repair,'unestablished');
+  const evaluatorDirectory = join(root,'source-package','tools','evaluation');
+  for (const path of Object.keys(plan.identities.evaluator)) {
+    const dest = join(evaluatorDirectory,path);
+    await mkdir(dirname(dest),{recursive:true});
+    await copyFile(new URL('../../tools/evaluation/'+path,import.meta.url),dest);
+  }
+  const oracle = join(evaluatorDirectory,'interface_repair.mjs');
+  const original = await readFile(oracle,'utf8');
+  await import(pathToFileURL(oracle));
+  await writeFile(oracle,original+'\n');
+  const packaged = await import(pathToFileURL(join(evaluatorDirectory,'interface_repair_campaign.mjs')));
+  const packagedOpts = {...opts,directory:join(root,'packaged-episode')};
+  await assert.rejects(packaged.prepareInterfaceRepair(packagedOpts,deps),/Loaded evaluator differs from its source/);
+  await writeFile(oracle,original);
+  const packagedPlan = await packaged.prepareInterfaceRepair(packagedOpts,deps);
+  assert.equal(packagedPlan.identities.repository_head,null);
+  assert.equal(packagedPlan.identities.loaded_evaluator['interface_repair.mjs'],sha(original));
   await assert.rejects(runInterfaceRepair(opts.directory,{...opts,chatgptAccount:'fixture'}),{code:'EEXIST'});
   await writeFile(join(condition.author.snapshot,'unexpected.json'),'private');
   await assert.rejects(validateRepairPlan(opts.directory,opts),/Snapshot exposure changed/);
@@ -157,15 +183,20 @@ test('one exhausted condition preserves every later condition allowance', async 
     route:'api-key',seconds:1,study:'comparison'};
   const plan = await prepareInterfaceRepair(opts,{
     describeBuild:()=>({application_assets_sha256:sha('{}')}),
-    validateConfiguration:()=>({valid:true}),exportSources:()=>({lossy:'lossy',adequate:'adequate'})
+    validateConfiguration:()=>({valid:true}),exportSources:()=>({lossy:'lossy',adequate:'adequate',study:studyAssets})
   });
+  opts.authorizeInference = true;
   await assert.rejects(runInterfaceRepair(opts.directory,opts),/one inference source/);
   assert.equal(existsSync(join(opts.directory,'run')),false);
   let clock = 0;
   const {results} = await runInterfaceRepair(opts.directory,{...opts,credential:'fixture'},{
-    now:()=>existsSync(join(opts.directory,'run','results.md')) ? clock + plan.campaign_ceiling_ms : clock,
+    now:()=>{
+      if (existsSync(join(opts.directory,'run','0-evidence.json')))
+        clock = Math.max(clock,plan.campaign_ceiling_ms-5);
+      return existsSync(join(opts.directory,'run','results.md')) ? clock + plan.campaign_ceiling_ms : clock;
+    },
     execute:async ({subject,deadline,output})=>{
-      assert.equal(deadline-clock,plan.condition_ms);
+      assert.equal(deadline-clock,subject.arm === 'fixed-adequate' ? 5 : plan.condition_ms);
       clock = deadline+20;
       const report = {subject,errors:[],timed_out:true,adjudication:null};
       await writeFile(join(output,'report.json'),JSON.stringify(report));
@@ -175,7 +206,9 @@ test('one exhausted condition preserves every later condition allowance', async 
   const result = JSON.parse(await readFile(results));
   assert.equal(result.conditions.length,4);
   for (const c of result.conditions) {
-    assert.equal(c.elapsed_ms,1020);
+    assert.equal(c.effective_allowance_ms,c.arm === 'fixed-adequate' ? 5 : plan.condition_ms);
+    assert.equal(c.elapsed_ms,c.effective_allowance_ms+20);
+    assert.equal(c.deadline_overrun_ms,20);
     assert.equal(c.all_cases_completed,false);
     assert.equal(c.cases.filter(row=>row.state === 'not_started').length,c.arm === 'repair' ? 10 : 9);
   }
@@ -280,6 +313,48 @@ test('a failed replay blocks the broader verdict while the demonstrated coverage
   assert.deepEqual(measured.incorrect_projection_cases,[]);
 });
 
+test('the tested-cases verdict requires supported use on every case except a recorded non-start',()=>{
+  const {cases,grade} = coverageEpisode();
+  const last = cases.at(-1);
+  Object.assign(last.report.adjudication.projection,{schema_kind:'other',schema_judgment:null,semantic_judgment:'supported'});
+  assert.equal(grade().supported_repair,'demonstrated_on_tested_cases');
+  last.state = 'timed_out';
+  assert.equal(grade().coverage_repair_demonstrated,true);
+  assert.equal(grade().supported_repair,'unestablished');
+  last.state = 'completed';
+  last.report.grading.supported = false;
+  assert.equal(grade().supported_repair,'unestablished');
+  last.report.grading.supported = null;
+  last.report.grading.errors = ['unadjudicated_payload'];
+  assert.equal(grade().cases.at(-1).needs_payload_adjudication,true);
+  assert.equal(grade().supported_repair,'unestablished');
+  last.state = 'not_started';
+  delete last.report;
+  assert.equal(grade().supported_repair,'demonstrated_on_tested_cases');
+  assert.equal(grade().all_cases_completed,false);
+  cases.pop();
+  assert.equal(grade().cases.at(-1).state,'missing_record');
+  assert.equal(grade().supported_repair,'unestablished');
+});
+
+test('zero physical controller attempts establish absence, while a host inspection limit leaves exposure open',()=>{
+  const {cases,grade} = coverageEpisode();
+  const r = cases[2].report;
+  const e = r.adjudication.projection.exposures[0];
+  e.rendered = null;
+  e.one_computed_block = null;
+  assert.equal(grade().cases[2].initial_presentation_confirmed,null);
+  assert.equal(grade().cases[2].exposed_computed,null);
+  r.adjudication.projection = null;
+  r.adjudication.delivery = [];
+  r.metrics = {physical_attempts:[]};
+  r.final_metrics_complete = false;
+  assert.equal(grade().cases[2].exposed_computed,null);
+  r.final_metrics_complete = true;
+  assert.equal(grade().cases[2].initial_presentation_confirmed,false);
+  assert.equal(grade().cases[2].exposed_computed,false);
+});
+
 test('observed authoring opportunities and actual build attempts have separate denominators',()=>{
   const {author,grade} = coverageEpisode();
   const report = author.report;
@@ -316,7 +391,7 @@ test('a bound ordinary decision can establish that no computed view reached the 
 test('build totals include direct setup work and retain unmeasured compiler time',()=>{
   const subject = {phase:'transfer',case_id:'compiled'};
   const report = {effective_condition:'fixed-adequate',bootstrap:{program:{kind:'program',id:'p'}},
-    metrics:{physical_attempts:[],builds:2,rejected_builds:0,compiler_nanoseconds:15}};
+    metrics:{physical_attempts:[],build_attempts:2,builds:2,rejected_builds:0,compiler_nanoseconds:15}};
   const grade = ()=>gradeCondition({arm:'fixed-adequate',downstream:[subject]},[{subject,state:'completed',report}],unpriced)
     .downstream_resources;
   assert.equal(grade().builds,3);
@@ -336,6 +411,11 @@ test('build totals include direct setup work and retain unmeasured compiler time
   assert.equal(grade().bootstrap_builds,0);
   assert.equal(grade().builds,2);
   assert.equal(grade().compiler_nanoseconds,15);
+  report.metrics.build_attempts++;
+  assert.equal(grade().builds,3);
+  assert.equal(grade().captured_builds,2);
+  assert.equal(grade().rejected_builds,null);
+  assert.equal(grade().compiler_nanoseconds,null);
 });
 
 test('native terminal outcomes and incomplete reports do not supply decisions; bound wrong classifications do',()=>{
@@ -392,4 +472,20 @@ test('attempt costs retain partial nonnegative usage and physical request bytes 
   transfer.report.final_metrics_complete = true;
   assert.equal(grade().end_to_end_resources.request_body_bytes,51);
   assert.equal(grade().end_to_end_resources.usage_complete,true);
+});
+
+test('partially priced tasks retain known host, storage, and independently priced input and output',()=>{
+  const subject = {phase:'transfer',case_id:'one'};
+  const report = {elapsed_ms:10000,retained_namespace_bytes:5,cost:{complete:false,total:null},
+    observed_provider_attempts:[{usage:{input_tokens:100000}},{usage:{output_tokens:50000}},{usage:null}]};
+  const price = {...tariff,host_per_second:1,retention_seconds:2,storage_per_byte_second:0.01};
+  const grade = ()=>gradeCondition({arm:'evidence',downstream:[subject]},[{subject,state:'timed_out',report}],price)
+    .end_to_end_resources;
+  assert.equal(grade().known_inference_cost,0.2);
+  assert.ok(Math.abs(grade().known_monetary_cost-10.3)<1e-12);
+  assert.equal(grade().monetary_cost,null);
+  price.cached_input_per_million = 0.5;
+  assert.ok(Math.abs(grade().known_inference_cost-0.15)<1e-12);
+  report.observed_provider_attempts[0].usage.input_tokens_details = {cached_tokens:10000};
+  assert.equal(grade().known_inference_cost,0.195);
 });

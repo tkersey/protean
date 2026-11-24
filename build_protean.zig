@@ -144,6 +144,9 @@ const BuildGraph = struct {
     sqlite_source: std.Build.LazyPath = undefined,
     adaptive_image: std.Build.LazyPath = undefined,
     adaptive_application: std.Build.LazyPath = undefined,
+    study_image: std.Build.LazyPath = undefined,
+    study_application: std.Build.LazyPath = undefined,
+    study_manifest: std.Build.LazyPath = undefined,
     runtime_source: std.Build.LazyPath = undefined,
     data: *std.Build.Module = undefined,
     horos: *std.Build.Module = undefined,
@@ -520,6 +523,15 @@ const BuildGraph = struct {
         );
         emitter_module.addImport("definition", adaptive_definition);
         emitter_module.addImport("application_types", adaptive_types);
+        const study = s.g.module("tools/evaluation/interface_repair_emit.zig");
+        study.addImport("emitter", emitter_module);
+        study.addImport("definition", adaptive_definition);
+        study.addImport("application_types", adaptive_types);
+        const study_emitter = s.g.emitter("protean-study-assets", study);
+        if (linuxX86(s.b.graph.host)) study_emitter.use_llvm = false;
+        const study_assets = s.b.addRunArtifact(study_emitter);
+        s.study_image = study_assets.addOutputFileArg2("program.bpi3", .{});
+        s.study_application = study_assets.addOutputFileArg2("application.json", .{});
         const adaptive_emitter = s.g.emitter("protean-assets", emitter_module);
         // Match the public builder's backend for this build-time authoring tool.
         // The emitted image is independently compared with the installed product.
@@ -1083,6 +1095,18 @@ const BuildGraph = struct {
             .clang_inputs = s.clang_inputs,
             .native_direct = s.native_direct,
         };
+        s.study_manifest = @import("build_native.zig").createManifest(
+            s.b,
+            native_modules,
+            "protean-study",
+            .{
+                .image = s.study_image,
+                .application = s.study_application,
+                .types = s.b.path("examples/adaptive/types.zig"),
+            },
+            s.public_environment.resolved_target.?,
+            s.public_environment.optimize.?,
+        );
         s.adaptive_product = @import(
             "build_native.zig",
         ).addWithModules(s.b, native_modules, .{
@@ -1118,10 +1142,19 @@ const BuildGraph = struct {
         return module;
     }
 
+    fn studyAssets(s: *BuildGraph, module: *std.Build.Module) void {
+        module.addAnonymousImport("study_image", .{ .root_source_file = s.study_image });
+        module.addAnonymousImport("study_application", .{
+            .root_source_file = s.study_application,
+        });
+    }
+
     fn recurrenceDriver(s: *BuildGraph) void {
         const root = s.b.allocator.create(std.Build.Module) catch @panic("out of memory");
         root.init(s.b, .{ .existing = s.adaptive_product.executable.root_module });
         root.import_table = root.import_table.clone(s.b.allocator) catch @panic("out of memory");
+        s.studyAssets(root);
+        root.addAnonymousImport("study_manifest", .{ .root_source_file = s.study_manifest });
         const example = s.b.createModule(.{
             .root_source_file = s.b.path("examples/adaptive/projection_example.zig"),
         });
@@ -1338,6 +1371,7 @@ const BuildGraph = struct {
         s.native_suite.addAnonymousImport("adaptive_application", .{
             .root_source_file = s.adaptive_application,
         });
+        s.studyAssets(s.native_suite);
         const native_asset_writer = s.native_graph.module("tools/native/emit.zig");
         s.native_suite.addImport("native_asset_writer", native_asset_writer);
     }
@@ -1358,6 +1392,8 @@ const BuildGraph = struct {
                 );
                 _ = suite.import_table.swapRemove("adaptive_image");
                 _ = suite.import_table.swapRemove("adaptive_application");
+                _ = suite.import_table.swapRemove("study_image");
+                _ = suite.import_table.swapRemove("study_application");
             }
             const checks = s.b.step(
                 "check-native-owner-" ++ group[0],

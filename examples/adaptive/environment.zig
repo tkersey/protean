@@ -32,8 +32,24 @@ pub const State = struct {
         result: ?contracts.workspace.Ref = null,
     } = null,
 };
-pub fn initialWorkspaceDeclaration() native.Declaration {
-    return native.registry.controllerImport(.workspace, workspace.initialDeclaration());
+pub fn studyDeclarations() [handlers.len]native.Declaration {
+    var declarations = handlers;
+    for (&declarations) |*declaration| {
+        switch (declaration.controller_import orelse continue) {
+            .workspace => declaration.* = native.registry.controllerImport(
+                .workspace,
+                workspace.initialDeclaration(),
+            ),
+            .task_view => declaration.* = native.registry.controllerImport(.task_view, native.leaf(
+                void,
+                t.StudyBindings,
+                .{ .identity = t.bindings_identity, .resource_role = "snapshot" },
+                studyBindings,
+            )),
+            else => {},
+        }
+    }
+    return declarations;
 }
 pub fn release(value: *anyopaque) void {
     const owner: *State = @ptrCast(@alignCast(value));
@@ -82,12 +98,24 @@ fn state(ctx: native.Context) !*const State {
     )) return error.IncompatibleProfile;
     return value;
 }
-fn bindings(ctx: native.Context, _: void) !t.Bindings {
+fn studyBindings(ctx: native.Context, _: void) !t.StudyBindings {
     const frozen = try state(ctx);
     const initial = if (frozen.initial_selection) |setup|
         if (std.mem.eql(u8, ctx.task_id, &std.fmt.bytesToHex(setup.task, .lower))) setup else null
     else
         null;
+    return .{
+        .task_view = try bindings(ctx, {}),
+        .observe_initial_consumer = initial != null,
+        .initial_projection = if (initial) |setup| if (setup.view) |view| .{
+            .view = view,
+            .program = setup.program orelse return error.InvalidProjection,
+            .result = setup.result orelse return error.InvalidProjection,
+        } else null else null,
+    };
+}
+fn bindings(ctx: native.Context, _: void) !t.Bindings {
+    const frozen = try state(ctx);
     const choices = try ctx.allocator.alloc(
         t.controls.ProfileChoice,
         frozen.policy.profiles.items.len,
@@ -122,12 +150,6 @@ fn bindings(ctx: native.Context, _: void) !t.Bindings {
         .profiles = .{ .items = choices },
         .catalog = .{ .skills = .{ .items = catalog } },
         .initial = frozen.initial,
-        .observe_initial_consumer = initial != null,
-        .initial_projection = if (initial) |setup| if (setup.view) |view| .{
-            .view = view,
-            .program = setup.program orelse return error.InvalidProjection,
-            .result = setup.result orelse return error.InvalidProjection,
-        } else null else null,
         .instructions = try context.instructions(
             ctx.allocator,
             frozen.policy,

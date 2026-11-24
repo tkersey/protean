@@ -563,7 +563,7 @@ fn requireInitialProgram(ctx: native.registry.ProjectionContext, state: t.State)
     var envelope = try invoked.decode(invoked.Request, ctx.allocator, source);
     defer envelope.deinit();
     var original = try contracts.decodeOwned(
-        t.WorkspaceRequest,
+        t.StudyWorkspaceRequest,
         ctx.allocator,
         envelope.value.binding.payload,
     );
