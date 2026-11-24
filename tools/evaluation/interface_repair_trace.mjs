@@ -664,9 +664,10 @@ export function decisionSupport(archive, application, specimen, sourceRefs, valu
     files.get(path)?.bytes.equals(Buffer.from(expectedFiles.get(path)));
   const absent = path => expectedFiles.has(path) && excluded === 0n && !files.has(path) && expectedFiles.get(path) === undefined;
   const byValue = new Map(), bySource = new Map(), handles = new Map(), pages = new Map(), completePaths = new Set();
-  const missing = new Set(), presented = new Map(), partialComputations = new Map(), covered = new Set();
+  const missing = new Set(), presented = new Map(), partialComputations = new Map(), covered = new Map();
   const remember = (value, path) => handles.set(value.kind + value.id, {value, path});
   const credit = (value, paths) => exposure.push({ref: value, paths: [...paths]});
+  const cover = (key, shown) => { if (!covered.has(key)) covered.set(key, shown); };
   for (const row of values.values()) {
     const raw = row.raw, origin = some(raw[4][4]);
     if (raw[4][0] !== 2 || !origin) continue;
@@ -725,7 +726,7 @@ export function decisionSupport(archive, application, specimen, sourceRefs, valu
   const inputEvidence = (i, kind, wanted, complete, key) => {
     note(routes, kind, i, {ref:wanted});
     if (!complete) return;
-    covered.add(key);
+    cover(key, false);
     credit(wanted, primary);
     embedded({schema_kind:'ScanEvidence', semantic_judgment:'supported', paths:[...primary],
       payload:renderedValue(canonicalEvidence(specimen,sourceRefs))});
@@ -784,7 +785,7 @@ export function decisionSupport(archive, application, specimen, sourceRefs, valu
     }
     const citation = container ?? wanted, hold = citation.kind + citation.id;
     if (complete) {
-      covered.add(key);
+      cover(key, !computed.input && presented.has(computed.use.result.id));
       partialComputations.delete(hold);
     } else if (computed.input || !presented.has(computed.use.result.id)) {
       partialComputations.set(hold, {i, kind, wanted, container, computed, key});
@@ -793,9 +794,9 @@ export function decisionSupport(archive, application, specimen, sourceRefs, valu
     }
     settle(i, kind, wanted, container, computed, complete, key);
   };
-  const settle = (i, kind, wanted, container, {input, use}, complete, key) => {
+  const settle = (i, kind, wanted, container, {input, use}, complete, key, shown) => {
     if (input) return inputEvidence(i,kind,wanted,complete,key);
-    const alreadyShown = presented.has(use.result.id);
+    const alreadyShown = shown ?? presented.has(use.result.id);
     if (alreadyShown) {
       if (!use.one_computed_block) note(unresolved, kind, i, {ref: wanted});
     } else if (use.semantic_judgment === 'supported') note(routes, kind, i, {ref: wanted});
@@ -821,7 +822,7 @@ export function decisionSupport(archive, application, specimen, sourceRefs, valu
         requests: [{attempt_id: request.id, prepared_sha256: request.prepared_sha256, input_index: request.input_index}]};
       fromProjection(description, use);
       presented.set(use.result.id, description);
-      if (use.one_computed_block) covered.add('value' + use.result.id);
+      if (use.one_computed_block) cover('value' + use.result.id, true);
       embedded(use, use);
     }
     const selection = selectedPresentation(i.attempt.selected_view, i.attempt.body);
@@ -1011,7 +1012,7 @@ export function decisionSupport(archive, application, specimen, sourceRefs, valu
     }
   }
   for (const {i, kind, wanted, container, computed, key} of partialComputations.values())
-    if (covered.has(key)) settle(i, kind, wanted, container, computed, true, key);
+    if (covered.has(key)) settle(i, kind, wanted, container, computed, true, key, covered.get(key));
     else note(unresolved, kind, i, {ref: wanted});
   const primaryMissing = [...missing].filter(path => primary.has(path));
   for (const {value, path} of handles.values()) if (completePaths.has(path))

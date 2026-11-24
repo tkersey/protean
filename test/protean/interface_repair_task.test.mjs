@@ -486,6 +486,25 @@ test('a partial preview of a verified result copy is resolved by presentation of
   }
 });
 
+test('a held copy preview takes the presentation state from when its value was first covered', () => {
+  const f = decisionFixture(), descriptor = {root: '0', types: [{tag:'text',value:{}}]};
+  const use = {input: f.input.handle, result: f.result.handle, paths: [f.path], one_computed_block: true, payload: 'value',
+    payload_schema_sha256: 'schema', payload_descriptor: descriptor, schema_kind: 'other', semantic_judgment: 'supported',
+    exposures: [{id: '3', rendered: true, model_response: true, delivery: 'confirmed'}]};
+  const alias = f.value('copy', f.result.text, [3, [f.witness.raw[2], f.result.raw[2]], null, null, {tag: 0}]);
+  const text = JSON.stringify(f.result.text);
+  f.step('context', {tag: 'materialize', value: {sources: [f.witness.handle],
+    input: {tag: 'value', value: {tag: 'reference', value: use.result}}}}, {value: alias.handle, preview: f.page(text, 0, 3)});
+  f.expand(use.result, text);
+  f.step('program', {tag: 'describe', value: {section: 'components'}}, {}, {selected: 'b'.repeat(64),
+    block: {kind: 'computed', schema_identity: 'schema', schema: descriptor, result: use.result, value: use.payload}});
+  const support = f.support([use], {result: use.result});
+  assert.deepEqual(support.unresolved, []);
+  assert(support.routes.some(row => row.ref?.id === alias.handle.id));
+  assert(support.exposure.some(row => row.ref.id === alias.handle.id && row.paths.includes(f.path)));
+  assert(!support.projection_exposure.some(row => row.ref.id === alias.handle.id));
+});
+
 test('a partial page of a verified canonical-input copy is covered by the remaining pages of the original', () => {
   const f = decisionFixture(), use = {canonical_input: true, input: f.input.handle, result: f.result.handle, exposures: []};
   const alias = f.value('input-copy', f.input.text, [3, [f.witness.raw[2], f.input.raw[2]], null, null, {tag: 0}]);
