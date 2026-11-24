@@ -17,8 +17,9 @@ const encode = value => JSON.stringify(value, (_, v) => typeof v === 'bigint' ? 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const save = (path, bytes) => writeFile(path, bytes, {flag:'wx', mode:0o600});
 const sourcesUsed = ['interface_repair.mjs', 'interface_repair_campaign.mjs', 'interface_repair_task.mjs',
-  'interface_repair_trace.mjs', 'workspace.mjs', 'request_profile.mjs', '../../test/protean/native_archive.mjs',
-  '../../test/support/values.mjs', '../../test/protean/adaptive_capture_checks.mjs', '../native/qualification_process.mjs'];
+  'interface_repair_trace.mjs', 'workspace.mjs', 'recurrence.mjs', 'request_profile.mjs', '../../test/protean/native_archive.mjs',
+  '../../test/support/stdio-client.mts', '../../test/support/values.mjs', '../../test/protean/adaptive_capture_checks.mjs',
+  '../native/qualification_process.mjs'];
 
 async function identities({binary, driver, applicationPath}) {
   const hashes = await Promise.all([binary, driver, applicationPath].map(async path => hash(await readFile(path))));
