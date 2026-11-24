@@ -334,6 +334,15 @@ test('a delivered judgment or complete pages of its ScanEvidence field support t
     assert.equal(judgment.credited(),!Object.keys(patch).length);
     assert.equal(judgment.support().unresolved.length,Object.keys(patch).length);
   }
+  for (const presentedFirst of [false, true]) {
+    const f = decisionFixture(), mixed = bind(f), text = JSON.stringify(mixed.block.value);
+    const present = () => f.step('program',{tag:'describe',value:{section:'components'}},{},
+      {selected:'a'.repeat(64),block:mixed.block});
+    const partial = () => f.expand(f.input.handle,text,0,3);
+    if (presentedFirst) { present(); partial(); } else { partial(); present(); }
+    assert(mixed.credited());
+    assert.deepEqual(mixed.support().unresolved,[]);
+  }
 });
 
 test('verified partial snapshot handles each carry only their own source interval', () => {
@@ -523,6 +532,22 @@ test('same-result previews retain projection credit and paged canonical-input re
   assert.deepEqual(f.support([use]).unresolved, []);
   assert(f.support([use]).routes.some(row => row.ref?.id === f.input.handle.id));
   assert(f.support([use]).exposure.some(row => row.ref.id === f.input.handle.id && row.paths.includes(f.absent)));
+});
+
+test('a partial result preview is resolved only by a later presentation of its single computed block', () => {
+  for (const one_computed_block of [true, false]) {
+    const f = decisionFixture(), selected = 'a'.repeat(64);
+    const payload = [[1, 1, true, [1]], [['1','1','1',true,'2',[3,f.witness.handle.id]]]];
+    const use = {canonical_input: true, input: f.input.handle, result: f.result.handle, paths: [f.path, f.member],
+      one_computed_block, payload, payload_schema_sha256: 's', payload_descriptor: {root:'0',types:[]},
+      schema_kind: 'ScanEvidence', semantic_judgment: 'supported',
+      exposures: [{id: '2', rendered: true, delivery: 'confirmed', model_response: true}]};
+    f.expand(f.result.handle, JSON.stringify(f.result.text), 3);
+    assert(f.support([use]).unresolved.some(row => row.ref?.id === use.result.id));
+    f.step('work', {tag: 'inspect'}, {result: use.result},
+      {selected, block: {kind: 'computed', schema_identity: 's', schema: use.payload_descriptor, result: use.result, value: payload}});
+    assert.equal(f.support([use]).unresolved.some(row => row.ref?.id === use.result.id), !one_computed_block);
+  }
 });
 
 test('static guidance, bound controller metadata and a verified same-view reread do not disclose fresh scan evidence', () => {

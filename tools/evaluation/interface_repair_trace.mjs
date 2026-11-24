@@ -664,7 +664,7 @@ export function decisionSupport(archive, application, specimen, sourceRefs, valu
     files.get(path)?.bytes.equals(Buffer.from(expectedFiles.get(path)));
   const absent = path => expectedFiles.has(path) && excluded === 0n && !files.has(path) && expectedFiles.get(path) === undefined;
   const byValue = new Map(), bySource = new Map(), handles = new Map(), pages = new Map(), completePaths = new Set();
-  const missing = new Set(), presented = new Map(), partialComputations = new Map();
+  const missing = new Set(), presented = new Map(), partialComputations = new Map(), covered = new Set();
   const remember = (value, path) => handles.set(value.kind + value.id, {value, path});
   const credit = (value, paths) => exposure.push({ref: value, paths: [...paths]});
   for (const row of values.values()) {
@@ -725,6 +725,7 @@ export function decisionSupport(archive, application, specimen, sourceRefs, valu
   const inputEvidence = (i, kind, wanted, complete) => {
     note(routes, kind, i, {ref:wanted});
     if (!complete) return;
+    covered.add(wanted.id);
     credit(wanted, primary);
     embedded({schema_kind:'ScanEvidence', semantic_judgment:'supported', paths:[...primary],
       payload:renderedValue(canonicalEvidence(specimen,sourceRefs))});
@@ -781,7 +782,7 @@ export function decisionSupport(archive, application, specimen, sourceRefs, valu
       return;
     }
     const {input, use} = computed;
-    if (complete) partialComputations.delete(wanted.id);
+    if (complete) covered.add(wanted.id);
     else if (input) partialComputations.set(wanted.id, {kind, i, wanted});
     if (input) return inputEvidence(i,kind,wanted,complete);
     const alreadyShown = presented.has(use.result.id);
@@ -811,6 +812,7 @@ export function decisionSupport(archive, application, specimen, sourceRefs, valu
         requests: [{attempt_id: request.id, prepared_sha256: request.prepared_sha256, input_index: request.input_index}]};
       fromProjection(description, use);
       presented.set(use.result.id, description);
+      if (use.one_computed_block) covered.add(use.result.id);
       embedded(use, use);
     }
     const selection = selectedPresentation(i.attempt.selected_view, i.attempt.body);
@@ -999,7 +1001,8 @@ export function decisionSupport(archive, application, specimen, sourceRefs, valu
       } else note(unresolved, 'other_work_output', i);
     }
   }
-  for (const {kind, i, wanted} of partialComputations.values()) note(unresolved, kind, i, {ref: wanted});
+  for (const {kind, i, wanted} of partialComputations.values())
+    if (!covered.has(wanted.id)) note(unresolved, kind, i, {ref: wanted});
   const primaryMissing = [...missing].filter(path => primary.has(path));
   for (const {value, path} of handles.values()) if (completePaths.has(path))
     credit(value, path === 'scan.json' ? [path, ...primaryMissing] : [path]);
