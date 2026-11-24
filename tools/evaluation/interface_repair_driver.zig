@@ -759,7 +759,7 @@ fn requireCut(
     defer parent.deinit();
     if (parent.value.inference_attempts != 0 or parent.value.terminal())
         return error.InitialCutRequired;
-    if (plan.condition != .ordinary and parent.value.schedule == .parked)
+    if (plan.condition != .ordinary and try service.status(a, parent.value) == .parked)
         return error.InitialSetupBlocked;
     if (submission.revision == parent.value.revision) return 0;
     const prefix = try progressPrefix(a, digest);

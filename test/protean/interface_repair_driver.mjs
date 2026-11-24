@@ -608,7 +608,7 @@ export async function checkInterfaceRepair(launch, root, {sources, application:o
   const preflight = readArchive(await readFile(join(root, 'preflight.agnx')));
   const driver = process.argv[2], applicationPath = process.argv[3];
   await checkPreparationAdmission(root,driver,applicationPath,process.argv[4]);
-  const options = {config: {...config, tools: {...config.tools, build: true, run: true},
+  const options = {config: {...config, tools: {reconstruct: false, inputs: [], ...config.tools, build: true, run: true},
     adaptive: {...config.adaptive,
     endpoint: 'https://127.0.0.1:1/v1/responses'}}, directory, study: 'comparison',
     binary: driver, driver, applicationPath};
