@@ -174,7 +174,7 @@ test('provider body accounting excludes both controller and delegated typed prep
   assert.equal(providerRequestBodyBytes(null, 'controller', null, null), null);
 });
 
-function decisionFixture() {
+function decisionFixture(pairedSpecimen) {
   const objects = new Map();
   const put = bytes => {
     const id = hash(bytes);
@@ -186,9 +186,14 @@ function decisionFixture() {
   const file = JSON.stringify({domain: {identity: '1', revision: '1', known: true, members: ['1']},
     visits: [member, absent].map(path => ({domain_identity: '1', domain_revision: '1', member: '1', path}))});
   const specimen = {files: {[path]: file, [member]: '2'}};
+  const snapshotFiles = {...specimen.files};
+  if (pairedSpecimen) {
+    const {'scan.json': manifest, ...members} = pairedSpecimen.files;
+    Object.assign(snapshotFiles, members, {'paired-scan.json':manifest});
+  }
   const snapshotSchema = {root: 0, types: [{product: [1, 2, 3]}, 'u32', 'u64', {seq: 4},
     {product: [5, 6, 8]}, 'text', {array: {element: 7, length: 32}}, 'u8', 'bytes']};
-  const snapshot = put(encodeValue(snapshotSchema, [2, 0n, Object.entries(specimen.files).map(([name, content]) =>
+  const snapshot = put(encodeValue(snapshotSchema, [2, 0n, Object.entries(snapshotFiles).map(([name, content]) =>
     [name, [...Buffer.from(hash(content), 'hex')], Buffer.from(content)])]));
   const profile = put(Buffer.from(JSON.stringify({snapshot: {digest: [...snapshot[0]], bytes: String(snapshot[1])}})));
   const archive = {objects, task: {profile}, object: r => objects.get(Buffer.from(r[0]).toString('hex'))};
@@ -203,7 +208,7 @@ function decisionFixture() {
     return {handle, source: val('source', source), text, path: name, raw};
   };
   const acquire = (name, start, end) => {
-    const text = specimen.files[name];
+    const text = snapshotFiles[name];
     return value(name + start + ':' + end, text.slice(start,end), [2, [], null, null,
       {tag: 1, value: [snapshot, name, Buffer.from(hash(text), 'hex'), BigInt(start), BigInt(end), BigInt(text.length)]}], name);
   };
@@ -239,7 +244,7 @@ function decisionFixture() {
       results: [{call_id, output: {tag: 'work', value: {digest: [...artifact[0]], bytes: String(artifact[1])}}}], result_actions: []});
   };
   const support = (uses = [], projector = null, consumers) => decisionSupport(archive, {support: {WorkArtifact: schemaSupport(workSchema)}},
-    specimen, refs, values, history, uses, history.at(-1), projector, consumers);
+    specimen, refs, values, history, uses, history.at(-1), projector, consumers, pairedSpecimen);
   return {step, support, expand, acquire, materialize, work, snapshot, history, page, path, member, absent, file, slice, full, witness, input, result, value, put};
 }
 
@@ -264,6 +269,35 @@ test('a reused settled call ID binds the current materialization output', () => 
   f.history[0].attempt.body.input[1] = output;
   f.history[0].attempt.body.input[3] = {...output, output:'wrong current output'};
   assert(!f.support().exposure.some(r => r.ref.id === f.full.handle.id));
+});
+
+test('ordinary paired development reads are attributed to their own manifest and visits', () => {
+  const path = 'paired-scan.json', member = 'r-pair', missing = 'r-pair-missing';
+  const manifest = JSON.stringify({domain:{identity:'1',revision:'1',known:true,members:['1']},
+    visits:[member,missing].map(path => ({domain_identity:'1',domain_revision:'1',member:'1',path}))});
+  const f = decisionFixture({files:{'scan.json':manifest,[member]:'1'}});
+  const size = BigInt(Buffer.byteLength(manifest)), found = [f.snapshot[0],path,hash(manifest),0n,size,size,manifest];
+  f.work({tag:1,value:[[path,0n,Number(size)],{tag:0,value:found}]}, {tag:'found',value:{snapshot:[...f.snapshot[0]],
+    path,sha256:hash(manifest),start:'0',end:String(size),file_bytes:String(size),content:manifest}});
+  const paired = f.acquire(member, 0, 1);
+  f.materialize(paired);
+  f.work({tag:1,value:[[missing,0n,1],{tag:1,value:missing}]}, {tag:'missing',value:missing});
+  f.materialize(f.full);
+  const {exposure, routes, unresolved} = f.support();
+  assert.deepEqual(unresolved, []);
+  assert(routes.some(row => row.kind === 'ordinary_read' && row.path === path));
+  assert(routes.some(row => row.kind === 'missing_read' && row.path === missing));
+  assert(exposure.some(row => row.ref.id === paired.handle.id && row.paths.includes(member)));
+  assert(!exposure.some(row => row.ref.id === f.full.handle.id && row.paths.includes(missing)));
+});
+
+test('failed or suspended work previews keep possible independent evidence visible', () => {
+  const f = decisionFixture(), work = {kind:'work',id:'3'.repeat(64)}, port = {kind:'port',id:'4'.repeat(64)};
+  f.step('work', {tag:'wait'}, {works:[{work, failure:work, failure_preview:f.page('failure detail')}]});
+  f.step('work', {tag:'inspect'}, {work, port:{reference:port,preview:f.page('port payload')}});
+  const {unresolved, routes} = f.support();
+  assert.deepEqual(routes, []);
+  assert.deepEqual(unresolved.map(r => [r.kind,r.ref]), [['work_failure_preview',work],['work_port_preview',port]]);
 });
 
 test('escaped value pages and ordinary byte reads can jointly establish a complete source', () => {

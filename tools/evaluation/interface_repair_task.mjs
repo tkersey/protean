@@ -13,13 +13,60 @@ import {parseCandidate, gradeAnswer} from './interface_repair.mjs';
 import {adjudicateRepairTrace, adjudicateRepairCollision, capturedModelResponse, computedRendering, selectedPresentation} from './interface_repair_trace.mjs';
 import {campaignIdentity} from './recurrence.mjs';
 
-const json = value => JSON.stringify(value, (_, v) => typeof v === 'bigint' ? String(v) : v);
+const decimalBigInt = (_, value) => typeof value === 'bigint' ? String(value) : value;
+const json = value => JSON.stringify(value, decimalBigInt);
 const hash = value => createHash('sha256').update(value).digest('hex');
 const sourceText = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true});
 const terminal = new Set(['completed', 'failed', 'cancelled', 'unknown', 'blocked', 'waiting_input']);
 const rejectedCandidate = new Set(['ProjectionBuildRejected', 'ProjectionInputRejected', 'ProjectionStartRejected',
   'ProjectionWorkFailed', 'ProjectionSelectionRejected', 'ProjectionPreparationRejected', 'ProjectionPreparationOversized',
   'ProjectionPreparationStale', 'ProjectionPreparationInvalid', 'ProjectionPreparationUnavailable', 'ProjectionResultRejected']);
+
+function compactReport(report) {
+  const parts = [], stack = [], ancestors = new Set();
+  function append(value, key, parent) {
+    if (value != null && typeof value.toJSON === 'function') value = value.toJSON(key);
+    value = decimalBigInt(key, value);
+    const array = Array.isArray(value);
+    const record = value !== null && typeof value === 'object' &&
+      (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null) && !JSON.isRawJSON(value);
+    const leaf = array || record ? null : JSON.stringify(value, decimalBigInt);
+    if (leaf === undefined && !parent?.array) return;
+    if (parent) {
+      if (parent.written++) parts.push(',');
+      if (!parent.array) parts.push(JSON.stringify(key), ':');
+    }
+    if (!array && !record) { parts.push(leaf ?? 'null'); return; }
+    if (ancestors.has(value)) throw new TypeError('Circular report value');
+    ancestors.add(value);
+    const keys = array ? null : Object.keys(value);
+    parts.push(array ? '[' : '{');
+    stack.push({value, keys, array, length: array ? value.length : keys.length, index: 0, written: 0});
+  }
+  append(report, '', null);
+  while (stack.length) {
+    const parent = stack.at(-1);
+    if (parent.index === parent.length) {
+      parts.push(parent.array ? ']' : '}');
+      ancestors.delete(parent.value);
+      stack.pop();
+      continue;
+    }
+    const index = parent.index++, key = parent.array ? String(index) : parent.keys[index];
+    append(parent.value[key], key, parent);
+  }
+  return parts.join('');
+}
+
+export function writeRepairReport(path, report, indent) {
+  let bytes;
+  try { bytes = JSON.stringify(report, decimalBigInt, indent); }
+  catch (error) {
+    if (!(error instanceof RangeError)) throw error;
+    bytes = compactReport(report);
+  }
+  return writeFile(path, bytes, {flag: 'wx', mode: 0o600});
+}
 
 export function gradeRepairDecision(summary, specimen, trace) {
   const {report_bound, exposure, evidence_complete, projection_exposure} = trace;
@@ -29,7 +76,9 @@ export function gradeRepairDecision(summary, specimen, trace) {
   const support = grade.answer.support.filter(ref => projection_exposure.some(row => ref.kind === row.ref.kind && ref.id === row.ref.id));
   if (support.length) {
     const cited = json({...grade.answer, support});
-    grade.projection_citations_supported = gradeAnswer(cited, specimen, projection_exposure, evidence_complete).supported;
+    const projected = gradeAnswer(cited, specimen, projection_exposure, evidence_complete);
+    grade.projection_citations_supported = projected.supported;
+    grade.projection_citation_errors = projected.errors;
   } else if (evidence_complete || !grade.answer.support.length) grade.projection_citations_supported = false;
   return grade;
 }
@@ -143,7 +192,7 @@ export async function executeRepairTask(options, {Client = RecurrenceDriver, scr
   const elapsed = () => performance.now() - started;
   const output = await realpath(options.output);
   const state = join(output, 'state'), observations = [];
-  const write = (name, value) => writeFile(join(output, name), json(value), {flag: 'wx', mode: 0o600});
+  const write = (name, value) => writeRepairReport(join(output, name), value);
   const report = {subject, build, plan_sha256: options.plan_sha256, execution_mode: scripted ? 'scripted_fixture' : 'live',
     task: null, status: null, result: null, bootstrap: null,
     nomination: null, nomination_error: null, adjudication: null, grading: null,
@@ -195,7 +244,7 @@ export async function executeRepairTask(options, {Client = RecurrenceDriver, scr
     await write('started.json', {id: subject.id, case_id: subject.case_id, phase: subject.phase,
       remaining_ms: Math.max(0, deadline - started)});
     specimen = await readSpecimen(plan, subject.case_path, subject.case_id);
-    if (subject.phase === 'diagnostic') {
+    if (subject.phase === 'diagnostic' || subject.phase === 'author' && subject.paired_case_path) {
       pairedSpecimen = await readSpecimen(plan, subject.paired_case_path);
       assert.notEqual(specimen.case_id, pairedSpecimen.case_id);
     }
@@ -350,16 +399,21 @@ export async function executeRepairTask(options, {Client = RecurrenceDriver, scr
       assert.equal(Buffer.from(archive.task.runtime_identity).toString('hex'), plan.identities.driver_sha256);
       finalArchive = archive;
       report.archive = path;
-      if (bootstrapRequest && !report.bootstrap && !report.candidate_rejection) {
-        const recovered = await client.call('evaluation.interface_repair.bootstrap', {...bootstrapRequest,completed_only:true});
-        if (recovered) {
-          await write('bootstrap-recovered.json', recovered);
-          if (recovered.candidate_rejected) {
-            assert(candidate && rejectedCandidate.has(recovered.candidate_rejected), 'Unexpected recovered candidate rejection.');
-            report.candidate_rejection = recovered.candidate_rejected;
-            if (recovered.build_metrics) report.bootstrap_build_metrics ??= recovered.build_metrics;
-          } else report.bootstrap = recovered;
-        }
+      if (bootstrapRequest && !report.bootstrap) {
+        try {
+          const recovered = await client.call('evaluation.interface_repair.bootstrap', {...bootstrapRequest,completed_only:true});
+          if (recovered) {
+            await write('bootstrap-recovered.json', recovered);
+            if (recovered.view || !recovered.candidate_rejected) report.bootstrap = recovered;
+            if (recovered.candidate_rejected) {
+              assert(candidate && rejectedCandidate.has(recovered.candidate_rejected), 'Unexpected recovered candidate rejection.');
+              assert(!report.candidate_rejection || report.candidate_rejection === recovered.candidate_rejected,
+                'Recovered candidate rejection disagrees with the original rejection.');
+              report.candidate_rejection = recovered.candidate_rejected;
+              if (recovered.build_metrics) report.bootstrap_build_metrics ??= recovered.build_metrics;
+            }
+          }
+        } catch (error) { record('bootstrap_recovery', error); }
       }
       report.status = await client.call('task.status', {task_id});
       report.result = await readOutcome(client, task_id, await client.call('task.result', {task_id}));
@@ -381,7 +435,7 @@ export async function executeRepairTask(options, {Client = RecurrenceDriver, scr
       }
       try {
         report.adjudication = adjudicateRepairTrace({archive: finalArchive, application, observations,
-          bootstrap: report.bootstrap, specimen, summary, nomination: report.nomination, candidate,
+          bootstrap: report.bootstrap, specimen, pairedSpecimen, summary, nomination: report.nomination, candidate,
           lossySourceDigest: plan.sources.lossy.sha256});
         if (scripted) {
           report.controlled_application_path = report.adjudication.authored_and_applied;

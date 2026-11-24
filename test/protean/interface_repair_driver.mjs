@@ -22,9 +22,10 @@ async function committedBootstrap(child, params) {
   return value;
 }
 
-function compareRecovered(actual, supplied) {
-  const {build_metrics, ...evidence} = supplied;
-  const {build_metrics: restored, ...recovered} = actual;
+function compareRecovered(actual, supplied, expectedPreparation = supplied.preparation) {
+  const {build_metrics, preparation, ...evidence} = supplied;
+  const {build_metrics: restored, preparation: observed, ...recovered} = actual;
+  assert.equal(observed, expectedPreparation);
   assert.deepEqual(recovered, evidence);
   assert.equal(restored.build_commands, build_metrics.build_commands);
   assert.equal(restored.rejected_build_commands, build_metrics.rejected_build_commands);
@@ -113,12 +114,16 @@ async function restartAtSelection(launch, root, subject, plan_sha256, source, ov
     task.task_id = (await child.call('task.submit', submitted)).task_id;
     const setup = await child.call('evaluation.interface_repair.fixture_select', {...task, descriptor, source});
     assert(setup.view);
+    assert.equal(setup.preparation, 'pending');
     await reopen();
     compareRecovered(await committedBootstrap(child, {...task, descriptor, source}), setup);
     if (oversized) {
       await assert.rejects(child.call('evaluation.step'), /ProjectionPreparationOversized/);
       await reopen();
       await assert.rejects(child.call('evaluation.step'), /ProjectionPreparationOversized/);
+      const {preparation_rejection, ...selected} = await committedBootstrap(child, {...task, descriptor, source});
+      compareRecovered(selected, setup, 'rejected');
+      assert.equal(preparation_rejection, 'ProjectionPreparationOversized');
       const path = join(root, state + '.agnx');
       await child.call('evaluation.export', {...task, path});
       assert.equal(readArchive(await readFile(path)).task.inference_attempts, 0n);
@@ -133,7 +138,7 @@ async function restartAtSelection(launch, root, subject, plan_sha256, source, ov
     const before = readArchive(await readFile(path));
     assert(before.task.inference_attempts > 0n);
     await reopen();
-    compareRecovered(await committedBootstrap(child, {...task, descriptor, source}), setup);
+    compareRecovered(await committedBootstrap(child, {...task, descriptor, source}), setup, 'ready');
     await assert.rejects(child.call('evaluation.interface_repair.answer', {...task, summary: 'Second report.'}),
       /InitialCutRequired/);
     for (let turn = 0; turn < 128; turn++) {
@@ -243,6 +248,7 @@ async function recoverBootstrap(launch, root, subject, plan_sha256, source, mode
         const evidence = await committedBootstrap(child, params);
         assert.equal(evidence.consumer.id, consumer);
         assert(evidence.view);
+        assert.equal(evidence.preparation, 'failed');
         await assert.rejects(child.call('evaluation.step'), /InitialPreparationFailed/);
         return;
       }
@@ -300,6 +306,8 @@ async function rejectIncompatibleProgram(launch, root, subject, plan_sha256, sca
       input: {schema_id: 'adaptive-agent.input.v2', value: {task: subject.prompt}}});
     await assert.rejects(child.call(bootstrapMethod, {task_id, descriptor, source: null}),
       large ? /ChangedExecutable/ : /ProjectionInputRejected/);
+    if (!large) assert.equal((await committedBootstrap(child, {task_id, descriptor, source: null})).candidate_rejected,
+      'ProjectionInputRejected');
     const retained = join(root, state + '.agnx');
     await child.call('evaluation.export', {task_id, path: retained});
     const archive = readArchive(await readFile(retained));
@@ -312,18 +320,19 @@ async function rejectIncompatibleProgram(launch, root, subject, plan_sha256, sca
   }
 }
 
-async function rejectedDiagnostic(launch, root, subject, plan_sha256, forwarder) {
+async function rejectedProjection(launch, root, diagnostic, transfer, plan_sha256, forwarder) {
   const records = JSON.parse(forwarder);
   assert.equal(records.module.constants.length, 1);
   assert.equal(records.module.constants[0].bytes, 'AQE');
   records.module.constants[0].bytes = 'AA';
   const source = JSON.stringify(records);
   let program = null;
-  for (const stage of ['build', 'run']) {
+  for (const stage of ['build', 'diagnostic', 'downstream']) {
+    const subject = stage === 'downstream' ? transfer : diagnostic;
     const descriptor = JSON.stringify({version:1,plan_sha256,submission_id:subject.id,
-      prompt_sha256:sha(subject.prompt),phase:'diagnostic',condition:'repair',files:subject.evidence,
+      prompt_sha256:sha(subject.prompt),phase:stage === 'downstream' ? stage : 'diagnostic',condition:'repair',files:subject.evidence,
       source_sha256:sha(source),program_sha256:program ?? '0'.repeat(64)});
-    const state = 'rejected-diagnostic-' + stage;
+    const state = 'rejected-projection-' + stage;
     const flags = ['--fixture-workspace','--config',subject.config,'--interface-repair-bootstrap',sha(descriptor)];
     let child = launch(null,state,flags);
     const close = async () => { child.stdin.end(); assert.deepEqual(await child.exited,[0,null]); };
@@ -348,11 +357,48 @@ async function rejectedDiagnostic(launch, root, subject, plan_sha256, forwarder)
         child = launch(task_id,state,flags);
         const rejected = await committedBootstrap(child,params);
         assert.equal(rejected.candidate_rejected, 'ProjectionResultRejected');
+        assert.equal(rejected.view, undefined);
         assert.equal(rejected.build_metrics.build_commands, 1);
         await child.call('evaluation.export',{task_id,path});
         assert.equal(readArchive(await readFile(path)).task.inference_attempts,0n);
       }
     } finally { await close(); }
+  }
+}
+
+async function rejectedPreparation(root, transfer, options) {
+  const config = JSON.parse(await readFile(transfer.config));
+  for (const profile of config.adaptive.profiles) profile.request_bytes = 512;
+  const bytes = JSON.stringify(config);
+  const path = join(root, 'transfer-preparation-budget.json');
+  await writeFile(path, bytes);
+  const subject = {...transfer, config: path, config_sha256: sha(bytes)};
+  class LostResponse extends RecurrenceDriver {
+    async call(method, params) {
+      try { return await super.call(method, params); }
+      catch (error) {
+        if (method === bootstrapMethod && !params.completed_only && error.message === 'ProjectionPreparationOversized')
+          throw new Error('Interrupted bootstrap response.');
+        throw error;
+      }
+    }
+  }
+  for (const [name, Client] of [['observed', RecurrenceDriver], ['interrupted', LostResponse]]) {
+    const output = join(root, 'preparation-rejection-' + name);
+    await mkdir(output);
+    const report = await executeRepairTask({...options, subject, output, deadline: performance.now() + 60000},
+      {scripted: true, scriptedAnswer, Client});
+    const reason = 'ProjectionPreparationOversized';
+    assert.equal(report.candidate_rejection, reason);
+    assert.equal(report.bootstrap.preparation, 'rejected');
+    assert.equal(report.bootstrap.preparation_rejection, reason);
+    assert.equal(report.bootstrap.candidate_rejected, reason);
+    assert.equal(report.bootstrap.view.kind, 'view');
+    assert.deepEqual(report.bootstrap.program, options.candidate.program);
+    assert.equal(report.errors.some(error => error.stage === 'archive' || error.stage === 'bootstrap_recovery'), false);
+    assert.equal(report.errors.length, Client === LostResponse ? 1 : 0);
+    assert.equal(report.cost.live_provider_attempts, 0);
+    assert(report.status && report.final_metrics_complete);
   }
 }
 
@@ -535,7 +581,8 @@ export async function checkInterfaceRepair(launch, root, {sources, application:o
   assert.equal(first.selected_view, development.bootstrap.view.id);
   assert(trace.projection.exposures.some(row => row.id === first.id && row.rendered));
   await auditEvidence(development, application);
-  await rejectedDiagnostic(launch, root, diagnostic, plan_sha256, development.fixture_receipt.source);
+  await rejectedProjection(launch, root, diagnostic, downstream[0], plan_sha256, development.fixture_receipt.source);
+  await rejectedPreparation(root, downstream[0], {candidate, plan, plan_sha256, driver, application, build});
   await recoverBootstrap(launch, root, diagnostic, plan_sha256,
     Buffer.from(candidate.source_b64, 'base64').toString(), 'diagnostic', candidate.program.id);
   const probe = await episode(diagnostic, candidate);

@@ -153,17 +153,8 @@ pub const Session = struct {
         const submission = try originalSubmission(service, a, task, plan);
         if (completed_only) {
             if (cut != .complete) return error.InvalidParams;
-            return self.completed(service, a, task, plan) catch |err| switch (err) {
-                error.BootstrapEvidencePending => .null,
-                error.ProjectionWorkFailed, error.ProjectionResultRejected => blk: {
-                    if (plan.phase != .diagnostic) return err;
-                    var outcome = Json.object();
-                    try Json.put(a, &outcome, "candidate_rejected", Json.string(@errorName(err)));
-                    try Json.put(a, &outcome, "build_metrics", try self.buildMetrics(a, task));
-                    break :blk outcome;
-                },
-                else => return err,
-            };
+            return self.completed(service, a, task, plan) catch |err|
+                self.retainedFailure(a, task, plan, err);
         }
         const observed = self.observed_first_build and plan.condition != .ordinary;
         const remaining = try requireCut(service, a, task, plan, expected, submission, observed);
@@ -211,31 +202,20 @@ pub const Session = struct {
         };
         var copy = self.*;
         const ordinary_case = plan.condition == .ordinary;
-        const label = if (ordinary_case) "ordinary" else @tagName(plan.phase);
-        const key = try receiptKey(a, digest, label);
-        if (plan.phase != .diagnostic) {
-            const kind: @FieldType(wc.Ref, "kind") = if (ordinary_case) .value else .view;
-            const id = try retainedId(service, a, task, key, kind);
-            if (!ordinary_case) {
-                var view = try retainedView(service, a, task, id);
-                defer view.deinit();
-                const projection = view.value.description.projection orelse
-                    return error.InvalidBootstrapReceipt;
-                const bytes = try service.namespace.store.object(a, projection.observation, null);
-                var read = try C.decodeOwned(native.workspace.ReplyObservation, a, bytes);
-                defer read.deinit();
-                if (!std.meta.eql(read.value.task, task)) return error.InvalidBootstrapReceipt;
-                run.consumer = try workspaceRef(a, .observation, read.value.id);
-            }
-        } else {
-            const read = try observedConsumer(service, a, task) orelse
-                return error.BootstrapEvidencePending;
-            run.consumer = read.reference;
-        }
-        var output = if (ordinary_case)
-            try copy.ordinary(&run)
-        else
-            try copy.selectProgram(&run, env, plan, try run.builtReceipt(try run.nextOperation(a)));
+        var output = if (ordinary_case) blk: {
+            const key = try receiptKey(a, digest, "ordinary");
+            _ = try retainedId(service, a, task, key, .value);
+            break :blk try copy.ordinary(&run);
+        } else blk: {
+            run.consumer = try self.retainedConsumer(&run, plan.phase);
+            const built = try run.builtReceipt(try run.nextOperation(a));
+            break :blk copy.selectProgram(&run, env, plan, built) catch |err| {
+                if (err == error.BootstrapEvidencePending and plan.program_sha256 != null and
+                    !run.acquired_scan)
+                    try run.admitProgram(try ref(a, built, "program"), plan);
+                return err;
+            };
+        };
         const metrics = if (std.meta.eql(self.task, @as(?[16]u8, task)) and self.metrics != null)
             self.metrics.?
         else if (ordinary_case)
@@ -244,6 +224,54 @@ pub const Session = struct {
             BuildMetrics.admitted;
         try Json.put(a, &output, "build_metrics", try metrics.json(a));
         return output;
+    }
+
+    fn retainedConsumer(self: *const @This(), run: *Bootstrap, phase: Phase) !wc.Ref {
+        const a = run.a;
+        if (phase != .diagnostic) {
+            const key = try receiptKey(a, self.expected.?, @tagName(phase));
+            if (try run.service.operationLookup(a, key)) |receipt| {
+                var saved = receipt;
+                defer saved.deinit();
+                const id = try receiptObject(saved.value, run.task, .view);
+                var view = try retainedView(run.service, a, run.task, id);
+                defer view.deinit();
+                const projection = view.value.description.projection orelse
+                    return error.InvalidBootstrapReceipt;
+                const store = &run.service.namespace.store;
+                const bytes = try store.object(a, projection.observation, null);
+                var read = try C.decodeOwned(native.workspace.ReplyObservation, a, bytes);
+                defer read.deinit();
+                if (!std.meta.eql(read.value.task, run.task)) return error.InvalidBootstrapReceipt;
+                return workspaceRef(a, .observation, read.value.id);
+            }
+        }
+        const read = try observedConsumer(run.service, a, run.task) orelse
+            return error.BootstrapEvidencePending;
+        return read.reference;
+    }
+
+    fn retainedFailure(
+        self: *const @This(),
+        a: Allocator,
+        task: [16]u8,
+        plan: Plan,
+        err: anyerror,
+    ) !Json.Value {
+        if (err == error.BootstrapEvidencePending) return .null;
+        if (plan.program_sha256 == null) return err;
+        switch (err) {
+            error.ProjectionWorkFailed,
+            error.ProjectionResultRejected,
+            error.ProjectionInputRejected,
+            error.ProjectionBuildRejected,
+            => {},
+            else => return err,
+        }
+        var outcome = Json.object();
+        try Json.put(a, &outcome, "candidate_rejected", Json.string(@errorName(err)));
+        try Json.put(a, &outcome, "build_metrics", try self.buildMetrics(a, task));
+        return outcome;
     }
 
     pub fn buildMetrics(self: *const @This(), a: Allocator, task: [16]u8) !Json.Value {
@@ -286,9 +314,12 @@ pub const Session = struct {
         if (run.cut == .consumer) return error.FixtureCut;
         run.interface = read.interface;
         run.consumer = read.reference;
-        const output = try self.selectProgram(run, env, plan, built);
-        if (plan.phase != .diagnostic and run.cut != .selection)
-            try self.prepare(run.service, worker, run.a, run.cut);
+        var output = try self.selectProgram(run, env, plan, built);
+        if (plan.phase != .diagnostic) {
+            if (run.cut != .selection) try self.prepare(run.service, worker, run.a, run.cut);
+            const handoff: Handoff = if (self.ready) .ready else .pending;
+            try putPreparation(run.a, &output, handoff, plan.program_sha256 != null);
+        }
         return output;
     }
 
@@ -314,7 +345,7 @@ pub const Session = struct {
         else
             .null);
         if (run.remaining != 0) return error.InitialCutRequired;
-        try self.activate(run, env, plan.phase, &output);
+        try self.activate(run, env, plan, &output);
         return output;
     }
 
@@ -322,14 +353,17 @@ pub const Session = struct {
         self: *@This(),
         run: *Bootstrap,
         env: *environment.State,
-        phase: Phase,
+        plan: Plan,
         output: *Json.Value,
     ) !void {
+        const phase = plan.phase;
         if (phase == .diagnostic) return Json.put(run.a, output, "view", .null);
         const result = try ref(run.a, output.*, "result");
         const key = try receiptKey(run.a, self.expected.?, @tagName(phase));
         if (run.read_only) {
             const view = try retainedId(run.service, run.a, run.task, key, .view);
+            const handoff = try capturedInitialContext(run.service, run.a, run.task, view);
+            try putPreparation(run.a, output, handoff, plan.program_sha256 != null);
             return putRef(run.a, output, "view", .view, view);
         }
         const authorized: native.workspace.Authorized = .{
@@ -392,12 +426,7 @@ pub const Session = struct {
             .ready => self.ready = true,
             .failed => return error.InitialPreparationFailed,
             .pending => return error.InitialHandoffMissing,
-            .rejected => |reason| return switch (reason) {
-                .oversized => error.ProjectionPreparationOversized,
-                .stale => error.ProjectionPreparationStale,
-                .invalid => error.ProjectionPreparationInvalid,
-                .unavailable => error.ProjectionPreparationUnavailable,
-            },
+            .rejected => |reason| return preparationRejection(reason),
             .unknown => return error.InitialPreparationUnknown,
             .not_sent => return error.InitialPreparationNotSent,
         }
@@ -522,6 +551,24 @@ const Handoff = union(enum) {
     unknown,
     not_sent,
 };
+
+fn preparationRejection(reason: types.ProjectionRejectionCode) anyerror {
+    return switch (reason) {
+        .oversized => error.ProjectionPreparationOversized,
+        .stale => error.ProjectionPreparationStale,
+        .invalid => error.ProjectionPreparationInvalid,
+        .unavailable => error.ProjectionPreparationUnavailable,
+    };
+}
+
+fn putPreparation(a: Allocator, output: *Json.Value, handoff: Handoff, candidate: bool) !void {
+    try Json.put(a, output, "preparation", Json.string(@tagName(handoff)));
+    if (handoff == .rejected) {
+        const reason = Json.string(@errorName(preparationRejection(handoff.rejected)));
+        try Json.put(a, output, "preparation_rejection", reason);
+        if (candidate) try Json.put(a, output, "candidate_rejected", reason);
+    }
+}
 
 fn capturedInitialContext(service: *Service, a: Allocator, task: [16]u8, view: [32]u8) !Handoff {
     const store = &service.namespace.store;
@@ -954,6 +1001,7 @@ const Bootstrap = struct {
     remaining: u64,
     sequence: u64 = 0,
     read_only: bool = false,
+    acquired_scan: bool = false,
     observed_first_build: bool,
 
     fn nextOperation(self: *@This(), a: Allocator) ![]const u8 {
@@ -1127,6 +1175,7 @@ const Bootstrap = struct {
         manifest: sources.ManifestSelection,
     ) !Json.Value {
         const scan = try sources.acquireScanAt(self.a, self, manifest);
+        self.acquired_scan = true;
         const materialized = try self.command(.{ .context = .{ .materialize = .{
             .input = .{ .value = .{ .inline_json = .{
                 .schema = schema,

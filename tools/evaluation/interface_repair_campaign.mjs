@@ -8,7 +8,7 @@ import {fileURLToPath} from 'node:url';
 import {readArchive} from '../../test/protean/native_archive.mjs';
 import {makeRepairCorpus, assessScan, scanContract, taskContract, candidateContract} from './interface_repair.mjs';
 import {RecurrenceDriver, bytesUnder, command, inferenceArguments, tariffErrors} from './workspace.mjs';
-import {executeRepairTask} from './interface_repair_task.mjs';
+import {executeRepairTask, writeRepairReport} from './interface_repair_task.mjs';
 
 const repository = fileURLToPath(new URL('../../', import.meta.url));
 const arms = ['repair', 'fixed-lossy', 'evidence', 'fixed-adequate'];
@@ -506,7 +506,8 @@ export function gradeCondition(condition, tasks, costModel) {
       exact_evidence_preservation:projection?.exact_evidence_preservation ?? null,
       cited_projection:citedProjection,cited_projection_alias:citedAlias,supported_view_use:supportedUse,
       other_evidence_cited:otherCited,projection_citations_supported:projectionSupport,
-      needs_payload_adjudication:answered && grade.supported == null && grade.errors?.includes('unadjudicated_payload') === true,
+      needs_payload_adjudication:answered && (grade.supported == null && grade.errors?.includes('unadjudicated_payload') === true ||
+        projectionSupport == null && grade.projection_citation_errors?.includes('unadjudicated_payload') === true),
       exposed_computed:exposed};
   });
   const complete = cases.length > 0 && cases.every(c=>c.state === 'completed' && c.decision === 'answered');
@@ -566,7 +567,7 @@ function taskState(report) {
   return 'completed';
 }
 
-function markdown(results) {
+export function formatRepairResults(results) {
   const rows = results.conditions.map(c=>`| ${c.repetition+1} | ${c.arm} | ${c.answered_cases}/${c.planned_cases} | ${c.completed_cases} | ${c.supported_answers} | ${c.authored_and_applied ? 'yes' : '—'} | ${c.end_to_end_resources.known_physical_attempts} | ${c.elapsed_ms.toFixed(0)} |`);
   const lines = ['# Directed interface repair','',
     '| Repetition | Condition | Answered decisions | Completed cases | Supported answers | Authored and applied | Known provider attempts | Elapsed ms |',
@@ -596,10 +597,10 @@ function markdown(results) {
       (r.monetary_cost === null ? r.known_monetary_cost === null ? ' Total task charges are unknown.' :
         ' Known task charges under the frozen tariff were at least '+r.known_monetary_cost+'.' :
         ' Task charges under the frozen tariff were '+r.monetary_cost+'.'),'',
-      '| Case | Status | Answer | Supported | Ordinary evidence accessed | Cited view supports answer |',
-      '|---|---|---|---|---|---|');
+      '| Case | Status | Answer | Supported | Ordinary evidence accessed | Cited view supports answer | Credited view use |',
+      '|---|---|---|---|---|---|---|');
     for (const row of c.cases) lines.push('| '+[row.case_id,row.state,row.answer ?? '—',label(row.supported),
-      label(row.ordinary_fallback),label(row.supported_view_use)].join(' | ')+' |');
+      label(row.ordinary_fallback),label(row.projection_citations_supported),label(row.supported_view_use)].join(' | ')+' |');
     lines.push('');
   }
   return lines.join('\n');
@@ -635,7 +636,7 @@ export async function runInterfaceRepair(directory, options, {execute=executeRep
       } catch (error) {
         report = {subject,errors:[{stage:'task_runner',name:error.name,message:error.message}],status:null,
           metrics:null,timed_out:false};
-        await save(join(dir,'failure.json'),encode(report));
+        await writeRepairReport(join(dir,'failure.json'),report,2);
         tasks.push({subject,report,file:join(dir,'failure.json'),state:'infrastructure_failure'});
         return report;
       }
@@ -655,15 +656,15 @@ export async function runInterfaceRepair(directory, options, {execute=executeRep
     measured.effective_allowance_ms = Math.max(0,deadline-start);
     measured.deadline_overrun_ms = Math.max(0,measured.elapsed_ms-measured.effective_allowance_ms);
     results.conditions.push(measured);
-    await save(join(output,condition.repetition+'-'+condition.arm+'.json'),encode(measured));
+    await writeRepairReport(join(output,condition.repetition+'-'+condition.arm+'.json'),measured,2);
   }
   for (let i=0;i<plan.repetitions;i++) {
     const conditions = results.conditions.filter(c=>c.repetition===i);
     for (const row of conditions[0].cases) results.paired_cases.push({repetition:i,case_id:row.case_id,
       conditions:Object.fromEntries(conditions.map(c=>[c.arm,c.cases.find(r=>r.case_id===row.case_id)]))});
   }
-  await save(join(output,'results.json'),encode(results));
-  await save(join(output,'results.md'),markdown(results));
+  await writeRepairReport(join(output,'results.json'),results,2);
+  await save(join(output,'results.md'),formatRepairResults(results));
   let retained_bytes = await bytesUnder(output);
   for (const path of preparedFiles) {
     let file;

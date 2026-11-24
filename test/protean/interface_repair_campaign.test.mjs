@@ -7,10 +7,10 @@ import {tmpdir} from 'node:os';
 import {dirname, join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {createHash} from 'node:crypto';
-import {prepareInterfaceRepair, validateRepairPlan, selectRepairProfile, gradeCondition, repairOrder,
+import {prepareInterfaceRepair, validateRepairPlan, selectRepairProfile, gradeCondition, repairOrder, formatRepairResults,
   runInterfaceRepair} from '../../tools/evaluation/interface_repair_campaign.mjs';
 import {makeRepairCorpus, canonicalEvidence, inspectProjection} from '../../tools/evaluation/interface_repair.mjs';
-import {gradeRepairDecision} from '../../tools/evaluation/interface_repair_task.mjs';
+import {gradeRepairDecision, writeRepairReport} from '../../tools/evaluation/interface_repair_task.mjs';
 import {bytesUnder} from '../../tools/evaluation/workspace.mjs';
 
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -244,6 +244,38 @@ test('one exhausted condition preserves every later condition allowance', async 
 });
 
 const exhausted = 'exhausted_declared_domain';
+
+test('a nested diagnostic survives condition and campaign publication with its task measurements', async t => {
+  const root = await mkdtemp(join(tmpdir(),'repair-diagnostic-report-'));
+  t.after(()=>rm(root,{recursive:true,force:true}));
+  const applicationPath = join(root,'application.json');
+  await writeFile(applicationPath,'{}');
+  const opts = {binary:applicationPath,driver:applicationPath,applicationPath,config,directory:join(root,'episode')};
+  await prepareInterfaceRepair(opts,{describeBuild:()=>({application_assets_sha256:sha('{}')}),
+    validateConfiguration:()=>({valid:true}),exportSources:()=>({lossy:'lossy',adequate:'adequate',study:studyAssets})});
+  let payload = 'retained';
+  for (let i=0;i<6000;i++) payload=[payload];
+  const {results} = await runInterfaceRepair(opts.directory,{...opts,authorizeInference:true,credential:'fixture'},{
+    now:()=>0, execute:async ({subject,output})=>{
+      const adjudication = subject.phase === 'diagnostic' ? {collision:{distinction_preserved:false,left:{payload},right:{payload}}} :
+        subject.phase === 'author' ? {candidate:{program:{id:'fixture'}}} : {};
+      const report = {subject,errors:[],adjudication,execution_mode:'scripted_fixture',status:{status:'completed'},retained_namespace_bytes:37};
+      await writeRepairReport(join(output,'report.json'),report);
+      return report;
+    }
+  });
+  const [condition] = JSON.parse(await readFile(results)).conditions;
+  const task = JSON.parse(await readFile(condition.diagnostic_report));
+  assert.equal(task.retained_namespace_bytes,37);
+  const perCondition = JSON.parse(await readFile(join(dirname(results),'0-repair.json')));
+  for (const collision of [task.adjudication.collision, perCondition.collision, condition.collision]) {
+    assert.equal(collision.distinction_preserved,false);
+    for (let value of [collision.left.payload,collision.right.payload]) {
+      for (let i=0;i<6000;i++) { assert.equal(value.length,1); value=value[0]; }
+      assert.equal(value,'retained');
+    }
+  }
+});
 const unpriced = {kind:'unpriced'};
 
 function presentedReport(arm, id, outcome) {
@@ -365,6 +397,25 @@ test('a one-byte raw read does not invalidate the independent mismatch witness i
   assert.equal(row().supported,true);
   assert.equal(row().projection_citations_supported,false);
   assert.equal(row().supported_view_use,false);
+  assert.equal(row().needs_payload_adjudication,false);
+  report.grading = adjudicate({...projected,paths:[],semantic_judgment:'unestablished'},raw);
+  assert.equal(row().supported,true);
+  assert.equal(row().projection_citations_supported,null);
+  assert.equal(row().needs_payload_adjudication,true);
+});
+
+test('the published table separates citation support from credit under study conditions',()=>{
+  const subject = {phase:'transfer',case_id:'full'};
+  const report = presentedReport('fixed-adequate',subject.case_id,exhausted);
+  report.arm_violations = ['outside assigned condition'];
+  const measured = gradeCondition({arm:'fixed-adequate',repetition:0,downstream:[subject]},
+    [{subject,state:'completed',report}],unpriced);
+  const [row] = measured.cases;
+  assert.equal(row.projection_citations_supported,true);
+  assert.equal(row.supported_view_use,false);
+  const text = formatRepairResults({conditions:[{...measured,elapsed_ms:1}]});
+  assert.ok(text.includes('| Cited view supports answer | Credited view use |'));
+  assert.ok(text.includes('| full | completed | exhausted_declared_domain | yes | no | yes | no |'));
 });
 
 test('a failed replay blocks the broader verdict while the demonstrated coverage distinction remains',()=>{

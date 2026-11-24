@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {adjudicateRepairTrace, canonicalProjectionInput, capturedModelResponse, computedRendering, confirmedApplication, diagnosticPresentation, inspectProjectionResult,
+import {mkdtemp, readFile, rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {writeRepairReport} from '../../tools/evaluation/interface_repair_task.mjs';
+import {createHash} from 'node:crypto';
+import {adjudicateRepairTrace, bindReport, canonicalProjectionInput, capturedModelResponse, computedRendering, confirmedApplication, diagnosticPresentation, inspectProjectionResult,
   selectedPresentation} from '../../tools/evaluation/interface_repair_trace.mjs';
 import {canonicalEvidence, collisionProbe, makeRepairCorpus} from '../../tools/evaluation/interface_repair.mjs';
 import {encodeValue} from '../support/values.mjs';
@@ -79,6 +84,43 @@ test('response captures preserve exact event ordinals and require unambiguous JS
   assert.equal(read(done('1') + last.replace('"id":"r"', '"id":"r","id":"s"')), null);
 });
 
+test('partial streamed output carries its item or response attribution through termination', () => {
+  const read = events => capturedModelResponse([200, true, null, Buffer.from(events.map(event =>
+    'data: ' + JSON.stringify(event) + '\n\n').join('')), 1, null, null, 2]);
+  const added = {type:'response.output_item.added', output_index:0, response_id:'r',
+    item:{id:'m',type:'message',role:'assistant',status:'in_progress'}};
+  const delta = {type:'response.output_text.delta', output_index:0, item_id:'m', content_index:0, delta:'Observed'};
+  for (const terminal of [{type:'error'}, ...['failed', 'incomplete', 'completed'].map(status =>
+    ({type:'response.' + status, response:{id:'r',status,error:null,output:[]}}))]) {
+    assert.equal(read([added, delta, terminal]), true);
+    assert.equal(read([{...delta, response_id:'r'}, terminal]), true);
+    assert.equal(read([delta, terminal]), null);
+    assert.equal(read([added, {...delta, output_index:1}, terminal]), null);
+  }
+  const done = (output_index, item) => ({type:'response.output_item.done', output_index, item});
+  const call = {id:'f',type:'function_call',call_id:'c',name:'report',arguments:'{}',status:'completed'};
+  const reasoning = {type:'reasoning',id:'reason',summary:[]};
+  const roster = {type:'response.completed',response:{id:'r',status:'completed',error:null,
+    output:[call,{type:'reasoning',id:'reason',status:'incomplete'}]}};
+  assert.equal(read([done(0,call),done(1,reasoning),roster]), null);
+});
+
+test('report credit requires the admitted archive projection identified by the producer', () => {
+  const digest = value => createHash('sha256').update(value).digest();
+  const bytes = digest('report'), task = digest('task').subarray(0, 16), interaction = digest('interaction');
+  const archive = {task:{id:task,controller_interaction:{tag:1,value:interaction},result:{tag:1,value:[bytes,10n]}}};
+  const receipt = {task_id:task.toString('hex'),interaction_id:interaction.toString('hex'),controller_id:'controller',
+    controller_epoch:'0',event_cut:'9',attempt_id:'attempt',prepared_sha256:'prepared',capture_projection_sha256:'projection',
+    result_sha256:bytes.toString('hex'),summary_sha256:digest('summary').toString('hex')};
+  const last = {...receipt,attempt:{id:'attempt',prepared_sha256:'prepared',capture_projection_sha256:'projection'}};
+  const bind = source => bindReport(archive, [{report_producer: source}], [last], 'summary');
+  assert.equal(bind(receipt), last);
+  assert.equal(bind({...receipt,capture_projection_sha256:'other'}), null);
+  delete last.attempt.capture_projection_sha256;
+  assert.equal(bind(receipt), null);
+  assert.equal(bind({...receipt,capture_projection_sha256:undefined}), null);
+});
+
 test('canonical scan work requires the task-owned consumer observation as well as source-backed scan facts', () => {
   const specimen = makeRepairCorpus('canonical').development[0];
   const refs = Object.fromEntries(Object.keys(specimen.files).map((path, i) => [path, {kind: 'value', id: (i+1).toString(16).padStart(64, '0')}]));
@@ -123,7 +165,7 @@ const resultSchema = {root: 0, types: [{product: [1, 11]}, {product: [2, 5]}, {p
 const consumer = [12, view], program = {kind: 'program', id: 'b'.repeat(64)};
 const computed = {tag: 1, value: []};
 
-test('rendered credit binds the actual displayed schema and retains unknown host inspection', () => {
+test('rendered credit binds the actual displayed schema and retains unknown host inspection', async t => {
   const result = {kind:'value',id:view};
   const inspected = inspectProjectionResult(resultSchema, encodeValue(resultSchema, [[consumer,[computed]],true]));
   const block = {kind:'computed',result,schema_identity:inspected.schema,schema:inspected.display,value:true};
@@ -141,6 +183,20 @@ test('rendered credit binds the actual displayed schema and retains unknown host
     result, recursiveOutput.schema, recursiveOutput.payload, recursiveOutput.display), true);
   const pair = {program, consumer, expected:'incomplete',payload:a};
   assert.equal(collisionProbe(pair, {...pair,expected:'exhausted_declared_domain',payload:b}).distinction_preserved, false);
+  const directory = await mkdtemp(join(tmpdir(), 'protean-repair-payload-'));
+  t.after(() => rm(directory, {recursive:true, force:true}));
+  const metrics = {compiler_nanoseconds: 18446744073709551615n, missing: undefined, usage: [undefined, null]};
+  for (const [filename, indent] of [['report.json', undefined], ['results.json', 2]]) {
+    const path = join(directory, filename);
+    await writeRepairReport(path, {metrics, projection: recursiveOutput, collision: pair}, indent);
+    const saved = JSON.parse(await readFile(path, 'utf8'));
+    assert.deepEqual(saved.metrics, {compiler_nanoseconds:'18446744073709551615', usage:[null, null]});
+    assert.equal(saved.projection.schema, recursiveOutput.schema);
+    assert.equal(computedRendering([{...block,schema:recursiveOutput.display,schema_identity:recursiveOutput.schema,value:a}],
+      result, recursiveOutput.schema, saved.projection.payload, saved.projection.display), true);
+    assert.equal(collisionProbe(saved.collision, {...pair,expected:'exhausted_declared_domain'}).distinction_preserved, false);
+    await assert.rejects(writeRepairReport(path, {replacement:true}, indent), {code:'EEXIST'});
+  }
 });
 
 test('diagnostic credit compares the payloads both executions propose to their shared consumer', () => {
