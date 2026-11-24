@@ -320,7 +320,8 @@ const Driver = struct {
             try Json.put(frame, &reply, "result", result);
             try emit(io, reply);
         }
-        if (self.worker.future != null) return error.WorkerOutstanding;
+        if (self.worker.future == null and self.worker.result != null) _ = try self.finishWorker(a);
+        if (self.worker.future != null or self.service.work != null) return error.WorkerOutstanding;
     }
 
     fn call(self: *Driver, a: std.mem.Allocator, request: Json.Value) !Json.Value {
@@ -331,17 +332,11 @@ const Driver = struct {
         if (std.mem.eql(u8, method, "evaluation.interface_repair.assets"))
             return self.preparationAssets(a, params, true);
         if (std.mem.eql(u8, method, "evaluation.observe")) return self.observe(a, params);
-        if (std.mem.eql(u8, method, "evaluation.export")) {
-            const task = try native.client.identifier(16, try field(params, "task_id"));
-            const path = try Json.text(try field(params, "path"));
-            const exported = try self.service.exportCheckpoint(a, task, path);
-            var result = try self.boundary(a, "exported");
-            try Json.put(a, &result, "sha256", try hexadecimal(a, exported.sha256));
-            try Json.put(a, &result, "bytes", try Json.number(a, exported.bytes));
-            return result;
-        }
+        if (std.mem.eql(u8, method, "evaluation.export")) return self.exportTask(a, params);
         if (std.mem.eql(u8, method, "evaluation.pause")) return self.pause(a, params);
         if (self.paused) return error.EvaluationPaused;
+        if (std.mem.eql(u8, method, "evaluation.interface_repair.admission"))
+            return self.repair_session.admission(self.service, a, params);
         if (std.mem.eql(u8, method, "evaluation.interface_repair.bootstrap"))
             return self.repair_session.bootstrap(self.service, self.worker, a, params, .complete);
         if (std.mem.eql(u8, method, "evaluation.interface_repair.fixture_select")) {
@@ -401,6 +396,16 @@ const Driver = struct {
         defer prior.deinit();
         if (prior.value.method != .submit or !std.meta.eql(prior.value.task, task))
             return error.PlannedTaskRequired;
+    }
+
+    fn exportTask(self: *Driver, a: std.mem.Allocator, params: Json.Value) !Json.Value {
+        const task = try native.client.identifier(16, try field(params, "task_id"));
+        const path = try Json.text(try field(params, "path"));
+        const exported = try self.service.exportCheckpoint(a, task, path);
+        var result = try self.boundary(a, "exported");
+        try Json.put(a, &result, "sha256", try hexadecimal(a, exported.sha256));
+        try Json.put(a, &result, "bytes", try Json.number(a, exported.bytes));
+        return result;
     }
 
     fn repairFixture(
@@ -500,7 +505,7 @@ const Driver = struct {
         const head = self.service.namespace.store.head;
         var result = try jsonValue(a, .{
             .step = name,
-            .worker_active = self.worker.future != null,
+            .worker_active = self.service.work != null,
             .epoch = head.generation,
         });
         var publication = Json.object();
@@ -512,20 +517,17 @@ const Driver = struct {
     }
 
     fn finishWorker(self: *Driver, a: std.mem.Allocator) !bool {
-        if (self.worker.future == null) return false;
-        if (try self.service.shouldCancelWork(self.worker.work)) self.worker.cancel();
-        if (!self.worker.finished()) return false;
-        try self.worker.join();
-        try self.service.completeWork(
-            a,
-            self.worker.work,
-            self.worker.result orelse return error.MissingWorkerResult,
-        );
-        self.completed = .{
-            .task = self.worker.work.task,
-            .attempt = self.worker.work.attempt,
-        };
-        try self.worker.release();
+        if (self.worker.future != null) {
+            if (try self.service.shouldCancelWork(self.worker.work)) self.worker.cancel();
+            if (!self.worker.finished()) return false;
+            try self.worker.join();
+        } else if (self.worker.result == null) {
+            if (self.service.work != null) return error.MissingWorkerResult;
+            return false;
+        }
+        const work = self.worker.work;
+        try repair.publishJoined(self.service, self.worker, a, false);
+        self.completed = .{ .task = work.task, .attempt = work.attempt };
         return true;
     }
 
@@ -535,11 +537,12 @@ const Driver = struct {
     }
 
     fn step(self: *Driver, a: std.mem.Allocator) !Json.Value {
+        if (try self.finishWorker(a)) return self.boundary(a, "captured");
+        if (self.worker.future != null) return self.boundary(a, "pending");
         if (self.repair_session.expected != null and !self.repair_session.ready) {
-            try self.repair_session.prepare(self.service, self.worker, a, false);
+            try self.repair_session.prepare(self.service, self.worker, a, .complete);
             return self.boundary(a, "bootstrap_ready");
         }
-        if (try self.finishWorker(a)) return self.boundary(a, "captured");
         const next = try self.service.pump(a);
         if (next == .work) {
             if (self.repair_session.task) |task| {

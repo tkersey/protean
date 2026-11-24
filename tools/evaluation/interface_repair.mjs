@@ -29,10 +29,10 @@ function fields(value, keys) {
   demand(value && typeof value === 'object' && !Array.isArray(value) &&
     Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key)), 'unexpected_fields');
 }
-function strictJson(text) {
+export function strictJson(text, reviver) {
   demand(typeof text === 'string', 'invalid_json');
   let value;
-  try { value = JSON.parse(text); } catch { throw new Error('invalid_json'); }
+  try { value = JSON.parse(text, reviver); } catch { throw new Error('invalid_json'); }
   const objects = [];
   for (const token of text.matchAll(/"(?:\\.|[^"\\])*"|[{}]/gs)) {
     if (token[0] === '{') objects.push(new Set());

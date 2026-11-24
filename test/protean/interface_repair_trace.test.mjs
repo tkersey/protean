@@ -27,12 +27,13 @@ test('successful HTTP transport and explicit model response are independent evid
   assert.equal(capturedModelResponse(raw('{}', 0, 403)), false);
   assert.equal(capturedModelResponse(raw('unparseable')), null);
   assert.equal(capturedModelResponse(raw(JSON.stringify({...body, output: []}))), null);
-  assert.equal(capturedModelResponse(raw(JSON.stringify(body)), [{tag: 4}]), null);
+  assert.equal(capturedModelResponse(raw(JSON.stringify({...body, usage:{input_tokens:'unavailable'}}))), true);
+  assert.equal(capturedModelResponse(raw(JSON.stringify({...body, output:[{...body.output[0], arguments:''}]}))), true);
   for (const output of [body.output, [{type: 'message', role: 'assistant', status: 'incomplete', content: [
     {type: 'output_text', text: 'Partial output.'}]}], [{type: 'message', role: 'assistant', status: 'completed',
     content: [{type: 'refusal', refusal: 'Declined.'}]}]]) {
     const incomplete = {...body, status: 'incomplete', output};
-    assert.equal(capturedModelResponse(raw(JSON.stringify(incomplete)), [{tag: 3}]), true);
+    assert.equal(capturedModelResponse(raw(JSON.stringify(incomplete))), true);
     assert.equal(capturedModelResponse(raw(sse('response.incomplete', incomplete), 1)), true);
   }
   assert.equal(capturedModelResponse(raw(sse('response.incomplete', {...body, status:'incomplete', output:[]}), 1)), null);
@@ -54,8 +55,28 @@ test('the provider terminal and finalized items bind generated output to a singl
   assert.equal(read([created, {...partial,response:{...partial.response,id:'other'}}]), null);
   const json = output => [200,true,null,Buffer.from(JSON.stringify({status:'completed',error:null,output})),0,null,null,2];
   const empty = {type:'message',role:'assistant',status:'completed',content:[{type:'output_text',text:''}]};
-  assert.equal(capturedModelResponse(json([empty]), [{tag:0,value:[[{tag:1,value:[3,'']}],[]]}]), null);
-  assert.equal(capturedModelResponse(json([]), [{tag:0,value:[[{tag:0,value:['c','choose','{}']}],[]]}]), null);
+  assert.equal(capturedModelResponse(json([empty])), null);
+  assert.equal(capturedModelResponse(json([])), null);
+  for (const status of ['incomplete', 'failed']) {
+    const terminal = {type:'response.' + status, response:{id:'r', status, output:[]}};
+    assert.equal(read([created, done, terminal]), true);
+    assert.equal(read([created, {...done, item:empty}, terminal]), status === 'failed' ? false : null);
+    assert.equal(read([created, done, {...terminal,response:{...terminal.response,id:'another'}}]), null);
+  }
+  assert.equal(read([created, done, {type:'error', code:'stream_failed'}]), true);
+});
+
+test('response captures preserve exact event ordinals and require unambiguous JSON', () => {
+  const read = (text, format = 1) => capturedModelResponse([200,true,null,Buffer.from(text),format,null,null,2]);
+  const done = seq => 'data: {"type":"response.output_item.done","sequence_number":' + seq +
+    ',"output_index":0,"item":{"type":"function_call","status":"completed","name":"report","call_id":"a","arguments":""}}\n\n';
+  const last = 'data: {"type":"response.completed","sequence_number":18446744073709551615,' +
+    '"response":{"id":"r","status":"completed","error":null,"output":[]}}\n\n';
+  assert.equal(read(done('1844674407370955161.4e1') + last), true);
+  assert.equal(read(done('18446744073709551615') + last), null);
+  for (const invalid of ['18446744073709551616','0.001','-1']) assert.equal(read(done(invalid) + last), null);
+  assert.equal(read('{"status":"failed","status":"completed","error":null,"output":[]}', 0), null);
+  assert.equal(read(done('1') + last.replace('"id":"r"', '"id":"r","id":"s"')), null);
 });
 
 test('canonical scan work requires the task-owned consumer observation as well as source-backed scan facts', () => {
@@ -114,9 +135,10 @@ test('rendered credit binds the actual displayed schema and retains unknown host
   let a = [], b = [];
   for (let i = 0; i < 4000; i++) { a = [a]; b = [b]; }
   const recursive = {root:0, types:[...resultSchema.types.slice(0, 11), {seq:11}]};
-  const recursiveOutput = inspectProjectionResult(recursive, encodeValue(recursive, [[consumer,[computed]],[]]));
+  const recursiveOutput = inspectProjectionResult(recursive, encodeValue(recursive, [[consumer,[computed]],b]));
+  assert.equal(recursiveOutput.inspection_error, undefined);
   assert.equal(computedRendering([{...block,schema:recursiveOutput.display,schema_identity:recursiveOutput.schema,value:a}],
-    result, recursiveOutput.schema, b, recursiveOutput.display), true);
+    result, recursiveOutput.schema, recursiveOutput.payload, recursiveOutput.display), true);
   const pair = {program, consumer, expected:'incomplete',payload:a};
   assert.equal(collisionProbe(pair, {...pair,expected:'exhausted_declared_domain',payload:b}).distinction_preserved, false);
 });

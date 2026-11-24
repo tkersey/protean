@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
-import {mkdir, readFile, writeFile} from 'node:fs/promises';
+import {mkdir, readFile, unlink, writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {prepareInterfaceRepair} from '../../tools/evaluation/interface_repair_campaign.mjs';
 import {executeRepairTask} from '../../tools/evaluation/interface_repair_task.mjs';
@@ -29,7 +29,7 @@ function compareRecovered(actual, supplied) {
   assert.equal(restored.build_commands, build_metrics.build_commands);
   assert.equal(restored.rejected_build_commands, build_metrics.rejected_build_commands);
   assert.equal(restored.compiler_nanoseconds, build_metrics.compiler_nanoseconds);
-  assert.equal(restored.build_elapsed_nanoseconds, restored.build_commands ? null : '0');
+  assert.equal(restored.build_elapsed_nanoseconds, restored.build_commands === 0 ? '0' : null);
 }
 
 class CheckedBootstrapClient extends RecurrenceDriver {
@@ -52,6 +52,20 @@ async function rejectedSubmission(launch, root, author, plan_sha256, source, bas
     '--interface-repair-bootstrap', sha(descriptor)]);
   try {
     const {profile} = await child.call('describe');
+    const extra = join(author.snapshot, 'later-file.txt');
+    await writeFile(extra, 'added after the original driver captured its snapshot', {flag: 'wx'});
+    try {
+      const admission = await child.call('evaluation.interface_repair.admission', {descriptor});
+      assert.equal(admission.profile_sha256, profile.sha256);
+      const changed = launch(null, 'changed-admission', ['--fixture-workspace', '--config', author.config,
+        '--interface-repair-bootstrap', sha(descriptor)]);
+      try {
+        await assert.rejects(changed.call('evaluation.interface_repair.admission', {descriptor}), /ChangedSnapshot/);
+      } finally {
+        changed.stdin.end();
+        assert.deepEqual(await changed.exited, [0, null]);
+      }
+    } finally { await unlink(extra); }
     const task = await child.call('task.submit', {client_operation_id: author.id, application_id: 'adaptive-agent',
       profile_id: profile.id, input: {schema_id: 'adaptive-agent.input.v2', value: {task: 'Changed prompt.'}}});
     await assert.rejects(child.call(bootstrapMethod, {task_id: task.task_id, descriptor, source}), /ChangedSubmission/);
@@ -176,12 +190,20 @@ async function recoverBootstrap(launch, root, subject, plan_sha256, source, mode
         return;
       }
     }
-    const cuts = diagnostic ? ['primary'] : ordinary ? ['acquisition'] : mode === 'cancelled' ? ['not_sent'] :
+    const cuts = mode === 'joined' ? ['joined'] : diagnostic ? ['start', 'primary'] : ordinary ? ['acquisition'] : mode === 'cancelled' ? ['not_sent'] :
       mode === 'message' ? ['build'] : ['build', 'consumer', 'acquisition', 'start', 'primary'];
     let program = null, consumer = null, work = null;
     for (const stop_after of cuts) {
       await assert.rejects(child.call('evaluation.interface_repair.fixture_select', {...params, stop_after}),
         /FixtureCut/, stop_after);
+      if (stop_after === 'joined') {
+        assert.equal((await child.call('evaluation.drain')).step, 'captured');
+        assert.equal((await child.call('evaluation.drain')).step, 'idle');
+        assert.equal((await child.call('evaluation.step')).step, 'bootstrap_ready');
+        assert((await committedBootstrap(child, params)).view);
+        assert.equal((await capture('joined-save')).task.inference_attempts, 0n);
+        return;
+      }
       if (stop_after !== 'not_sent') assert.equal(await committedBootstrap(child, params), null);
       const before = await capture(stop_after);
       assert.equal(before.task.inference_attempts, 0n);
@@ -234,7 +256,8 @@ async function recoverBootstrap(launch, root, subject, plan_sha256, source, mode
       }
     }
     const ready = await child.call(bootstrapMethod, params);
-    assert.equal(ready.build_metrics.build_commands, ordinary ? 0 : 1);
+    assert.equal(ready.build_metrics.build_commands, ordinary ? 0 : diagnostic ? 1 : null);
+    assert.equal(ready.build_metrics.rejected_build_commands, ordinary || diagnostic ? 0 : null);
     assert.equal(ready.build_metrics.build_elapsed_nanoseconds, ordinary ? '0' : null);
     assert.equal(ready.build_metrics.compiler_nanoseconds, ordinary ? '0' : null);
     assert.equal(ready.consumer?.id ?? null, consumer);
@@ -286,6 +309,50 @@ async function rejectIncompatibleProgram(launch, root, subject, plan_sha256, sca
   } finally {
     child.stdin.end();
     assert.deepEqual(await child.exited, [0, null]);
+  }
+}
+
+async function rejectedDiagnostic(launch, root, subject, plan_sha256, forwarder) {
+  const records = JSON.parse(forwarder);
+  assert.equal(records.module.constants.length, 1);
+  assert.equal(records.module.constants[0].bytes, 'AQE');
+  records.module.constants[0].bytes = 'AA';
+  const source = JSON.stringify(records);
+  let program = null;
+  for (const stage of ['build', 'run']) {
+    const descriptor = JSON.stringify({version:1,plan_sha256,submission_id:subject.id,
+      prompt_sha256:sha(subject.prompt),phase:'diagnostic',condition:'repair',files:subject.evidence,
+      source_sha256:sha(source),program_sha256:program ?? '0'.repeat(64)});
+    const state = 'rejected-diagnostic-' + stage;
+    const flags = ['--fixture-workspace','--config',subject.config,'--interface-repair-bootstrap',sha(descriptor)];
+    let child = launch(null,state,flags);
+    const close = async () => { child.stdin.end(); assert.deepEqual(await child.exited,[0,null]); };
+    try {
+      const {profile} = await child.call('describe');
+      const {task_id} = await child.call('task.submit',{client_operation_id:subject.id,application_id:'adaptive-agent',
+        profile_id:profile.id,input:{schema_id:'adaptive-agent.input.v2',value:{task:subject.prompt}}});
+      const params = {task_id,descriptor,source}, path = join(root,state + '.agnx');
+      if (stage === 'build') {
+        await assert.rejects(child.call('evaluation.interface_repair.fixture_select',{...params,stop_after:'build'}),
+          /FixtureCut/);
+        await child.call('evaluation.export',{task_id,path});
+        const archive = readArchive(await readFile(path));
+        const built = archive.manifest[6].filter(row => row[0] === 8).map(row =>
+          decodeValue(archive.schemas.get('workspace_program'),archive.object(row[2])))
+          .find(row => archive.object(row[3][1]).equals(Buffer.from(source)));
+        assert(built);
+        program = Buffer.from(built[2][0]).toString('hex');
+      } else {
+        await assert.rejects(child.call(bootstrapMethod,params), /ProjectionResultRejected/);
+        await close();
+        child = launch(task_id,state,flags);
+        const rejected = await committedBootstrap(child,params);
+        assert.equal(rejected.candidate_rejected, 'ProjectionResultRejected');
+        assert.equal(rejected.build_metrics.build_commands, 1);
+        await child.call('evaluation.export',{task_id,path});
+        assert.equal(readArchive(await readFile(path)).task.inference_attempts,0n);
+      }
+    } finally { await close(); }
   }
 }
 
@@ -421,7 +488,7 @@ export async function checkInterfaceRepair(launch, root, {sources, application:o
     await rejectIncompatibleProgram(launch, root, diagnostic, plan_sha256, scalarProjection, large);
   const evidence = plan.conditions.find(c => c.arm === 'evidence').downstream[0];
   await recoverBootstrap(launch, root, evidence, plan_sha256, '', 'ordinary');
-  for (const mode of ['projected', 'message', 'early-message', 'cancelled'])
+  for (const mode of ['projected', 'message', 'early-message', 'cancelled', 'joined'])
     await recoverBootstrap(launch, root, fixed, plan_sha256, sources.lossy, mode);
   const episode = async (subject, candidate = null) => {
     const output = join(root, 'result-' + subject.id);
@@ -468,6 +535,7 @@ export async function checkInterfaceRepair(launch, root, {sources, application:o
   assert.equal(first.selected_view, development.bootstrap.view.id);
   assert(trace.projection.exposures.some(row => row.id === first.id && row.rendered));
   await auditEvidence(development, application);
+  await rejectedDiagnostic(launch, root, diagnostic, plan_sha256, development.fixture_receipt.source);
   await recoverBootstrap(launch, root, diagnostic, plan_sha256,
     Buffer.from(candidate.source_b64, 'base64').toString(), 'diagnostic', candidate.program.id);
   const probe = await episode(diagnostic, candidate);

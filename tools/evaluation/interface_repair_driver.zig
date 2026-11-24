@@ -34,15 +34,30 @@ pub const Cut = enum {
     primary,
     selection,
     not_sent,
+    joined,
 };
 const BuildMetrics = struct {
-    build_commands: u32 = 0,
+    build_commands: ?u32 = 0,
     rejected_build_commands: ?u32 = 0,
     elapsed_ns: ?u64 = 0,
 
+    const uncertain: @This() = .{
+        .build_commands = null,
+        .rejected_build_commands = null,
+        .elapsed_ns = null,
+    };
+    const admitted: @This() = .{ .build_commands = 1, .elapsed_ns = null };
+
+    fn historical(observed: bool) @This() {
+        return if (observed) admitted else uncertain;
+    }
+
     fn json(self: @This(), a: Allocator) !Json.Value {
         var out = Json.object();
-        try Json.put(a, &out, "build_commands", try Json.number(a, self.build_commands));
+        try Json.put(a, &out, "build_commands", if (self.build_commands) |n|
+            try Json.number(a, n)
+        else
+            .null);
         try Json.put(a, &out, "rejected_build_commands", if (self.rejected_build_commands) |n|
             try Json.number(a, n)
         else
@@ -66,6 +81,7 @@ pub const Session = struct {
     started: bool = false,
     ready: bool = false,
     metrics: ?BuildMetrics = null,
+    observed_first_build: bool = true,
     fixture_used: bool = false,
     downstream_task: ?[16]u8 = null,
     selected: ?struct {
@@ -75,6 +91,32 @@ pub const Session = struct {
         program: [64]u8,
         result: [64]u8,
     } = null,
+
+    pub fn admission(
+        self: *const @This(),
+        service: *Service,
+        a: Allocator,
+        params: Json.Value,
+    ) !Json.Value {
+        const expected = self.expected orelse return error.BootstrapNotEnabled;
+        const descriptor = try Json.text(try field(params, "descriptor"));
+        if (!std.meta.eql(expected, native.testing.digest(descriptor))) return error.ChangedPlan;
+        var decoded = try Json.parseAsset(a, descriptor, descriptor.len);
+        defer decoded.deinit();
+        const plan = try native.values.fromJson(Plan, a, decoded.value);
+        const env: *environment.State = @ptrCast(@alignCast(service.profile.environment orelse
+            return error.MissingConfiguration));
+        try validateSnapshot(a, plan, env);
+        const bytes = service.profile.bytes;
+        var profile = try Json.parseAsset(a, bytes, bytes.len);
+        defer profile.deinit();
+        const config = try Json.text(try field(profile.value, "configuration_digest"));
+        var result = Json.object();
+        try Json.put(a, &result, "configuration_digest", Json.string(try a.dupe(u8, config)));
+        const id = std.fmt.bytesToHex(native.testing.digest(bytes), .lower);
+        try Json.put(a, &result, "profile_sha256", Json.string(try a.dupe(u8, &id)));
+        return result;
+    }
 
     pub fn bootstrap(
         self: *@This(),
@@ -113,10 +155,18 @@ pub const Session = struct {
             if (cut != .complete) return error.InvalidParams;
             return self.completed(service, a, task, plan) catch |err| switch (err) {
                 error.BootstrapEvidencePending => .null,
+                error.ProjectionWorkFailed, error.ProjectionResultRejected => blk: {
+                    if (plan.phase != .diagnostic) return err;
+                    var outcome = Json.object();
+                    try Json.put(a, &outcome, "candidate_rejected", Json.string(@errorName(err)));
+                    try Json.put(a, &outcome, "build_metrics", try self.buildMetrics(a, task));
+                    break :blk outcome;
+                },
                 else => return err,
             };
         }
-        const remaining = try requireCut(service, a, task, plan, expected, submission);
+        const observed = self.observed_first_build and plan.condition != .ordinary;
+        const remaining = try requireCut(service, a, task, plan, expected, submission, observed);
         self.started = true;
         self.task = task;
         self.metrics = .{};
@@ -129,6 +179,7 @@ pub const Session = struct {
             .prefix = try progressPrefix(a, expected),
             .cut = cut,
             .remaining = remaining,
+            .observed_first_build = observed,
         };
         var output = if (plan.condition == .ordinary)
             try self.ordinary(&run)
@@ -156,6 +207,7 @@ pub const Session = struct {
             .cut = .complete,
             .remaining = 0,
             .read_only = true,
+            .observed_first_build = self.observed_first_build and plan.condition != .ordinary,
         };
         var copy = self.*;
         const ordinary_case = plan.condition == .ordinary;
@@ -189,7 +241,7 @@ pub const Session = struct {
         else if (ordinary_case)
             BuildMetrics{}
         else
-            BuildMetrics{ .build_commands = 1, .elapsed_ns = null };
+            BuildMetrics.admitted;
         try Json.put(a, &output, "build_metrics", try metrics.json(a));
         return output;
     }
@@ -236,7 +288,7 @@ pub const Session = struct {
         run.consumer = read.reference;
         const output = try self.selectProgram(run, env, plan, built);
         if (plan.phase != .diagnostic and run.cut != .selection)
-            try self.prepare(run.service, worker, run.a, run.cut == .not_sent);
+            try self.prepare(run.service, worker, run.a, run.cut);
         return output;
     }
 
@@ -322,7 +374,7 @@ pub const Session = struct {
         service: *Service,
         worker: *native.testing.Worker,
         a: Allocator,
-        not_sent: bool,
+        cut: Cut,
     ) !void {
         const selected = self.selected orelse return error.BootstrapRequired;
         const env: *environment.State = @ptrCast(@alignCast(service.profile.environment.?));
@@ -332,7 +384,7 @@ pub const Session = struct {
         var handoff = try capturedInitialContext(service, a, selected.task, view);
         if (handoff == .pending or handoff == .not_sent) {
             for (0..16384) |_| {
-                if (try stepSetup(service, worker, a, selected.task, true, not_sent)) break;
+                if (try stepSetup(service, worker, a, selected.task, true, cut)) break;
             } else return error.InitialHandoffMissing;
             handoff = try capturedInitialContext(service, a, selected.task, view);
         }
@@ -354,6 +406,10 @@ pub const Session = struct {
     pub fn restore(self: *@This(), service: *Service, a: Allocator, task: [16]u8) !void {
         const digest = self.expected orelse return;
         self.task = task;
+        const prefix = try progressPrefix(a, digest);
+        var original = try service.operationLookup(a, try firstKey(a, prefix, true));
+        defer if (original) |*receipt| receipt.deinit();
+        self.observed_first_build = original != null;
         const ordinary_key = try receiptKey(a, digest, "ordinary");
         if (try service.operationLookup(a, ordinary_key)) |found| {
             var receipt = found;
@@ -375,7 +431,7 @@ pub const Session = struct {
             const run = view.value.description.projection orelse
                 return error.InvalidBootstrapReceipt;
             self.started = true;
-            self.metrics = .{ .build_commands = 1, .elapsed_ns = null };
+            self.metrics = BuildMetrics.historical(self.observed_first_build);
             self.ready = try capturedInitialContext(service, a, task, id) == .ready;
             if (phase == .downstream) self.downstream_task = task;
             self.selected = .{
@@ -387,14 +443,14 @@ pub const Session = struct {
             };
             return;
         }
-        const key = try std.fmt.allocPrint(a, "{s}1", .{try progressPrefix(a, digest)});
+        const key = try firstKey(a, prefix, self.observed_first_build);
         var first = (try service.operationLookup(a, key)) orelse return;
         defer first.deinit();
         if (!std.meta.eql(first.value.task, task) or first.value.method != .workspace)
             return error.InvalidBootstrapReceipt;
         const kind = first.value.workspace_kind orelse return error.InvalidBootstrapReceipt;
         self.metrics = switch (kind) {
-            .program => .{ .build_commands = 1, .elapsed_ns = null },
+            .program => BuildMetrics.historical(self.observed_first_build),
             .value => .{},
             else => return error.InvalidBootstrapReceipt,
         };
@@ -599,6 +655,10 @@ fn validatePlan(
         defer a.free(bytes);
         if (!std.mem.eql(u8, bytes, source)) return error.ConditionViolation;
     }
+    try validateSnapshot(a, plan, env);
+}
+
+fn validateSnapshot(a: Allocator, plan: Plan, env: *const environment.State) !void {
     const files = env.snapshot.files();
     if (files.len != plan.files.items.len or env.snapshot.decoded.value.excluded_entries != 0)
         return error.ChangedSnapshot;
@@ -637,6 +697,11 @@ fn originalSubmission(service: *Service, a: Allocator, task: [16]u8, plan: Plan)
     return .{ .id = submitted.value.id, .revision = submitted.value.revision };
 }
 
+fn firstKey(a: Allocator, prefix: []const u8, observed: bool) ![]const u8 {
+    const first = if (observed) "1-observed" else "1";
+    return std.fmt.allocPrint(a, "{s}{s}", .{ prefix, first });
+}
+
 fn requireCut(
     service: *Service,
     a: Allocator,
@@ -644,6 +709,7 @@ fn requireCut(
     plan: Plan,
     digest: [32]u8,
     submission: Submission,
+    observed: bool,
 ) !u64 {
     var parent = try service.task(a, task);
     defer parent.deinit();
@@ -651,7 +717,7 @@ fn requireCut(
         return error.InitialCutRequired;
     if (submission.revision == parent.value.revision) return 0;
     const prefix = try progressPrefix(a, digest);
-    const first = try std.fmt.allocPrint(a, "{s}1", .{prefix});
+    const first = try firstKey(a, prefix, observed);
     const count = try setupOperations(service, a, task, prefix, submission);
     var started = (try service.operationLookup(a, first)) orelse {
         if (count != 0) return error.InitialCutRequired;
@@ -753,7 +819,7 @@ fn initialConsumer(
     for (0..16384) |_| {
         if (try observedConsumer(service, a, task)) |found| return found;
         if (remaining != 0) return error.InitialCutRequired;
-        _ = try stepSetup(service, worker, a, task, false, false);
+        _ = try stepSetup(service, worker, a, task, false, .complete);
     }
     return error.MissingInitialConsumer;
 }
@@ -764,7 +830,7 @@ fn stepSetup(
     a: Allocator,
     task: [16]u8,
     accept_preparation: bool,
-    not_sent: bool,
+    cut: Cut,
 ) !bool {
     const next = try service.pump(a);
     switch (next) {
@@ -781,7 +847,7 @@ fn stepSetup(
         try service.notSent(a, work);
         return error.UnexpectedSetupWork;
     }
-    if (prepared and not_sent) {
+    if (prepared and cut == .not_sent) {
         try service.notSent(a, work);
         return error.FixtureCut;
     }
@@ -791,17 +857,35 @@ fn stepSetup(
     };
     while (!worker.finished()) try service.io.sleep(.fromMilliseconds(1), .awake);
     try worker.join();
-    defer worker.release() catch |err| std.debug.panic("bootstrap worker: {t}", .{err});
     const result = worker.result orelse return error.MissingWorkerResult;
-    try service.completeWork(a, work, result);
-    switch (result) {
-        .acquired => {},
-        .failure => |err| return err,
-        .unknown => return error.InitialPreparationUnknown,
-        .not_sent, .not_sent_with_reason => return error.InitialPreparationNotSent,
-        .rederived => return error.UnexpectedSetupWork,
-    }
+    const failure: ?anyerror = switch (result) {
+        .acquired => null,
+        .failure => |err| err,
+        .unknown => error.InitialPreparationUnknown,
+        .not_sent, .not_sent_with_reason => error.InitialPreparationNotSent,
+        .rederived => error.UnexpectedSetupWork,
+    };
+    try publishJoined(service, worker, a, prepared and cut == .joined);
+    if (failure) |reason| return reason;
     return prepared;
+}
+
+pub fn publishJoined(
+    service: *Service,
+    worker: *native.testing.Worker,
+    a: Allocator,
+    interrupt_save: bool,
+) !void {
+    const result = worker.result orelse return error.MissingWorkerResult;
+    const saved = if (interrupt_save)
+        error.FixtureCut
+    else
+        service.completeWork(a, worker.work, result);
+    saved catch |err| {
+        if (service.work == null) try worker.release();
+        return err;
+    };
+    try worker.release();
 }
 
 fn observation(a: Allocator, reply: wc.Reply, command: wc.Command) !Json.Value {
@@ -870,17 +954,19 @@ const Bootstrap = struct {
     remaining: u64,
     sequence: u64 = 0,
     read_only: bool = false,
+    observed_first_build: bool,
 
     fn nextOperation(self: *@This(), a: Allocator) ![]const u8 {
         self.sequence += 1;
+        if (self.sequence == 1) return firstKey(a, self.prefix, self.observed_first_build);
         return std.fmt.allocPrint(a, "{s}{d}", .{ self.prefix, self.sequence });
     }
 
     fn build(self: *@This(), source: []const u8, metrics: *BuildMetrics) !Json.Value {
         const resumed = self.remaining != 0;
-        metrics.* = .{ .build_commands = 1, .elapsed_ns = null };
+        metrics.* = BuildMetrics.historical(self.observed_first_build);
         const started = std.Io.Clock.awake.now(self.service.io);
-        defer if (!resumed) {
+        defer if (!resumed and self.observed_first_build) {
             const now = std.Io.Clock.awake.now(self.service.io);
             const elapsed = now.nanoseconds - started.nanoseconds;
             metrics.elapsed_ns = std.math.cast(u64, elapsed);
@@ -890,7 +976,11 @@ const Bootstrap = struct {
             .source_kind = .source_records,
             .exposures = .{ .items = &.{} },
         } } }) catch |err| {
-            metrics.rejected_build_commands = if (err == error.ProjectionBuildRejected) 1 else null;
+            if (self.observed_first_build)
+                metrics.rejected_build_commands = if (err == error.ProjectionBuildRejected)
+                    1
+                else
+                    null;
             return err;
         };
     }
@@ -1087,6 +1177,44 @@ const Bootstrap = struct {
         return receipt.workspace_observation orelse error.InvalidBootstrapReceipt;
     }
 
+    fn terminalReceipt(
+        self: *@This(),
+        start: State.Reference,
+        index: [32]u8,
+    ) !?State.Reference {
+        const a = self.a;
+        var latest = try self.service.workspaceWork(a, self.task, index);
+        defer latest.deinit();
+        if (!latest.value.terminal() and latest.value.current_port == null)
+            return error.BootstrapEvidencePending;
+        const store = &self.service.namespace.store;
+        const bytes = try store.object(a, start, null);
+        var origin = try C.decodeOwned(native.workspace.WorkObservation, a, bytes);
+        defer origin.deinit();
+        const revisions = std.math.sub(
+            u64,
+            latest.value.control_revision,
+            origin.value.work.control_revision,
+        ) catch return null;
+        if (revisions == 0) return null;
+        const ordinal = try std.math.add(u64, self.sequence, revisions);
+        const key = try std.fmt.allocPrint(a, "{s}{d}", .{ self.prefix, ordinal });
+        var receipt = (try self.service.operationLookup(a, key)) orelse return null;
+        defer receipt.deinit();
+        if (receipt.value.workspace_kind != .work or
+            !std.meta.eql(receipt.value.workspace, @as(?[32]u8, index))) return null;
+        const saved = try self.workSnapshot(receipt.value, index);
+        const frozen = try store.object(a, saved, null);
+        var observed = try C.decodeOwned(native.workspace.WorkObservation, a, frozen);
+        defer observed.deinit();
+        const work = observed.value.work;
+        if (!std.meta.eql(work.task, self.task) or !std.meta.eql(work.id, index))
+            return error.InvalidBootstrapReceipt;
+        if (!work.terminal() and work.current_port == null) return null;
+        self.sequence = ordinal;
+        return saved;
+    }
+
     fn complete(self: *@This(), work: wc.Ref) !wc.Ref {
         const key = try std.fmt.allocPrint(self.a, "{s}{d}", .{ self.prefix, self.sequence });
         var start = (try self.service.operationLookup(self.a, key)) orelse
@@ -1094,6 +1222,7 @@ const Bootstrap = struct {
         defer start.deinit();
         const index = try native.client.identifier(32, Json.string(work.id.bytes));
         var frozen = try self.workSnapshot(start.value, index);
+        if (self.read_only) frozen = try self.terminalReceipt(frozen, index) orelse frozen;
         while (true) { // tiger: event-loop
             var iteration = std.heap.ArenaAllocator.init(self.service.allocator);
             defer iteration.deinit();

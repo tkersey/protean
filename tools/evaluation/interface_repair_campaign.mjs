@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {createHash, randomBytes} from 'node:crypto';
 import {spawnSync} from 'node:child_process';
-import {mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile} from 'node:fs/promises';
+import {lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -250,18 +250,23 @@ function validateCostModel(model) {
   if (model.kind === 'tariff') assert.deepEqual(tariffErrors(model), [], 'Incomplete declared tariff.');
 }
 
-async function validateFile(file) {
-  const bytes = await readFile(file.path);
-  assert.equal(hash(bytes),file.sha256,'Frozen material changed: '+file.path);
-  return bytes;
-}
-
 async function readRepairPlan(directory,options) {
-  const bytes = await readFile(join(directory,'plan.json'));
+  directory = await realpath(directory);
+  const manifest = join(directory,'plan.json'), digest = join(directory,'plan.sha256');
+  const preparedFiles = new Set([manifest,digest]);
+  const bytes = await readFile(manifest);
   const plan_sha256 = hash(bytes);
-  assert.equal(plan_sha256,(await readFile(join(directory,'plan.sha256'),'utf8')).trim(),'Frozen plan changed.');
+  assert.equal(plan_sha256,(await readFile(digest,'utf8')).trim(),'Frozen plan changed.');
   const plan = JSON.parse(bytes);
   assert.equal(plan.format,format);
+  assert.equal(plan.study_assets.application.path,join(directory,'private','application.json'),
+    'Run the plan from its original preparation directory.');
+  async function validateFile(file) {
+    const contents = await readFile(file.path);
+    assert.equal(hash(contents),file.sha256,'Frozen material changed: '+file.path);
+    preparedFiles.add(file.path);
+    return contents;
+  }
   validateCostModel(plan.cost_model);
   validateEfforts(plan.approved_efforts,plan.initial_effort);
   assert.deepEqual(plan.profile.efforts,[plan.initial_effort]);
@@ -292,7 +297,7 @@ async function readRepairPlan(directory,options) {
   const application = JSON.parse(studyBytes);
   assert.equal(hash(studyBytes),plan.study_assets.build.application_assets_sha256);
   assert.equal(application.program_sha256,plan.study_assets.build.program_sha256);
-  return {plan,plan_sha256,application};
+  return {plan,plan_sha256,application,directory,preparedFiles};
 }
 
 export async function validateRepairPlan(directory,options) {
@@ -304,46 +309,63 @@ function bootstrapBuild(report) {
   const readsOnly = report?.effective_condition === 'ordinary';
   const beforeBootstrap = report?.errors?.some(error=>error.stage === 'setup');
   const performed = report?.bootstrap?.program?.kind === 'program' || Boolean(report?.candidate_rejection);
-  const commands = observed?.build_commands ?? (performed ? 1 : readsOnly || beforeBootstrap ? 0 : null);
+  const commands = observed ? observed.build_commands : performed ? 1 : readsOnly || beforeBootstrap ? 0 : null;
   const ns = field => {
     const raw = observed?.[field];
     const value = typeof raw === 'string' && /^[0-9]+$/.test(raw) ? Number(raw) : raw;
     return Number.isSafeInteger(value) && value >= 0 ? value : commands === 0 ? 0 : null;
   };
-  return {commands, rejected:observed?.rejected_build_commands ??
+  return {commands, rejected:observed && Object.hasOwn(observed,'rejected_build_commands') ? observed.rejected_build_commands :
     (commands === 0 || report?.bootstrap?.program || (performed && report.candidate_rejection !== 'ProjectionBuildRejected') ? 0 : null),
     elapsed:ns('build_elapsed_nanoseconds'),compiler:ns('compiler_nanoseconds')};
 }
 
-function knownCharges(report, model) {
-  const charge = value=>Number.isFinite(value) && value >= 0;
+function providerTraffic(report) {
+  if (report?.execution_mode === 'scripted_fixture') return {attempts:[],complete:true};
+  const archived = report?.metrics?.physical_attempts;
+  const attempts = archived ?? report?.observed_provider_attempts ?? [];
+  return {attempts,complete:Array.isArray(archived) && report.final_metrics_complete !== false ||
+    report?.inference_dispatch_possible === false && attempts.length === 0};
+}
+
+function taskCharges(report, model, traffic) {
+  const measured = value=>Number.isFinite(value) && value >= 0;
   const count = value=>Number.isSafeInteger(value) && value >= 0;
-  const complete = report?.cost?.complete === true && charge(report.cost.total);
-  if (tariffErrors(model).length) return {inference:0,total:complete ? report.cost.total : 0};
-  const attempts = report?.execution_mode === 'scripted_fixture' ? [] :
-    report?.metrics?.physical_attempts ?? report?.observed_provider_attempts ?? [];
+  const charged = report?.cost?.complete === true && measured(report.cost.total) ? report.cost.total : null;
+  if (tariffErrors(model).length) return {inference:null,total:charged,knownInference:0,knownTotal:charged ?? 0};
+  const inputRate = model.input_per_million, cachedRate = model.cached_input_per_million, outputRate = model.output_per_million;
+  let exact = traffic.complete || (inputRate === 0 && cachedRate === 0 && outputRate === 0);
   let inference = 0;
-  for (const {usage} of attempts) {
+  for (const {usage} of traffic.attempts) {
     const input = usage?.input_tokens, cached = usage?.input_tokens_details?.cached_tokens, output = usage?.output_tokens;
     if (count(input)) {
-      const minimumRate = Math.min(model.input_per_million,model.cached_input_per_million);
-      inference += count(cached) && cached <= input ?
-        ((input-cached)*model.input_per_million+cached*model.cached_input_per_million)/1000000 : input*minimumRate/1000000;
-    } else if (input == null && count(cached)) inference += cached*model.cached_input_per_million/1000000;
-    if (count(output)) inference += output*model.output_per_million/1000000;
+      if (count(cached) && cached <= input) inference += ((input-cached)*inputRate+cached*cachedRate)/1000000;
+      else {
+        inference += input*Math.min(inputRate,cachedRate)/1000000;
+        if (input > 0 && inputRate !== cachedRate) exact = false;
+      }
+    } else {
+      if (count(cached)) inference += cached*cachedRate/1000000;
+      if (inputRate !== 0 || (cachedRate !== 0 && !count(cached))) exact = false;
+    }
+    if (count(output)) inference += output*outputRate/1000000;
+    else if (outputRate !== 0) exact = false;
   }
-  if (charge(report?.cost?.inference)) inference = report.cost.inference;
-  const host = charge(report?.elapsed_ms) ? report.elapsed_ms/1000*model.host_per_second : 0;
-  const storage = count(report?.retained_namespace_bytes) ?
-    report.retained_namespace_bytes*model.retention_seconds*model.storage_per_byte_second : 0;
-  return {inference,total:complete ? report.cost.total : inference+host+storage};
+  if (measured(report?.cost?.inference)) { inference = report.cost.inference; exact = true; }
+  const host = model.host_per_second === 0 ? 0 : measured(report?.elapsed_ms) ?
+    report.elapsed_ms/1000*model.host_per_second : null;
+  const storage = model.storage_per_byte_second === 0 || model.retention_seconds === 0 ? 0 :
+    count(report?.retained_namespace_bytes) ? report.retained_namespace_bytes*model.retention_seconds*model.storage_per_byte_second : null;
+  const knownTotal = charged ?? inference+(host ?? 0)+(storage ?? 0);
+  const total = charged ?? (exact && host !== null && storage !== null ? knownTotal : null);
+  return {inference:exact ? inference : null,total,knownInference:inference,knownTotal};
 }
 
 function resources(tasks, costModel) {
   const started = tasks.filter(t=>t.state !== 'not_started');
-  const attempts = started.flatMap(t=>t.report?.metrics?.physical_attempts ?? t.report?.observed_provider_attempts ?? []);
-  const countKnown = started.every(t=>Array.isArray(t.report?.metrics?.physical_attempts) &&
-    t.report.final_metrics_complete !== false);
+  const traffic = started.map(t=>providerTraffic(t.report));
+  const attempts = traffic.flatMap(group=>group.attempts);
+  const countKnown = traffic.every(group=>group.complete);
   const count = value => Number.isSafeInteger(value) && value >= 0;
   const knownSum = values => values.reduce((sum, value)=>sum+(count(value) ? value : 0),0);
   const missingUsage = attempts.filter(a=>!count(a.usage?.input_tokens) || !count(a.usage?.output_tokens)).length;
@@ -352,48 +374,59 @@ function resources(tasks, costModel) {
   const total = values=>values.every(count) ? knownSum(values) : null;
   const taskMetric = key => {
     const fields = started.map(t=>t.report?.metrics?.[key]);
-    return fields.every(count) && countKnown ? knownSum(fields) : null;
+    return fields.every(count) && started.every(t=>t.report?.final_metrics_complete !== false) ? knownSum(fields) : null;
   };
   const namespaces = started.map(t=>t.report?.retained_namespace_bytes);
   const bootstrap = started.map(t=>bootstrapBuild(t.report));
   const bootstrapCommands = bootstrap.map(b=>b.commands), capturedBuilds = taskMetric('builds');
-  const issuedBuilds = taskMetric('build_attempts');
-  const buildsCaptured = issuedBuilds !== null && issuedBuilds === capturedBuilds;
-  const capturedRejected = taskMetric('rejected_builds'), capturedCompiler = taskMetric('compiler_nanoseconds');
+  const issuedBuilds = taskMetric('build_attempts'), settledBuilds = taskMetric('settled_builds');
+  const timedBuilds = taskMetric('timed_builds'), commands = taskMetric('build_commands');
+  const capturedCompiler = knownSum(started.map(t=>t.report?.metrics?.compiler_nanoseconds));
+  const rejected = bootstrap.map(b=>b.rejected);
+  const knownRejected = knownSum([...rejected,...started.map(t=>t.report?.metrics?.known_rejected_build_commands)]);
   const rss = started.map(t=>t.report?.peak_rss_sampled_bytes).filter(count);
-  const charges = started.map(t=>t.report?.cost).filter(c=>c?.complete === true &&
-    Number.isFinite(c.total) && c.total >= 0);
-  const known = costModel.kind === 'tariff' ? started.map(t=>knownCharges(t.report,costModel)) : [];
+  const charges = costModel.kind === 'tariff' ? started.map((t,i)=>taskCharges(t.report,costModel,traffic[i])) : [];
+  const sumCharges = field=>costModel.kind === 'tariff' && charges.every(c=>Number.isFinite(c[field])) ?
+    charges.reduce((sum,c)=>sum+c[field],0) : null;
   return {known_physical_attempts:attempts.length, physical_attempts:countKnown ? attempts.length : null,
     usage_complete:countKnown && !missingUsage, known_input_tokens:knownSum(attempts.map(a=>a.usage?.input_tokens)),
     known_output_tokens:knownSum(attempts.map(a=>a.usage?.output_tokens)), missing_usage_attempts:missingUsage,
     known_request_body_bytes:knownBodyBytes, request_body_bytes:countKnown && bodyBytes.every(count) ? knownBodyBytes : null,
     captured_builds:capturedBuilds,bootstrap_builds:total(bootstrapCommands),known_bootstrap_builds:knownSum(bootstrapCommands),
-    dispatched_builds:issuedBuilds,builds:total([issuedBuilds,...bootstrapCommands]),
-    rejected_builds:buildsCaptured ? total([capturedRejected,...bootstrap.map(b=>b.rejected)]) : null,
+    dispatched_builds:issuedBuilds,settled_builds:settledBuilds,timed_builds:timedBuilds,
+    builds:total([commands,...bootstrapCommands]),known_builds:knownSum([...bootstrapCommands,...started.map(t=>t.report?.metrics?.build_commands)]),
+    rejected_builds:total([taskMetric('rejected_build_commands'),...rejected]),known_rejected_builds:knownRejected,
     work_items:taskMetric('work_items'),captured_compiler_nanoseconds:capturedCompiler,
     bootstrap_build_elapsed_nanoseconds:total(bootstrap.map(b=>b.elapsed)),
-    compiler_nanoseconds:buildsCaptured ? total([capturedCompiler,...bootstrap.map(b=>b.compiler)]) : null,result_bytes:taskMetric('result_bytes'),
+    compiler_nanoseconds:issuedBuilds !== null && issuedBuilds === settledBuilds && issuedBuilds === timedBuilds ?
+      total([taskMetric('compiler_nanoseconds'),...bootstrap.map(b=>b.compiler)]) : null,result_bytes:taskMetric('result_bytes'),
     retained_namespace_bytes:namespaces.every(count) ? knownSum(namespaces) : null,
     max_sampled_rss_bytes:rss.length ? rss.reduce((a,b)=>Math.max(a,b)) : null,
     monetary_scope:'task_execution_and_retention',
-    monetary_cost:costModel.kind === 'tariff' && charges.length === started.length ? charges.reduce((sum,c)=>sum+c.total,0) : null,
-    known_monetary_cost:costModel.kind === 'tariff' ? known.reduce((sum,c)=>sum+c.total,0) : null,
-    known_inference_cost:costModel.kind === 'tariff' ? known.reduce((sum,c)=>sum+c.inference,0) : null,
+    monetary_cost:sumCharges('total'),known_monetary_cost:sumCharges('knownTotal'),
+    inference_cost:sumCharges('inference'),known_inference_cost:sumCharges('knownInference'),
     cost_model:costModel.id ?? costModel.kind};
 }
 
-function zeroControllerAttempts(report) {
+function inventoriedControllerDelivery(report) {
+  if (report?.inference_dispatch_possible === false && report.execution_mode !== 'scripted_fixture') return [];
+  if (report?.final_metrics_complete !== true) return null;
   const inventory = report?.metrics?.physical_attempts;
-  return report?.final_metrics_complete === true && (report.metrics?.controller?.calls === 0 ||
-    Array.isArray(inventory) && inventory.every(a=>a.role === 'delegated'));
+  if (!Array.isArray(inventory)) return report.metrics?.controller?.calls === 0 ? [] : null;
+  if (inventory.some(a=>a.role !== 'delegated' && a.role !== 'controller')) return null;
+  const controllers = inventory.filter(a=>a.role === 'controller');
+  const count = report.metrics?.controller?.calls;
+  if (count != null && count !== controllers.length) return null;
+  const rows = controllers.map(a=>a.id && report.adjudication?.delivery?.find(d=>d.id === a.id));
+  return rows.every(Boolean) ? rows : null;
 }
 
 function initialPresentation(report) {
   const trace = report?.adjudication;
   const attempts = trace?.delivery?.filter(a=>a.delivery !== 'not_sent' && a.model_response !== false);
   const unknown = {confirmed:null,one_computed_block:null};
-  if (!attempts?.length && zeroControllerAttempts(report)) return {confirmed:false,one_computed_block:null};
+  if (!attempts?.length && inventoriedControllerDelivery(report)?.every(a=>a.model_response === false))
+    return {confirmed:false,one_computed_block:null};
   if (!attempts?.length || attempts.some(a => a.preparation_cut == null)) return unknown;
   const first = attempts.reduce((a, b) => BigInt(a.preparation_cut) <= BigInt(b.preparation_cut) ? a : b);
   const sameCut = attempts.filter(a => BigInt(a.preparation_cut) === BigInt(first.preparation_cut));
@@ -439,20 +472,26 @@ export function gradeCondition(condition, tasks, costModel) {
     const decision = decisionState(r), answered = decision === 'answered';
     const sameRef = (a,b) => a && b && a.kind === b.kind && a.id === b.id;
     const citedProjection = answered ? Boolean(projection && grade.answer.support.some(ref=>sameRef(ref,projection.result))) : null;
-    const citedAlias = answered ? Boolean(projection && trace.exposure?.some(row=>
-      sameRef(row.projected_result,projection.result) && !sameRef(row.ref,projection.result) &&
-      grade.answer.support.some(ref=>sameRef(ref,row.ref)))) : null;
+    const projectedAlias = ref=>projection && trace.exposure?.some(row=>sameRef(row.projected_result,projection.result) &&
+      !sameRef(row.ref,projection.result) && sameRef(ref,row.ref));
+    const citedAlias = answered ? grade.answer.support.some(projectedAlias) : null;
+    const projectionCited = citedProjection || citedAlias;
+    const otherCited = answered ? grade.answer.support.some(ref=>!sameRef(ref,projection?.result) && !projectedAlias(ref)) : null;
+    const projectionSupport = !answered ? null : !projectionCited ? false :
+      Object.hasOwn(grade,'projection_citations_supported') ? grade.projection_citations_supported :
+      !otherCited && projection.semantic_judgment === 'supported' ? grade.supported : null;
     const exposures = projection?.exposures ?? [];
     const ordinaryOnly = r?.effective_condition === 'ordinary' && !projection && bound && trace.evidence_complete &&
       trace.delivery?.some(e=>e.model_response === true) && trace.delivery.every(e=>
         e.selected_view === null || e.delivery === 'not_sent' || e.model_response === false);
+    const inventoried = inventoriedControllerDelivery(r);
     const exposed = exposures.some(e=>e.rendered && e.delivery === 'confirmed' && e.model_response === true) ? true :
-      zeroControllerAttempts(r) || ordinaryOnly || exposures.length && exposures.every(e=>e.rendered === false ||
+      inventoried?.every(a=>a.model_response === false) || ordinaryOnly ||
+      (trace?.evidence_complete || inventoried) && exposures.length && exposures.every(e=>e.rendered === false ||
         e.delivery === 'not_sent' || e.model_response === false) ? false : null;
     const projectionBinding = condition.arm === 'repair' ? trace?.transfer_bound : projection?.canonical_input;
-    const supportedUse = !answered ? null : allObserved([grade.supported, citedProjection || citedAlias, compliant, exposed,
-      projectionBinding, projection?.semantic_judgment === 'unestablished' ? null : projection?.semantic_judgment === 'supported',
-      trace?.ordinary_fallback == null ? null : !trace.ordinary_fallback]);
+    const supportedUse = !answered ? null : allObserved([grade.supported,projectionCited,projectionSupport,compliant,exposed,
+      projectionBinding]);
     return {case_id:t.subject.case_id,state:t.state === 'completed' && !answered ? decision : t.state,
       decision, native_status:r?.status?.status ?? null,task_report:t.file ?? null,answer:grade?.answer?.outcome ?? null,
       grading_errors:grade?.errors ?? null,errors:r?.errors ?? [],
@@ -466,6 +505,7 @@ export function gradeCondition(condition, tasks, costModel) {
       schema_judgment:projection?.schema_judgment ?? null,
       exact_evidence_preservation:projection?.exact_evidence_preservation ?? null,
       cited_projection:citedProjection,cited_projection_alias:citedAlias,supported_view_use:supportedUse,
+      other_evidence_cited:otherCited,projection_citations_supported:projectionSupport,
       needs_payload_adjudication:answered && grade.supported == null && grade.errors?.includes('unadjudicated_payload') === true,
       exposed_computed:exposed};
   });
@@ -556,7 +596,7 @@ function markdown(results) {
       (r.monetary_cost === null ? r.known_monetary_cost === null ? ' Total task charges are unknown.' :
         ' Known task charges under the frozen tariff were at least '+r.known_monetary_cost+'.' :
         ' Task charges under the frozen tariff were '+r.monetary_cost+'.'),'',
-      '| Case | Status | Answer | Supported | Ordinary evidence use | Supported view use |',
+      '| Case | Status | Answer | Supported | Ordinary evidence accessed | Cited view supports answer |',
       '|---|---|---|---|---|---|');
     for (const row of c.cases) lines.push('| '+[row.case_id,row.state,row.answer ?? '—',label(row.supported),
       label(row.ordinary_fallback),label(row.supported_view_use)].join(' | ')+' |');
@@ -570,9 +610,9 @@ export async function runInterfaceRepair(directory, options, {execute=executeRep
   assert(options.authorizeInference === true,'Explicit --authorize-inference is required.');
   inferenceArguments(options);
   const campaignStart = now();
-  const {plan,plan_sha256,application} = await readRepairPlan(directory,options);
+  const {plan,plan_sha256,application,directory:preparedDirectory,preparedFiles} = await readRepairPlan(directory,options);
   assert.equal(options.chatgptAccount ? 'chatgpt' : 'api-key',plan.route,'Credential route differs from preparation.');
-  const output = join(directory,'run');
+  const output = join(preparedDirectory,'run');
   await mkdir(output,{mode:0o700});
   const results = {format,plan_sha256,study:plan.study,timing_file:'timing.json',conditions:[],paired_cases:[]};
   const campaignDeadline = campaignStart+plan.campaign_ceiling_ms;
@@ -608,11 +648,9 @@ export async function runInterfaceRepair(directory, options, {execute=executeRep
       if (candidate) await run(condition.diagnostic);
     }
     for (const subject of condition.downstream) await run(subject);
-    for (const task of tasks.filter(t => t.state !== 'not_started')) {
-      const charged = task.report?.cost?.inference;
-      inferenceCost = inferenceCost !== null && Number.isFinite(charged) ? inferenceCost + charged : null;
-    }
     const measured = gradeCondition(condition,tasks,plan.cost_model);
+    const charged = measured.end_to_end_resources.inference_cost;
+    inferenceCost = inferenceCost !== null && charged !== null ? inferenceCost+charged : null;
     measured.elapsed_ms = now()-start;
     measured.effective_allowance_ms = Math.max(0,deadline-start);
     measured.deadline_overrun_ms = Math.max(0,measured.elapsed_ms-measured.effective_allowance_ms);
@@ -626,7 +664,15 @@ export async function runInterfaceRepair(directory, options, {execute=executeRep
   }
   await save(join(output,'results.json'),encode(results));
   await save(join(output,'results.md'),markdown(results));
-  const retained_bytes = await bytesUnder(directory);
+  let retained_bytes = await bytesUnder(output);
+  for (const path of preparedFiles) {
+    let file;
+    try { file = await lstat(path); } catch (error) {
+      if (error.code === 'ENOENT') continue;
+      throw error;
+    }
+    if (file.isFile()) retained_bytes += file.size;
+  }
   const elapsed_ms = now()-campaignStart;
   const timing = join(output,results.timing_file);
   const model = plan.cost_model;

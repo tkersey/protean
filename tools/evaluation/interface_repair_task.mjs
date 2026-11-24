@@ -21,6 +21,19 @@ const rejectedCandidate = new Set(['ProjectionBuildRejected', 'ProjectionInputRe
   'ProjectionWorkFailed', 'ProjectionSelectionRejected', 'ProjectionPreparationRejected', 'ProjectionPreparationOversized',
   'ProjectionPreparationStale', 'ProjectionPreparationInvalid', 'ProjectionPreparationUnavailable', 'ProjectionResultRejected']);
 
+export function gradeRepairDecision(summary, specimen, trace) {
+  const {report_bound, exposure, evidence_complete, projection_exposure} = trace;
+  const grade = gradeAnswer(summary, specimen, report_bound ? exposure : null, evidence_complete);
+  grade.projection_citations_supported = null;
+  if (!report_bound || !grade.answer) return grade;
+  const support = grade.answer.support.filter(ref => projection_exposure.some(row => ref.kind === row.ref.kind && ref.id === row.ref.id));
+  if (support.length) {
+    const cited = json({...grade.answer, support});
+    grade.projection_citations_supported = gradeAnswer(cited, specimen, projection_exposure, evidence_complete).supported;
+  } else if (evidence_complete || !grade.answer.support.length) grade.projection_citations_supported = false;
+  return grade;
+}
+
 function conditionViolations(subject, actions) {
   const prohibited = new Set(armViolations('recurrence', actions));
   for (const action of actions) {
@@ -188,10 +201,12 @@ export async function executeRepairTask(options, {Client = RecurrenceDriver, scr
     }
     const configuration = await readFile(subject.config);
     assert.equal(hash(configuration), subject.config_sha256);
+    const configurationPath = join(output, 'configuration.json');
+    await writeFile(configurationPath, configuration, {flag: 'wx', mode: 0o600});
     const initial = await initialCondition(options);
     report.effective_condition = initial.condition;
     if (subject.arm === 'repair' && initial.condition === 'ordinary') report.fallback_reason = 'no_candidate';
-    startup = ['--state-dir', state, '--config', subject.config,
+    startup = ['--state-dir', state, '--config', configurationPath,
       ...(scripted ? ['--offline', '--fixture-workspace'] : inferenceArguments(options)),
       '--interface-repair-bootstrap', hash(initial.descriptor)];
     if (candidate) {
@@ -204,6 +219,11 @@ export async function executeRepairTask(options, {Client = RecurrenceDriver, scr
     armDeadline();
     const description = await client.call('describe');
     assert.equal(description.execution_mode, scripted ? 'offline' : 'live');
+    const admission = await client.call('evaluation.interface_repair.admission', {descriptor: initial.descriptor});
+    assert.match(admission.profile_sha256, /^[a-f0-9]{64}$/);
+    assert.equal(admission.profile_sha256, description.profile.sha256);
+    assert.equal(admission.configuration_digest, campaignIdentity(JSON.parse(configuration)));
+    report.admission = admission;
     const submit = {client_operation_id: subject.id, application_id: 'adaptive-agent', profile_id: description.profile.id,
       input: {schema_id: 'adaptive-agent.input.v2', value: {task: subject.prompt}}};
     await write('submission.json', submit);
@@ -215,6 +235,7 @@ export async function executeRepairTask(options, {Client = RecurrenceDriver, scr
     const admitted = readArchive(await readFile(preflight));
     schemas = admitted.schemas;
     assert.deepEqual(admitted.build, plan.study_assets.build);
+    assert.equal(Buffer.from(admitted.task.profile[0]).toString('hex'), admission.profile_sha256);
     assert.equal(admitted.build.application_assets_sha256, plan.study_assets.application.sha256);
     assert.equal(Buffer.from(admitted.task.runtime_identity).toString('hex'), plan.identities.driver_sha256);
     const launchProfile = JSON.parse(admitted.object(admitted.task.profile));
@@ -314,6 +335,7 @@ export async function executeRepairTask(options, {Client = RecurrenceDriver, scr
     await close('close', report.timed_out);
   }
   report.execution_ms = elapsed();
+  report.inference_dispatch_possible = stepStarted;
   if (report.task) {
     const task_id = report.task.task_id;
     let finalArchive;
@@ -331,8 +353,12 @@ export async function executeRepairTask(options, {Client = RecurrenceDriver, scr
       if (bootstrapRequest && !report.bootstrap && !report.candidate_rejection) {
         const recovered = await client.call('evaluation.interface_repair.bootstrap', {...bootstrapRequest,completed_only:true});
         if (recovered) {
-          report.bootstrap = recovered;
           await write('bootstrap-recovered.json', recovered);
+          if (recovered.candidate_rejected) {
+            assert(candidate && rejectedCandidate.has(recovered.candidate_rejected), 'Unexpected recovered candidate rejection.');
+            report.candidate_rejection = recovered.candidate_rejected;
+            if (recovered.build_metrics) report.bootstrap_build_metrics ??= recovered.build_metrics;
+          } else report.bootstrap = recovered;
         }
       }
       report.status = await client.call('task.status', {task_id});
@@ -366,8 +392,7 @@ export async function executeRepairTask(options, {Client = RecurrenceDriver, scr
             bootstrap: report.bootstrap, specimen, pairedSpecimen, candidate});
         }
         if (summary !== null && subject.phase === 'transfer') {
-          const {report_bound, exposure, evidence_complete} = report.adjudication;
-          report.grading = gradeAnswer(summary, specimen, report_bound ? exposure : null, evidence_complete);
+          report.grading = gradeRepairDecision(summary, specimen, report.adjudication);
         }
       } catch (error) { record('adjudication', error); }
     }

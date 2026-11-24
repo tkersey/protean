@@ -5,7 +5,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import test from 'node:test';
 import {executeRepairTask} from '../../tools/evaluation/interface_repair_task.mjs';
-import {providerRequestBodyBytes} from '../../tools/evaluation/workspace.mjs';
+import {providerRequestBodyBytes, workspaceBuildOutcomes} from '../../tools/evaluation/workspace.mjs';
 import {decisionSupport} from '../../tools/evaluation/interface_repair_trace.mjs';
 import {encodeSchema, encodeValue} from '../support/values.mjs';
 
@@ -38,7 +38,8 @@ test('a failed preflight retains the isolated task, reopens it only for measurem
     constructor(_, argv) { launches.push(argv); }
     async call(method) {
       calls.push(method);
-      if (method === 'describe') return {execution_mode: 'live', profile: {id: 'adaptive'}};
+      if (method === 'describe') return {execution_mode: 'live', profile: {id: 'adaptive', sha256: hash('profile')}};
+      if (method === 'evaluation.interface_repair.admission') return {profile_sha256: hash('profile'), configuration_digest: hash('{}')};
       if (method === 'task.submit') return {task_id};
       if (method === 'evaluation.drain') return {step: 'idle'};
       throw new Error('UnexportableArchive');
@@ -49,7 +50,8 @@ test('a failed preflight retains the isolated task, reopens it only for measurem
   assert.equal(report.effective_condition, 'ordinary');
   assert.equal(report.fallback_reason, 'no_candidate');
   assert.equal(report.task.task_id, task_id);
-  assert.deepEqual(calls, ['describe', 'task.submit', 'evaluation.export', 'evaluation.drain', 'evaluation.export']);
+  assert.deepEqual(calls, ['describe', 'evaluation.interface_repair.admission', 'task.submit', 'evaluation.export', 'evaluation.drain', 'evaluation.export']);
+  assert.equal(report.inference_dispatch_possible, false);
   assert.deepEqual(launches[1], [...launches[0], '--profile-task', task_id]);
   const descriptor = JSON.stringify({version: 1, plan_sha256: options.plan_sha256, submission_id: options.subject.id,
     prompt_sha256: hash(options.subject.prompt), phase: 'downstream', condition: 'ordinary', files: [], source_sha256: hash(''), program_sha256: null});
@@ -81,6 +83,25 @@ test('episode expiry kills the outstanding driver without a substitute dispatch'
   assert.equal(report.task, null);
 });
 
+test('unverified captured inputs leave no task or inference dispatch', async t => {
+  const options = await setup(t);
+  const calls = [];
+  class ChangedSnapshot {
+    async call(method) {
+      calls.push(method);
+      if (method === 'describe') return {execution_mode: 'live', profile: {id: 'adaptive', sha256: hash('profile')}};
+      if (method === 'evaluation.interface_repair.admission') throw new Error('ChangedSnapshot');
+      assert.fail(method);
+    }
+    async close() { return {code: 0, signal: null}; }
+  }
+  const report = await executeRepairTask(options, {Client: ChangedSnapshot});
+  assert.deepEqual(calls, ['describe', 'evaluation.interface_repair.admission']);
+  assert.equal(report.task, null);
+  assert.equal(report.inference_dispatch_possible, false);
+  assert(report.errors.some(e => e.stage === 'setup' && e.message === 'ChangedSnapshot'));
+});
+
 test('changed frozen candidate bytes stop the task before launch', async t => {
   const options = await setup(t);
   const candidate = {source_b64: Buffer.from('changed source').toString('base64'), source_sha256: hash('frozen source')};
@@ -108,6 +129,37 @@ function schemaSupport(schema) {
   const bytes = Buffer.from(encodeSchema(schema));
   return {wire_base64url: bytes.toString('base64url'), wire_sha256: hash(bytes)};
 }
+
+test('command accounting joins a pre-worker rejection to its captured call and retains an unsettled command', () => {
+  const digest = [...Buffer.alloc(32, 7)], id = Buffer.from(digest).toString('hex');
+  const key = id + '/build-1';
+  const modelSchema = {root: 0, types: [{product: [1, 2, 3]}, {product: [4]}, 'text', {sum: [5]},
+    {product: [6]}, {sum: [7, 7]}, 'bytes', 'unit']};
+  const model = encodeValue(modelSchema, [[[Buffer.from(digest)]], 'build-1', {tag: 0, value: {tag: 1, value: null}}]);
+  const digestType = {array: {element: 3, length: 32}};
+  const requestTail = encodeValue({root: 0, types: [{product: [1, 1, 1, 1, 2]}, 'bytes', digestType, 'u8']},
+    [Buffer.from('protean.controller/1/workspace'), encodeSchema(modelSchema), Buffer.alloc(0), model, digest]);
+  const frame = (magic, data) => {
+    const header = Buffer.alloc(20);
+    header.write(magic);
+    header.writeUInt16LE(3, 8);
+    header.writeBigUInt64LE(BigInt(data.length), 12);
+    return Buffer.concat([header, data]);
+  };
+  const request = frame('ABL_ERQ3', Buffer.concat([Buffer.alloc(65), requestTail]));
+  const replySchema = {root: 0, types: [{product: [1]}, 'u8']};
+  const reply = frame('ABL_ERS3', encodeValue({root: 0, types: [{product: [2, 1]}, 'bytes', digestType, 'u8']},
+    [digest, encodeValue(replySchema, [2])]));
+  const object = Buffer.from(hash(reply), 'hex');
+  const archive = {objects: new Map([[hash(reply), reply]]), object: () => request};
+  const occurrence = [digest, null, digest, {tag: 4, value: [digest, object]}, null, {tag: 0}];
+  const measure = commands => workspaceBuildOutcomes(archive, new Map([[id, occurrence]]), new Set([id]), commands, replySchema);
+  assert.deepEqual(measure(new Map([[key, null]])), {build_commands: 1, settled_build_commands: 1,
+    known_rejected_build_commands: 1, rejected_build_commands: 1});
+  occurrence[3] = {tag: 7, value: [digest]};
+  assert.deepEqual(measure(new Map([[key, null]])), {build_commands: 1, settled_build_commands: 0,
+    known_rejected_build_commands: 0, rejected_build_commands: null});
+});
 
 test('provider body accounting excludes both controller and delegated typed preparation metadata', () => {
   const body = Buffer.from('{"input":"é"}');
@@ -139,7 +191,7 @@ function decisionFixture() {
   const snapshot = put(encodeValue(snapshotSchema, [2, 0n, Object.entries(specimen.files).map(([name, content]) =>
     [name, [...Buffer.from(hash(content), 'hex')], Buffer.from(content)])]));
   const profile = put(Buffer.from(JSON.stringify({snapshot: {digest: [...snapshot[0]], bytes: String(snapshot[1])}})));
-  const archive = {task: {profile}, object: r => objects.get(Buffer.from(r[0]).toString('hex'))};
+  const archive = {objects, task: {profile}, object: r => objects.get(Buffer.from(r[0]).toString('hex'))};
   const textSchema = {types: ['text'], root: 0}, schemaRef = put(encodeSchema(textSchema));
   const values = new Map();
   const value = (id, text, origin, name) => {
@@ -326,6 +378,9 @@ test('same-result previews retain projection credit and paged canonical-input re
   assert.deepEqual(f.support([use]).routes, []);
   assert.deepEqual(f.support([use]).unresolved, []);
   assert(f.support([use]).exposure.some(e => e.ref.id === f.witness.handle.id && e.paths.length === 1 && e.paths[0] === f.member));
+  const projected = f.support([use], {result:use.result}).projection_exposure;
+  assert(projected.some(row => row.ref.id === use.result.id && row.paths.includes(f.path)));
+  assert(projected.some(row => row.ref.id === f.witness.handle.id && row.paths.includes(f.member)));
   const text = JSON.stringify(f.input.text);
   f.expand(f.input.handle, text, 3);
   assert(f.support([use]).routes.some(row => row.ref?.id === f.input.handle.id));
@@ -337,7 +392,8 @@ test('same-result previews retain projection credit and paged canonical-input re
 
 test('static guidance, bound controller metadata and a verified same-view reread do not disclose fresh scan evidence', () => {
   const f = decisionFixture(), descriptor = {root:'0', types:[{tag:'text',value:{}}]};
-  const use = {view:{kind:'view',id:'d'.repeat(64)}, consumer:{kind:'observation',id:'e'.repeat(64)}, input:f.input.handle,
+  const use = {view:{kind:'view',id:'d'.repeat(64)}, work:{kind:'work',id:'f'.repeat(64)}, program:{kind:'program',id:'a'.repeat(64)},
+    consumer:{kind:'observation',id:'e'.repeat(64)}, input:f.input.handle,
     result:f.result.handle, canonical_input:true, paths:[], payload:'shown', payload_descriptor: descriptor,
     payload_schema_sha256:'s', schema_kind:'other', semantic_judgment:'unestablished', one_computed_block:true,
     exposures:[{id:'1',rendered:true,delivery:'confirmed',model_response:true}]};
@@ -345,13 +401,46 @@ test('static guidance, bound controller metadata and a verified same-view reread
     {selected:use.view.id,block:{kind:'computed',value:'shown',schema:descriptor,schema_identity:'s',result:use.result}});
   f.step('context',{tag:'inspect',value:{consumer:{target:{tag:'controller',value:{}}}}},
     {consumer:use.consumer,binding:f.page('binding metadata')});
+  f.step('context',{tag:'expand',value:{reference:use.consumer}}, {consumer:use.consumer,binding:f.page('binding metadata', 3)});
+  f.step('program',{tag:'inspect',value:{target:{tag:'consumer',value:{program:use.program,function:'main',binding:'input'}}}},
+    f.page('projector consumer'));
+  const schema = {kind:'schema', id:Buffer.from(f.input.raw[3][1][0]).toString('hex')};
+  f.expand(schema, JSON.stringify(descriptor), 3, 11);
   f.step('context',{tag:'expand',value:{reference:use.view}},
     {view:use.view,consumer:use.consumer,projection_result:use.result,coverage:'selected_blocks_only',selection:f.page(JSON.stringify(f.result.text))});
-  const read = () => f.support([use], null, new Set([use.consumer.id]));
+  f.step('work', {tag:'inspect'}, {program:use.program, work:use.work, result:use.result, result_preview:f.page(JSON.stringify(f.result.text))});
+  const projector = {program:use.program, result:use.result, schema_ids:[schema.id]};
+  const read = () => f.support([use], projector, new Set([use.consumer.id]));
   assert.deepEqual(read().unresolved, []);
   assert.deepEqual(read().routes, []);
+  for (const alias of [use.view, use.work]) {
+    const citation = read().exposure.find(row => row.ref.id === alias.id);
+    assert.deepEqual(citation.projected_result, use.result);
+    assert.equal(citation.semantic_judgment, 'unestablished');
+    assert(read().projection_exposure.some(row => row.ref.id === alias.id));
+  }
   f.expand(f.input.handle, JSON.stringify(f.input.text), 0, 0);
   assert(read().routes.some(r => r.kind === 'expansion' && r.ref.id === f.input.handle.id));
+  assert(!read().projection_exposure.some(row => row.ref.id === f.input.handle.id));
+  f.expand(schema, 'unverified schema');
+  assert(read().unresolved.some(r => r.ref?.id === schema.id));
+});
+
+test('a view citation requires delivery of its result and a matching view expansion', () => {
+  const f = decisionFixture(), use = {view:{kind:'view',id:'c'.repeat(64)}, consumer:{kind:'observation',id:'d'.repeat(64)},
+    input:f.input.handle, result:f.result.handle, paths:[f.path,f.member], one_computed_block:true,
+    semantic_judgment:'supported', schema_kind:'other', exposures:[]};
+  const text = JSON.stringify(f.result.text);
+  const show = (result, page) => f.step('context', {tag:'expand',value:{reference:use.view}},
+    {view:use.view,consumer:use.consumer,projection_result:result,coverage:'selected_blocks_only',selection:page});
+  const cited = () => f.support([use], {result:use.result}).exposure.find(e => e.ref.id === use.view.id);
+  show(f.input.handle, f.page(text));
+  assert.equal(cited(), undefined);
+  show(use.result, f.page(text, 0, 5));
+  assert.equal(cited(), undefined);
+  show(use.result, f.page(text, 5));
+  assert.deepEqual(cited().paths, use.paths);
+  assert.deepEqual(f.support([use], {result:use.result}).projection_exposure, []);
 });
 
 test('delivered ordinary listings establish scoped absence and ordinary read pages bind to a visible source handle', () => {

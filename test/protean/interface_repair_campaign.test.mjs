@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {copyFile, mkdir, mkdtemp, readFile, writeFile, rm} from 'node:fs/promises';
+import {spawnSync} from 'node:child_process';
+import {copyFile, mkdir, mkdtemp, readFile, symlink, writeFile, rm} from 'node:fs/promises';
 import {existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {dirname, join} from 'node:path';
@@ -9,6 +10,8 @@ import {createHash} from 'node:crypto';
 import {prepareInterfaceRepair, validateRepairPlan, selectRepairProfile, gradeCondition, repairOrder,
   runInterfaceRepair} from '../../tools/evaluation/interface_repair_campaign.mjs';
 import {makeRepairCorpus, canonicalEvidence, inspectProjection} from '../../tools/evaluation/interface_repair.mjs';
+import {gradeRepairDecision} from '../../tools/evaluation/interface_repair_task.mjs';
+import {bytesUnder} from '../../tools/evaluation/workspace.mjs';
 
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const studyProgram = sha('directed study');
@@ -25,6 +28,18 @@ test('preparation rejects absent authoring permissions and invalid tariffs befor
     await assert.rejects(prepareInterfaceRepair({config:{...config,tools}}), /must allow build and run/);
   for (const costModel of [null,{},[],{kind:'tariff'}])
     await assert.rejects(prepareInterfaceRepair({config,costModel}), /cost model|declared tariff/);
+});
+
+test('CLI preparation checks the original JSON fields before deriving a study configuration', async t => {
+  const root = await mkdtemp(join(tmpdir(),'repair-config-'));
+  t.after(()=>rm(root,{recursive:true,force:true}));
+  const configPath = join(root,'config.json'), directory = join(root,'plan');
+  await writeFile(configPath,'{"schema":1,"schema":1}');
+  const result = spawnSync(process.execPath,['tools/evaluation/workspace.mjs','prepare','--suite','interface-repair',
+    '--config',configPath,'--out',directory],{cwd:new URL('../../',import.meta.url),encoding:'utf8'});
+  assert.notEqual(result.status,0);
+  assert.match(result.stderr,/duplicate_field/);
+  assert.equal(existsSync(directory),false);
 });
 
 test('only the approved initial Astra model and effort survive preparation',()=>{
@@ -77,6 +92,15 @@ test('a frozen episode isolates all snapshots and retains an unsuccessful author
     }
   }
   await validateRepairPlan(opts.directory,opts);
+  const alias = join(root,'alias');
+  await symlink(opts.directory,alias);
+  await validateRepairPlan(alias,opts);
+  const copy = join(root,'copy');
+  await mkdir(copy);
+  for (const name of ['plan.json','plan.sha256']) await copyFile(join(opts.directory,name),join(copy,name));
+  await assert.rejects(validateRepairPlan(copy,opts),/original preparation directory/);
+  const unrelated = Buffer.alloc(2048);
+  await writeFile(join(opts.directory,'other-study.bin'),unrelated);
   await assert.rejects(prepareInterfaceRepair(opts,deps),{code:'EEXIST'});
   await assert.rejects(runInterfaceRepair(opts.directory,{...opts,chatgptAccount:'fixture'}),/authorize-inference/);
   assert.equal(existsSync(join(opts.directory,'run')),false);
@@ -86,7 +110,7 @@ test('a frozen episode isolates all snapshots and retains an unsuccessful author
   await assert.rejects(runInterfaceRepair(opts.directory,{...opts,credential:'dummy',chatgptAccount:'fixture'}),/one inference source/);
   const calls = [];
   const dispatch = {...opts,chatgptAccount:'fixture'};
-  const {results,summary} = await runInterfaceRepair(opts.directory,dispatch,
+  const {results,summary,timing} = await runInterfaceRepair(alias,dispatch,
     {execute:async ({subject,output,candidate,chatgptAccount,credential})=>{
       assert.equal(candidate,null);
       assert.equal(chatgptAccount,'fixture');
@@ -101,6 +125,8 @@ test('a frozen episode isolates all snapshots and retains an unsuccessful author
       return report;
     }});
   assert.equal(calls.length,11);
+  const timingBytes = await readFile(timing);
+  assert.equal(JSON.parse(timingBytes).retained_bytes,await bytesUnder(opts.directory)-unrelated.length-timingBytes.length);
   assert.match(await readFile(summary,'utf8'), /Answered decisions/);
   const [measured] = JSON.parse(await readFile(results)).conditions;
   assert.equal(measured.end_to_end_resources.known_physical_attempts,11);
@@ -259,9 +285,13 @@ test('the coverage repair requires an exposed compliant author use, a correct di
     diagnostic.report.adjudication.collision[side].semantic_judgment = 'supported';
   }
   for (const index of [0,1]) {
-    cases[index].report.adjudication.ordinary_fallback = true;
+    const report = cases[index].report, selected = report.grading.answer.support;
+    report.adjudication.ordinary_fallback = true;
+    assert.equal(grade().coverage_repair_demonstrated,true);
+    report.grading.answer.support = [{kind:'value',id:'ordinary-source'}];
     assert.equal(grade().coverage_repair_demonstrated,false);
-    cases[index].report.adjudication.ordinary_fallback = false;
+    report.grading.answer.support = selected;
+    report.adjudication.ordinary_fallback = false;
   }
   const mismatch = makeRepairCorpus('campaign-schema-counterexample').transfer[4];
   const sources = Object.fromEntries(Object.keys(mismatch.files).map(path=>[path,{kind:'value',id:sha(path)}]));
@@ -288,9 +318,9 @@ test('fixed controls earn supported view use and uncertain evidence routes and s
   assert.equal(grade().cases[0].cited_projection_alias,true);
   assert.equal(grade().cases[0].supported_view_use,true);
   report.adjudication.ordinary_fallback = null;
-  assert.equal(grade().cases[0].supported_view_use,null);
+  assert.equal(grade().cases[0].supported_view_use,true);
   report.adjudication.ordinary_fallback = true;
-  assert.equal(grade().cases[0].supported_view_use,false);
+  assert.equal(grade().cases[0].supported_view_use,true);
   report.adjudication.projection.semantic_judgment = 'unestablished';
   assert.equal(grade().cases[0].needs_payload_adjudication,false);
   report.grading.supported = false;
@@ -299,6 +329,42 @@ test('fixed controls earn supported view use and uncertain evidence routes and s
   report.grading.supported = null;
   report.grading.errors = ['unadjudicated_payload'];
   assert.equal(grade().cases[0].needs_payload_adjudication,true);
+});
+
+test('a one-byte raw read does not invalidate the independent mismatch witness in a cited projection',()=>{
+  const specimen = makeRepairCorpus('incidental-read').transfer[4], subject = {phase:'transfer',case_id:specimen.case_id};
+  const scan = JSON.parse(specimen.files['scan.json']), witness = scan.visits.find(v=>specimen.files[v.path] !== v.member);
+  const ref = label=>({kind:'value',id:sha(label)});
+  const report = presentedReport('fixed-adequate',subject.case_id,'counterexample');
+  const projection = report.adjudication.projection, result = ref('projection'), manifest = ref('manifest'), value = ref('witness');
+  projection.result = result;
+  report.adjudication.ordinary_fallback = true;
+  const projected = {ref:result,paths:['scan.json',witness.path],semantic_judgment:'supported'};
+  const partial = {ref:manifest,paths:[],range:{path:'scan.json',start:0,end:1}};
+  const answer = {kind:'interface-repair.answer.v1',case_id:subject.case_id,domain_identity:scan.domain.identity,
+    domain_revision:scan.domain.revision,outcome:'counterexample',support:[result],
+    explanation:'Member '+witness.member+' disagrees with observed value '+specimen.files[witness.path]+'.'};
+  const row = ()=>gradeCondition({arm:'fixed-adequate',downstream:[subject]},[{subject,state:'completed',report}],unpriced).cases[0];
+  const adjudicate = (projectionRow,ordinaryRows)=>gradeRepairDecision(JSON.stringify(answer),specimen,
+    {report_bound:true,evidence_complete:true,exposure:[projectionRow,...ordinaryRows],projection_exposure:[projectionRow]});
+  report.grading = adjudicate(projected,[partial]);
+  assert.equal(row().supported,true);
+  assert.equal(row().ordinary_fallback,true);
+  assert.equal(row().other_evidence_cited,false);
+  assert.equal(row().supported_view_use,true);
+  answer.support = [manifest,value];
+  const raw = [{ref:manifest,paths:['scan.json']},{ref:value,paths:[witness.path]}];
+  report.grading = adjudicate(projected,raw);
+  assert.equal(row().supported,true);
+  assert.equal(row().supported_view_use,false);
+  answer.support.push(result);
+  report.grading = adjudicate(projected,raw);
+  assert.equal(row().other_evidence_cited,true);
+  assert.equal(row().supported_view_use,true);
+  report.grading = adjudicate({...projected,paths:['scan.json']},raw);
+  assert.equal(row().supported,true);
+  assert.equal(row().projection_citations_supported,false);
+  assert.equal(row().supported_view_use,false);
 });
 
 test('a failed replay blocks the broader verdict while the demonstrated coverage distinction remains',()=>{
@@ -355,6 +421,24 @@ test('zero physical controller attempts establish absence, while a host inspecti
   assert.equal(grade().cases[2].exposed_computed,false);
 });
 
+test('exhaustive confirmed provider errors prove non-exposure while retaining the physical calls',()=>{
+  const {cases,grade} = coverageEpisode();
+  const r = cases[2].report;
+  r.final_metrics_complete = true;
+  const attempt = r.adjudication.delivery[0];
+  attempt.model_response = false;
+  r.adjudication.projection.exposures[0].model_response = false;
+  r.metrics = {controller:{calls:1},physical_attempts:[{id:attempt.id,role:'controller'}]};
+  assert.equal(grade().cases[2].initial_presentation_confirmed,false);
+  assert.equal(grade().cases[2].compliant,false);
+  assert.equal(grade().cases[2].exposed_computed,false);
+  assert.equal(grade().downstream_resources.known_physical_attempts,1);
+  r.metrics.controller.calls++;
+  r.metrics.physical_attempts.push({id:'uncaptured',role:'controller'});
+  assert.equal(grade().cases[2].initial_presentation_confirmed,null);
+  assert.equal(grade().cases[2].exposed_computed,null);
+});
+
 test('observed authoring opportunities and actual build attempts have separate denominators',()=>{
   const {author,grade} = coverageEpisode();
   const report = author.report;
@@ -391,7 +475,8 @@ test('a bound ordinary decision can establish that no computed view reached the 
 test('build totals include direct setup work and retain unmeasured compiler time',()=>{
   const subject = {phase:'transfer',case_id:'compiled'};
   const report = {effective_condition:'fixed-adequate',bootstrap:{program:{kind:'program',id:'p'}},
-    metrics:{physical_attempts:[],build_attempts:2,builds:2,rejected_builds:0,compiler_nanoseconds:15}};
+    metrics:{physical_attempts:[],build_commands:2,build_attempts:2,builds:2,settled_builds:2,timed_builds:2,
+      known_rejected_build_commands:0,rejected_build_commands:0,compiler_nanoseconds:15}};
   const grade = ()=>gradeCondition({arm:'fixed-adequate',downstream:[subject]},[{subject,state:'completed',report}],unpriced)
     .downstream_resources;
   assert.equal(grade().builds,3);
@@ -402,6 +487,11 @@ test('build totals include direct setup work and retain unmeasured compiler time
   report.bootstrap.build_metrics = {build_commands:1,build_elapsed_nanoseconds:'123',compiler_nanoseconds:null};
   assert.equal(grade().bootstrap_build_elapsed_nanoseconds,123);
   assert.equal(grade().compiler_nanoseconds,null);
+  report.bootstrap.build_metrics = {build_commands:null,rejected_build_commands:null,
+    build_elapsed_nanoseconds:null,compiler_nanoseconds:null};
+  assert.equal(grade().builds,null);
+  assert.equal(grade().known_builds,2);
+  assert.equal(grade().rejected_builds,null);
   report.bootstrap = null;
   report.candidate_rejection = 'ProjectionWorkFailed';
   assert.equal(grade().bootstrap_builds,1);
@@ -411,10 +501,28 @@ test('build totals include direct setup work and retain unmeasured compiler time
   assert.equal(grade().bootstrap_builds,0);
   assert.equal(grade().builds,2);
   assert.equal(grade().compiler_nanoseconds,15);
-  report.metrics.build_attempts++;
+  report.metrics.build_commands++;
+  report.metrics.known_rejected_build_commands++;
+  report.metrics.rejected_build_commands++;
   assert.equal(grade().builds,3);
-  assert.equal(grade().captured_builds,2);
+  assert.equal(grade().dispatched_builds,2);
+  assert.equal(grade().rejected_builds,1);
+  assert.equal(grade().compiler_nanoseconds,15);
+  report.metrics.build_commands++;
+  report.metrics.build_attempts++;
+  report.metrics.builds++;
+  report.metrics.rejected_build_commands = null;
+  assert.equal(grade().builds,4);
+  assert.equal(grade().dispatched_builds,3);
+  assert.equal(grade().captured_builds,3);
+  assert.equal(grade().settled_builds,2);
+  assert.equal(grade().timed_builds,2);
   assert.equal(grade().rejected_builds,null);
+  assert.equal(grade().known_rejected_builds,1);
+  assert.equal(grade().compiler_nanoseconds,null);
+  report.metrics.settled_builds++;
+  report.metrics.rejected_build_commands = 1;
+  assert.equal(grade().rejected_builds,1);
   assert.equal(grade().compiler_nanoseconds,null);
 });
 
@@ -488,4 +596,51 @@ test('partially priced tasks retain known host, storage, and independently price
   assert.ok(Math.abs(grade().known_inference_cost-0.15)<1e-12);
   report.observed_provider_attempts[0].usage.input_tokens_details = {cached_tokens:10000};
   assert.equal(grade().known_inference_cost,0.195);
+});
+
+test('exact tariff components follow the charged units, independently of unrelated missing measurements',()=>{
+  const subject = {phase:'transfer',case_id:'priced'};
+  const usage = {input_tokens:100000,output_tokens:100000}, report = {final_metrics_complete:true,
+    metrics:{physical_attempts:[{usage}]},cost:{inference:null,complete:false}};
+  const price = {...tariff,storage_per_byte_second:1,retention_seconds:1};
+  const grade = ()=>gradeCondition({arm:'evidence',downstream:[subject]},[{subject,state:'completed',report}],price)
+    .end_to_end_resources;
+  assert.ok(Math.abs(grade().inference_cost-0.3)<1e-12);
+  assert.equal(grade().monetary_cost,null);
+  delete usage.input_tokens;
+  price.input_per_million = 0;
+  price.cached_input_per_million = 0.5;
+  usage.input_tokens_details = {cached_tokens:100000};
+  assert.equal(grade().inference_cost,0.25);
+  delete usage.input_tokens_details;
+  assert.equal(grade().inference_cost,null);
+  assert.equal(grade().known_inference_cost,0.2);
+  report.observed_provider_attempts = [{usage:null}];
+  report.metrics = null;
+  report.final_metrics_complete = false;
+  price.cached_input_per_million = 0;
+  price.output_per_million = 0;
+  assert.equal(grade().inference_cost,0);
+  price.retention_seconds = 0;
+  assert.equal(grade().monetary_cost,0);
+  price.output_per_million = 2;
+  assert.equal(grade().inference_cost,null);
+  report.observed_provider_attempts = [];
+  report.inference_dispatch_possible = false;
+  assert.equal(grade().physical_attempts,0);
+  assert.equal(grade().inference_cost,0);
+  report.inference_dispatch_possible = true;
+  assert.equal(grade().physical_attempts,null);
+  assert.equal(grade().inference_cost,null);
+});
+
+test('scripted fixture measurements retain work and exclude simulated provider traffic',()=>{
+  const subject = {phase:'author'}, report = {execution_mode:'scripted_fixture',final_metrics_complete:true,
+    metrics:{physical_attempts:[{request_body_bytes:100,usage:{input_tokens:7,output_tokens:5}}],work_items:2}};
+  const r = gradeCondition({arm:'repair',downstream:[]},[{subject,state:'completed',report}],tariff).end_to_end_resources;
+  assert.equal(r.physical_attempts,0);
+  assert.equal(r.request_body_bytes,0);
+  assert.equal(r.known_input_tokens,0);
+  assert.equal(r.inference_cost,0);
+  assert.equal(r.work_items,2);
 });
