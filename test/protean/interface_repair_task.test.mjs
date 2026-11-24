@@ -518,7 +518,9 @@ test('same-result previews retain projection credit and paged canonical-input re
   f.expand(f.input.handle, text, 3);
   assert(f.support([use]).routes.some(row => row.ref?.id === f.input.handle.id));
   assert(!f.support([use]).exposure.some(row => row.ref.id === f.input.handle.id));
+  assert(f.support([use]).unresolved.some(row => row.ref?.id === f.input.handle.id));
   f.expand(f.input.handle, text, 0, 3);
+  assert.deepEqual(f.support([use]).unresolved, []);
   assert(f.support([use]).routes.some(row => row.ref?.id === f.input.handle.id));
   assert(f.support([use]).exposure.some(row => row.ref.id === f.input.handle.id && row.paths.includes(f.absent)));
 });

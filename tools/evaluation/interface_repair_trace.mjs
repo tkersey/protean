@@ -681,11 +681,12 @@ export function decisionSupport(archive, application, specimen, sourceRefs, valu
     byValue.set(value.id, item);
     bySource.set(source.id, item);
   }
-  const marked = new Set();
+  const marked = new Map();
   const note = (list, kind, i, extra = {}) => {
     const row = {kind, interaction_id: i.interaction_id, attempt_id: i.attempt.id, ...extra};
-    const key = JSON.stringify(row);
-    if (!marked.has(key)) { marked.add(key); list.push(row); }
+    const key = JSON.stringify(row), seen = marked.get(list) ?? new Set();
+    marked.set(list, seen);
+    if (!seen.has(key)) { seen.add(key); list.push(row); }
   };
   const markSource = (i, kind, path, start, end) => {
     const total = files.get(path).bytes.length;
@@ -780,9 +781,10 @@ export function decisionSupport(archive, application, specimen, sourceRefs, valu
       return;
     }
     const {input, use} = computed;
+    if (complete) partialComputations.delete(wanted.id);
+    else if (input) partialComputations.set(wanted.id, {kind, i, wanted});
     if (input) return inputEvidence(i,kind,wanted,complete);
     const alreadyShown = presented.has(use.result.id);
-    if (complete) partialComputations.delete(wanted.id);
     if (alreadyShown) {
       if (!use.one_computed_block) note(unresolved, kind, i, {ref: wanted});
     } else if (!complete) partialComputations.set(wanted.id, {kind, i, wanted});
