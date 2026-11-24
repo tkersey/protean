@@ -1193,3 +1193,55 @@ fn planResponse(a: std.mem.Allocator, body: []const u8, index: u64) ![]const u8 
     });
     return events.toOwnedSlice();
 }
+
+test "directed repair admission exposes only the executable lossy dependency closure" {
+    const sources = @import("interface_repair_sources");
+    const a = std.testing.allocator;
+    const sliced = try sources.seed(a, .lossy);
+    defer a.free(sliced);
+    try sources.checkLossy(a, sliced);
+    const unsliced = try example.source(a, .bad_projector);
+    defer a.free(unsliced);
+    try std.testing.expectError(error.PrivateClassifierDependency, sources.checkLossy(a, unsliced));
+    var diagnostic: native.program_construction.Diagnostic = .{};
+    var compiled = try native.program_construction.build(a, sliced, null, &diagnostic);
+    defer compiled.deinit();
+    try std.testing.expectEqual(.complete, diagnostic.phase);
+}
+
+test "directed repair canonical inputs use acquired values and retain missing observations" {
+    const sources = @import("interface_repair_sources");
+    const Owner = struct {
+        const manifest =
+            \\{"domain":{"identity":"18446744073709551615","revision":"7","known":true,
+            \\"members":["1","2"]},"visits":[{"domain_identity":"18446744073709551615",
+            \\"domain_revision":"7","member":"1","path":"r-a"},{"domain_identity":"44",
+            \\"domain_revision":"6","member":"2","path":"r-b"}]}
+        ;
+        observed: []const u8,
+        failed: bool = false,
+        pub fn acquireFile(self: *@This(), path: []const u8) !?sources.Acquired {
+            if (std.mem.eql(u8, path, "r-b")) {
+                self.failed = true;
+                return null;
+            }
+            const bytes = if (std.mem.eql(u8, path, "scan.json")) manifest else self.observed;
+            return .{ .reference = .{ .kind = .value, .id = .{ .bytes = path } }, .bytes = bytes };
+        }
+    };
+    var storage: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer storage.deinit();
+    var owner: Owner = .{ .observed = "18446744073709551614" };
+    const scan = try sources.acquireScan(storage.allocator(), &owner);
+    try std.testing.expectEqual(std.math.maxInt(u64), scan.evidence.domain.identity);
+    try std.testing.expectEqual(std.math.maxInt(u64) - 1, scan.evidence.visits.items[0].observed);
+    try std.testing.expectEqual(44, scan.evidence.visits.items[1].domain_identity);
+    try std.testing.expect(!scan.evidence.visits.items[1].available and owner.failed);
+    try std.testing.expectEqualDeep(scan.sources[0], scan.evidence.visits.items[1].evidence);
+    try std.testing.expectEqualDeep(scan.sources[1], scan.evidence.visits.items[0].evidence);
+    owner.observed = "01";
+    try std.testing.expectError(
+        error.InvalidParams,
+        sources.acquireScan(storage.allocator(), &owner),
+    );
+}

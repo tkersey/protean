@@ -25,7 +25,16 @@ pub const State = struct {
     provider: native.responses.Environment,
     selection: ?*native.siwc.Selection = null,
     offline: bool,
+    initial_selection: ?struct {
+        task: [16]u8,
+        view: ?contracts.workspace.Ref = null,
+        program: ?contracts.workspace.Ref = null,
+        result: ?contracts.workspace.Ref = null,
+    } = null,
 };
+pub fn initialWorkspaceDeclaration() native.Declaration {
+    return native.registry.controllerImport(.workspace, workspace.initialDeclaration());
+}
 pub fn release(value: *anyopaque) void {
     const owner: *State = @ptrCast(@alignCast(value));
     if (owner.selection) |selection| selection.deinit();
@@ -75,6 +84,10 @@ fn state(ctx: native.Context) !*const State {
 }
 fn bindings(ctx: native.Context, _: void) !t.Bindings {
     const frozen = try state(ctx);
+    const initial = if (frozen.initial_selection) |setup|
+        if (std.mem.eql(u8, ctx.task_id, &std.fmt.bytesToHex(setup.task, .lower))) setup else null
+    else
+        null;
     const choices = try ctx.allocator.alloc(
         t.controls.ProfileChoice,
         frozen.policy.profiles.items.len,
@@ -109,6 +122,12 @@ fn bindings(ctx: native.Context, _: void) !t.Bindings {
         .profiles = .{ .items = choices },
         .catalog = .{ .skills = .{ .items = catalog } },
         .initial = frozen.initial,
+        .observe_initial_consumer = initial != null,
+        .initial_projection = if (initial) |setup| if (setup.view) |view| .{
+            .view = view,
+            .program = setup.program orelse return error.InvalidProjection,
+            .result = setup.result orelse return error.InvalidProjection,
+        } else null else null,
         .instructions = try context.instructions(
             ctx.allocator,
             frozen.policy,

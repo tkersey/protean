@@ -5,6 +5,40 @@ authorization and adjudicating its results. Deterministic fixtures
 establish available choices and runtime behavior; their scripted actions are not
 evidence that a model independently discovered a useful computation or pivot.
 
+## Directed interface repair
+
+The opt-in `interface-repair` suite tests whether a model can replace an executable presentation that loses a distinction required to classify a finite scan. The author sees a complete scan and a partial scan that collide under the supplied Boolean. It can inspect the executable seed, build an ordinary source program, run it on the original observations, and select the result into a subsequent model request.
+
+Build the product and private driver after the [repository setup](../../README.md).
+
+```sh
+zig build protean recurrence-driver check-recurrence-driver check-native-owner-adaptive -Doptimize=safe
+node --test test/protean/interface_repair*.test.mjs
+```
+
+Prepare one private episode using an approved configuration with an initial Astra profile. Preparation makes zero provider calls. Use a new output directory for each plan. The example freezes the ChatGPT account route. For a credential file, prepare with `--provider-route api-key` and run with `--credential-file PATH`.
+
+```sh
+node tools/evaluation/workspace.mjs prepare --suite interface-repair --study episode \
+  --config /private/approved-astra.json --provider-route chatgpt \
+  --binary zig-out/bin/protean --driver zig-out/bin/protean-recurrence-driver \
+  --application zig-out/protean/adaptive/application.json \
+  --out /private/interface-repair-episode --seconds 600
+
+node tools/evaluation/workspace.mjs run --plan /private/interface-repair-episode \
+  --binary zig-out/bin/protean --driver zig-out/bin/protean-recurrence-driver \
+  --application zig-out/protean/adaptive/application.json \
+  --authorize-inference --chatgpt-account ACCOUNT
+```
+
+Each episode freezes the executable slice, reference source, corpus, independent expected outcomes, profile, effort, route, program and evaluator identities. Only the designated case files enter each task snapshot. The adequate control can inspect its supplied projector. Source acquisition and explanation of conclusions use the original declaration and member bytes.
+
+The author nominates one admitted program in its terminal report. The evaluator binds that nomination to the observed model build and checks construction, canonical execution, selection and confirmed exposure separately. It rebuilds the frozen source under a fresh task owner for each transfer and checks executable and schema identities. A same-consumer pair tests whether the candidate retains the known coverage distinction. For an unfamiliar payload schema, a supported interpretation can require manual adjudication. The private task report retains the presented value, schema, request identity, citation and independent expected facts for that judgment.
+
+Each planned condition gets its own `--seconds` allowance covering setup, authoring, diagnostic replay and ten fresh downstream decisions. Work stops at expiry. The enclosing campaign reserves one additional minute per condition for process closure and post-expiry archive measurement. Reports include elapsed finalization time and any overrun. A failed or absent nomination stays in the report, including its costs and any subsequent ordinary-evidence answers. A candidate rejected during transfer gets a separate replay result. Inspect `run/results.md` and `run/results.json` alongside each private task report for decisions, fallback, unknown delivery, missing usage and unstarted cases. Complete task archives and provider captures belong in private storage. Raw request bytes and token counts are reported separately. Monetary comparisons require a frozen deployment tariff supplied via `--cost-model`.
+
+For a separate matched study, prepare `--study comparison --repetitions N` in a new directory. The arm order rotates across repetitions. Each repetition compares ordinary evidence, the selected lossy Boolean, the supplied adequate projector, and the authored repair on the same ten cases. Decisions share an authored candidate within a repetition. Count independent construction attempts across repetitions when assessing reliability.
+
 ## Recurring release investigations
 
 The [2026-11-07 comparison](results/recurrence-2026-11-07.md) reports measured

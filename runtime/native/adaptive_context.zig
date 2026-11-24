@@ -809,15 +809,12 @@ pub fn Projection(comptime P: type) type {
                 );
             } else {
                 if (request.plan.epoch != 0 or request.plan.watermark != 0 or
-                    request.plan.eviction_generation != 0 or request.plan.reason != .initial or
-                    request.plan.research != null) return error.InvalidContext;
+                    request.plan.eviction_generation != 0 or request.plan.reason != .initial)
+                    return error.InvalidContext;
+                if (request.plan.research) |first|
+                    if (first.selected_at != 0) return error.InvalidContext;
                 try settle(a, &state.history, request, selected.profile.explicit_cache);
-                try fillOrigins(
-                    a,
-                    &state.origins,
-                    state.history.array.items.len,
-                    request.plan.watermark,
-                );
+                try fillOrigins(a, &state.origins, state.history.array.items.len, 0);
             }
             try appendCurrent(a, request, selected, previous, &state);
             const core = try renderTools(ctx, request, frozen, selected, catalog, &state);
@@ -863,6 +860,7 @@ pub fn Projection(comptime P: type) type {
                         rendered.origins.items,
                     ),
                     .model_profile = request.selection.profile_digest,
+                    .initial = request.plan.prior == null,
                 },
             }, if (maximum) |limit| @as(u64, limit) else null);
         }

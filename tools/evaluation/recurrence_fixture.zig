@@ -28,7 +28,7 @@ fn command(
     return (try Json.parse(a, reply.observation_json.bytes, .{})).value;
 }
 
-fn reference(a: std.mem.Allocator, observed: Json.Value, name: []const u8) !wc.Ref {
+pub fn reference(a: std.mem.Allocator, observed: Json.Value, name: []const u8) !wc.Ref {
     return native.values.fromJson(
         wc.Ref,
         a,
@@ -61,7 +61,7 @@ fn complete(service: anytype, a: std.mem.Allocator, task: [16]u8, work: wc.Ref) 
     return error.RecurrenceFixtureWorkIncomplete;
 }
 
-fn next(
+pub fn next(
     service: *Service,
     worker: *native.testing.Worker,
     a: std.mem.Allocator,
@@ -85,7 +85,7 @@ fn next(
     return error.RecurrenceFixtureInferenceMissing;
 }
 
-fn acquire(
+pub fn acquire(
     service: *Service,
     a: std.mem.Allocator,
     pending: native.tasks.Work,
@@ -113,7 +113,85 @@ fn acquire(
     try service.acquire(a, pending, raw);
 }
 
-fn context(
+const InitialRequest = struct {
+    request: types.P.AdaptiveRequest,
+
+    pub fn run(this: @This(), ctx: native.registry.ProjectionContext) ![]u8 {
+        return native.adaptive_responses.Adapter(types.P).prepare(
+            ctx,
+            try C.encodeOwned(types.P.AdaptiveRequest, ctx.allocator, this.request),
+        );
+    }
+
+    fn prepare(
+        this: @This(),
+        service: *Service,
+        a: std.mem.Allocator,
+        binding: native.registry.ProjectionBinding,
+    ) ![]u8 {
+        return service.namespace.store.project([]u8, a, service.handlers, binding, this);
+    }
+};
+
+pub fn checkInitialBinding(
+    service: *Service,
+    a: std.mem.Allocator,
+    pending: native.tasks.Work,
+) !void {
+    const archived = pending.prepared orelse return error.RecurrenceFixtureInferenceMissing;
+    var prepared = try C.decodeOwned(types.P.AdaptivePrepared, a, archived);
+    defer prepared.deinit();
+    const first = prepared.value.request;
+    if (first.plan.prior != null or first.plan.research == null or
+        first.plan.research.?.selected_at != 0 or prepared.value.selected_view == null)
+        return error.InitialSelectionRequired;
+    var task = try service.task(a, pending.task);
+    defer task.deinit();
+    const bytes = (try service.namespace.store.recordBytes(
+        a,
+        "attempt",
+        pending.attempt,
+        pending.task,
+    )) orelse return error.MissingAttempt;
+    var attempt = try C.decodeOwned(native.testing.state.Attempt, a, bytes);
+    defer attempt.deinit();
+    var binding: native.registry.ProjectionBinding = .{
+        .task = pending.task,
+        .tenant = task.value.tenant.bytes,
+        .profile = pending.profile,
+        .application = service.application.image_identity,
+        .resources = task.value.resources.items,
+        .controller = pending.controller_projection,
+        .consumer_cut = .{
+            .event_watermark = attempt.value.preparation_cut orelse return error.InvalidContext,
+            .controller = task.value.controller,
+            .controller_epoch = task.value.controller_epoch,
+            .next_message = task.value.next_message,
+        },
+    };
+    var test_request: InitialRequest = .{ .request = first };
+    const same = try test_request.prepare(service, a, binding);
+    if (!std.mem.eql(u8, archived, same)) return error.InvalidPreparedRequest;
+    test_request.request.selection.profile_digest[0] ^= 1;
+    try std.testing.expectError(
+        error.IncompatibleProfile,
+        test_request.prepare(service, a, binding),
+    );
+    test_request.request = first;
+    const messages = try a.dupe(types.P.Message, first.invocation.messages.items);
+    if (messages.len == 0 or messages[0].role != .developer) return error.InvalidContext;
+    messages[0].content = .{ .bytes = "Changed protected instruction." };
+    test_request.request.invocation.messages.items = messages;
+    try std.testing.expectError(error.StaleConsumer, test_request.prepare(service, a, binding));
+    test_request.request = first;
+    binding.consumer_cut.?.event_watermark = 1;
+    try std.testing.expectError(
+        error.ProjectionUnavailable,
+        test_request.prepare(service, a, binding),
+    );
+}
+
+pub fn context(
     service: *Service,
     worker: *native.testing.Worker,
     a: std.mem.Allocator,
@@ -127,7 +205,18 @@ fn context(
         const value = arguments.object.getPtr("command").?.object.getPtr("value").?;
         try Json.put(a, value.object.getPtr("page").?, "offset", try Json.number(a, 0));
     }
-    try acquire(service, a, pending.*, "context", try Json.canonical(a, arguments));
+    return action(service, worker, a, pending, "context", arguments);
+}
+
+pub fn action(
+    service: *Service,
+    worker: *native.testing.Worker,
+    a: std.mem.Allocator,
+    pending: *native.tasks.Work,
+    name: []const u8,
+    arguments: Json.Value,
+) !Json.Value {
+    try acquire(service, a, pending.*, name, try Json.canonical(a, arguments));
     pending.* = try next(service, worker, a);
     var prepared = try C.decodeOwned(types.P.AdaptivePrepared, a, pending.prepared.?);
     defer prepared.deinit();
@@ -135,7 +224,7 @@ fn context(
     if (results.len != 1) return error.RecurrenceFixtureResultMissing;
     const reply = (try Json.parse(a, results[0].output.bytes, .{})).value;
     if (std.mem.eql(u8, reply.object.get("disposition").?.string, "rejected")) {
-        std.debug.print("fixture context: {s}\n", .{results[0].output.bytes});
+        std.debug.print("fixture {s}: {s}\n", .{ name, results[0].output.bytes });
         return error.RecurrenceFixtureRejected;
     }
     return reply.object.get("observation") orelse error.RecurrenceFixtureResultMissing;

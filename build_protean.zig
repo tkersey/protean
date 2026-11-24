@@ -1103,10 +1103,32 @@ const BuildGraph = struct {
         s.native_executable.dependOn(adaptive_reference);
     }
 
+    fn repairSources(
+        s: *BuildGraph,
+        native: *std.Build.Module,
+        example: *std.Build.Module,
+    ) *std.Build.Module {
+        const module = s.b.createModule(.{
+            .root_source_file = s.b.path("tools/evaluation/interface_repair_sources.zig"),
+        });
+        module.addImport("projection_example", example);
+        module.addImport("protean_native", native);
+        module.addImport("protean_contracts", native.import_table.get("protean_contracts").?);
+        module.addImport("horos", native.import_table.get("horos").?);
+        return module;
+    }
+
     fn recurrenceDriver(s: *BuildGraph) void {
         const root = s.b.allocator.create(std.Build.Module) catch @panic("out of memory");
         root.init(s.b, .{ .existing = s.adaptive_product.executable.root_module });
         root.import_table = root.import_table.clone(s.b.allocator) catch @panic("out of memory");
+        const example = s.b.createModule(.{
+            .root_source_file = s.b.path("examples/adaptive/projection_example.zig"),
+        });
+        example.addImport("horos", s.native_horos);
+        example.addImport("protean_contracts", s.native_contracts);
+        example.addImport("protean_native", s.public_environment);
+        root.addImport("interface_repair_sources", s.repairSources(s.public_environment, example));
         const crash_backend: ?bool = if (linuxX86(s.b.graph.host)) s.optimize != .debug else null;
         const shared = s.checked_environment == s.public_environment and
             s.adaptive_product.executable.use_llvm == crash_backend;
@@ -1157,6 +1179,10 @@ const BuildGraph = struct {
             "test/protean/recurrence_delivery.test.mjs",
             "test/protean/recurrence_online.test.mjs",
             "test/protean/request_profile.test.mjs",
+            "test/protean/interface_repair.test.mjs",
+            "test/protean/interface_repair_campaign.test.mjs",
+            "test/protean/interface_repair_task.test.mjs",
+            "test/protean/interface_repair_trace.test.mjs",
         });
         s.native_owner_support.dependOn(&recurrence.step);
     }
@@ -1301,6 +1327,10 @@ const BuildGraph = struct {
             s.native_graph.module("examples/adaptive/projection_example.zig");
         projection_example.addImport("protean_native", s.checked_environment);
         s.native_suite.addImport("projection_example", projection_example);
+        s.native_suite.addImport(
+            "interface_repair_sources",
+            s.repairSources(s.checked_environment, projection_example),
+        );
         s.native_suite.addAnonymousImport(
             "adaptive_image",
             .{ .root_source_file = s.adaptive_image },

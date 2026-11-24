@@ -9,6 +9,7 @@ const Service = native.tasks.Service(types);
 const Json = native.json;
 const acquisition = @import("recurrence_acquisition.zig");
 const presentation = @import("recurrence_presentation.zig");
+const repair = @import("interface_repair_driver.zig");
 const assets: native.discovery.Assets = .{
     .image = @embedFile("native_image"),
     .application = @embedFile("native_application"),
@@ -19,6 +20,7 @@ const Options = struct {
     state_path: []const u8,
     profile_task: ?[16]u8 = null,
     fixture_workspace: bool = false,
+    bootstrap_digest: ?[32]u8 = null,
     configuration: native.configuration.Options = .{ .offline = false },
 
     fn parse(init: std.process.Init) !Options {
@@ -51,6 +53,8 @@ const Options = struct {
                     result.configuration.siwc_auth_dir = value;
                 } else if (std.mem.eql(u8, arg, "--profile-task")) {
                     result.profile_task = try native.client.identifier(16, Json.string(value));
+                } else if (std.mem.eql(u8, arg, "--interface-repair-bootstrap")) {
+                    result.bootstrap_digest = try native.client.identifier(32, Json.string(value));
                 } else return error.InvalidArguments;
             }
         }
@@ -159,7 +163,14 @@ fn run(init: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(init.gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    var handlers = try native.Registry.init(init.gpa, &environment.handlers);
+    var declarations = environment.handlers;
+    if (options.bootstrap_digest != null) {
+        for (&declarations) |*entry| {
+            if (std.mem.eql(u8, entry.identity, types.workspace_identity))
+                entry.* = environment.initialWorkspaceDeclaration();
+        }
+    }
+    var handlers = try native.Registry.init(init.gpa, &declarations);
     defer handlers.deinit();
     var application = try native.discovery.Application.init(types, init.gpa, assets, handlers);
     defer application.deinit();
@@ -186,7 +197,9 @@ fn run(init: std.process.Init) !void {
         .client = .{ .service = &service },
         .worker = worker,
         .fixture_workspace = options.fixture_workspace,
+        .repair_session = .{ .expected = options.bootstrap_digest },
     };
+    if (options.profile_task) |task| try driver.repair_session.restore(&service, a, task);
     try driver.serve(init.gpa, init.io);
 }
 
@@ -229,6 +242,7 @@ const Driver = struct {
     client: native.client.Client(types),
     worker: *Worker,
     fixture_workspace: bool = false,
+    repair_session: repair.Session = .{},
     paused: bool = false,
     completed: ?struct { task: [16]u8, attempt: [32]u8 } = null,
     seen: std.AutoHashMapUnmanaged(RecordIdentity, void) = .empty,
@@ -262,6 +276,8 @@ const Driver = struct {
     fn call(self: *Driver, a: std.mem.Allocator, request: Json.Value) !Json.Value {
         const method = try Json.text(try field(request, "method"));
         const params = Json.get(request, "params") orelse Json.object();
+        if (std.mem.eql(u8, method, "evaluation.interface_repair.sources"))
+            return self.repairSources(a, params);
         if (std.mem.eql(u8, method, "evaluation.observe")) return self.observe(a, params);
         if (std.mem.eql(u8, method, "evaluation.export")) {
             const task = try native.client.identifier(16, try field(params, "task_id"));
@@ -274,7 +290,14 @@ const Driver = struct {
         }
         if (std.mem.eql(u8, method, "evaluation.pause")) return self.pause(a, params);
         if (self.paused) return error.EvaluationPaused;
+        if (std.mem.eql(u8, method, "evaluation.interface_repair.bootstrap"))
+            return self.repair_session.bootstrap(self.service, self.worker, a, params);
+        if (std.mem.eql(u8, method, "evaluation.interface_repair.fixture"))
+            return self.repairFixture(a, params, false);
+        if (std.mem.eql(u8, method, "evaluation.interface_repair.answer"))
+            return self.repairFixture(a, params, true);
         if (std.mem.eql(u8, method, "evaluation.fixture")) {
+            if (self.repair_session.expected != null) return error.OfflineFixtureRequired;
             if (self.service.application.execution_mode != .offline)
                 return error.OfflineFixtureRequired;
             if (self.worker.future != null or self.service.work != null)
@@ -305,6 +328,54 @@ const Driver = struct {
         const selected = std.meta.stringToEnum(native.protocol.Method, method) orelse
             return error.MethodNotFound;
         return self.client.call(a, selected, params);
+    }
+
+    fn repairFixture(
+        self: *Driver,
+        a: std.mem.Allocator,
+        params: Json.Value,
+        downstream: bool,
+    ) !Json.Value {
+        if (!self.fixture_workspace or self.service.application.execution_mode != .offline)
+            return error.OfflineFixtureRequired;
+        if (self.worker.future != null or self.service.work != null)
+            return error.WorkerOutstanding;
+        const controlled = @import("interface_repair_fixture.zig");
+        if (!self.repair_session.ready) return error.BootstrapRequired;
+        if (self.repair_session.fixture_used or params != .object or params.object.count() != 2)
+            return error.InvalidParams;
+        const task = try native.client.identifier(16, try field(params, "task_id"));
+        if (downstream) {
+            if (!std.meta.eql(@as(?[16]u8, task), self.repair_session.downstream_task))
+                return error.InvalidParams;
+            const summary = try Json.text(try field(params, "summary"));
+            self.repair_session.fixture_used = true;
+            return controlled.answer(self.service, self.worker, a, task, summary);
+        }
+        const setup = self.repair_session.selected orelse return error.BootstrapRequired;
+        if (self.repair_session.downstream_task != null) return error.InvalidParams;
+        const input = try native.values.fromJson(C.workspace.Ref, a, try field(
+            params,
+            "canonical_input",
+        ));
+        if (!std.meta.eql(task, setup.task) or input.kind != .value or
+            !std.mem.eql(u8, input.id.bytes, &setup.input)) return error.InvalidCanonicalInput;
+        self.repair_session.fixture_used = true;
+        return controlled.run(self.service, self.worker, a, task, input);
+    }
+
+    fn repairSources(self: *Driver, a: std.mem.Allocator, params: Json.Value) !Json.Value {
+        if (self.service.application.execution_mode != .offline)
+            return error.OfflineFixtureRequired;
+        if (params != .object or params.object.count() != 0) return error.InvalidParams;
+        const tasks = try self.service.namespace.store.taskIds(a, false);
+        defer a.free(tasks);
+        if (tasks.len != 0) return error.PreparationNamespaceRequired;
+        const sources = @import("interface_repair_sources");
+        var result = Json.object();
+        inline for (.{ sources.Seed.lossy, .adequate }) |kind|
+            try Json.put(a, &result, @tagName(kind), Json.string(try sources.seed(a, kind)));
+        return result;
     }
 
     fn fixtureOptions(
@@ -375,6 +446,8 @@ const Driver = struct {
     }
 
     fn step(self: *Driver, a: std.mem.Allocator) !Json.Value {
+        if (self.repair_session.expected != null and !self.repair_session.ready)
+            return error.BootstrapRequired;
         if (try self.finishWorker(a)) return self.boundary(a, "captured");
         const next = try self.service.pump(a);
         if (next == .work) {

@@ -88,6 +88,7 @@ pub const ConsumerCut = struct {
     controller_epoch: u64,
     next_message: u64,
 };
+pub const RootWorkspaceRequest = struct { request: state.Reference, input: state.Reference };
 
 pub const ProjectionBinding = struct {
     task: state.TaskId,
@@ -113,6 +114,7 @@ pub const ProjectionContext = struct {
     controller: ?ControllerProjection = null,
     trial: ?TrialProjection = null,
     execution: ?state.Digest = null,
+    root_workspace_request: ?RootWorkspaceRequest = null,
     consumer_cut: ?ConsumerCut = null,
     objects: ReadView,
 

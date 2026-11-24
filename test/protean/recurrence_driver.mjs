@@ -8,6 +8,7 @@ import {join} from 'node:path';
 import {createInterface} from 'node:readline';
 import {setTimeout as delay} from 'node:timers/promises';
 import {readArchive} from './native_archive.mjs';
+import {checkInterfaceRepair} from './interface_repair_driver.mjs';
 import {decodeRecurrenceObservation, prepareRecurrence, evaluateRecurrence, inferenceArguments, presentedValues, RecurrenceTrace, RecurrenceDriver, workspaceMetrics} from '../../tools/evaluation/workspace.mjs';
 import {contract} from './adaptive_capture_checks.mjs';
 import {decodeValue, encodeValue} from '../support/values.mjs';
@@ -39,7 +40,8 @@ function launch(task, state = 'state', options = []) {
   });
   child.call = (method, params = {}) => new Promise((resolve, reject) => {
     const id = ++sequence;
-    const timeoutMs = method === 'evaluation.fixture' ? 60_000 : 30_000;
+    const timeoutMs = method === 'evaluation.fixture' || method.startsWith('evaluation.interface_repair.')
+      ? 60_000 : 30_000;
     const timer = setTimeout(() => { reject(new Error(`timeout: ${method}: ${stderr}`)); child.kill('SIGKILL'); }, timeoutMs);
     pending.set(id, {resolve, reject, timer});
     child.stdin.write(JSON.stringify({id, method, params}) + '\n');
@@ -50,10 +52,15 @@ function launch(task, state = 'state', options = []) {
 try {
   let child = launch();
   const description = await child.call('describe');
+  const sources = await child.call('evaluation.interface_repair.sources');
+  assert.deepEqual(Object.keys(sources).sort(), ['adequate', 'lossy']);
+  assert.notEqual(sources.lossy, sources.adequate);
+  for (const source of Object.values(sources)) assert.ok(JSON.parse(source));
   const submission = {client_operation_id: 'recurrence-offline-submit', application_id: 'adaptive-agent',
     profile_id: description.profile.id, input: {schema_id: 'adaptive-agent.input.v2',
       value: {task: 'Explain the fixture entry point using source evidence and exercise the approved adaptive controls.'}}};
   const accepted = await child.call('task.submit', submission);
+  await assert.rejects(child.call('evaluation.interface_repair.sources'), /PreparationNamespaceRequired/);
   const preflightPath = join(root, 'preflight.agnx');
   const preflightReceipt = await child.call('evaluation.export', {task_id: accepted.task_id, path: preflightPath});
   const preflight = readArchive(await readFile(preflightPath));
@@ -204,6 +211,7 @@ try {
   assert.deepEqual(await child.exited, [0, null]);
   const config = JSON.parse(await readFile(new URL('../../examples/adaptive/adaptive.example.json', import.meta.url)));
   const applicationPath = process.argv[3], application = JSON.parse(await readFile(applicationPath));
+  await checkInterfaceRepair(launch, root, {sources, application, config});
   const fixtureChild = launch(null, 'fixture-state');
   const fixtureTask = await fixtureChild.call('task.submit', submission);
   const fixture = await fixtureChild.call('evaluation.fixture', {task_id: fixtureTask.task_id, reject_action: true});

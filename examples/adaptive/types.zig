@@ -161,6 +161,11 @@ pub fn toolMask(comptime names: anytype) [P.declaration_count]bool {
     return result;
 }
 pub const PolicyView = struct { profiles: controls.Profiles, catalog: controls.Catalog };
+pub const InitialProjection = struct {
+    view: contracts.workspace.Ref,
+    program: contracts.workspace.Ref,
+    result: contracts.workspace.Ref,
+};
 pub const Bindings = struct {
     policy: [32]u8,
     snapshot: [32]u8,
@@ -171,6 +176,8 @@ pub const Bindings = struct {
     initial: controls.State,
     instructions: P.MessageText,
     status: P.MessageText,
+    observe_initial_consumer: bool = false,
+    initial_projection: ?InitialProjection = null,
 };
 // These retain the fixed example's snapshot-query wire shapes so both use the
 // same native repository query implementation, with separate effect identities.
@@ -240,10 +247,14 @@ pub const WorkReply = struct {
     artifact: model.ArtifactReference,
     evidence: ?SourceEvidenceReference,
 };
-pub const WorkspaceRequest = struct {
+pub const ModelWorkspaceRequest = struct {
     context: model.AdaptiveContextReference,
     call_id: P.CallId,
     action: contracts.workspace.Command,
+};
+pub const WorkspaceRequest = union(enum) {
+    model: ModelWorkspaceRequest,
+    initial_consumer: Preparation,
 };
 pub const ControllerCarry = struct { bindings: PolicyView, state: State };
 pub const ControllerPrivate = union(enum) { initial: Input, @"resume": ControllerCarry };

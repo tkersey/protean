@@ -12,7 +12,11 @@ const wp = @import("workspace_projection.zig");
 const wc = contracts.workspace;
 
 pub const Target = union(enum) {
-    controller: struct { protected_identity: state.Digest, model_profile: state.Digest },
+    controller: struct {
+        protected_identity: state.Digest,
+        model_profile: state.Digest,
+        initial: bool = false,
+    },
     model: struct {
         work: state.Digest,
         port: state.Digest,
@@ -56,6 +60,7 @@ fn renderIn(
         if (view.value.description.values.items.len != 0) return error.InvalidProjection;
         try renderProjection(ctx, selected, target, &remaining, &text);
     } else {
+        if (target == .controller and target.controller.initial) return error.InvalidConsumer;
         for (view.value.description.values.items, 0..) |ref, index| {
             if (index != 0) try text.append(ctx.allocator, ',');
             const block = try renderValue(ctx, ref, null, &remaining);
@@ -144,6 +149,10 @@ fn requireBinding(
     const observed = saved.value.evidence.read.consumer;
     switch (target) {
         .controller => |actual| {
+            if (actual.initial and
+                (!std.meta.eql(observed.interface.request, saved.value.request) or
+                    observed.controller.epoch != 0 or observed.controller.interaction != null))
+                return error.InvalidConsumer;
             if (observed.selection.target != .controller or
                 !std.meta.eql(actual.protected_identity, observed.interface.protected_identity) or
                 !std.meta.eql(actual.model_profile, observed.interface.model_profile))

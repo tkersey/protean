@@ -14,6 +14,7 @@ import {contract} from '../../test/protean/adaptive_capture_checks.mjs';
 import {createCorpus, createOnlineCorpus, gradeReport, gradeOnlineAnswers, combineOnlineGrading,
   parseOnlineAnswer, compareCampaign, parseReport, campaignIdentity} from './recurrence.mjs';
 import {profilePreparedRequest} from './request_profile.mjs';
+import {prepareInterfaceRepair, runInterfaceRepair} from './interface_repair_campaign.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const json = value => JSON.stringify(value, (_key, v) => typeof v === 'bigint' ? v.toString() : v, 2);
@@ -39,7 +40,7 @@ const semanticArms = {
 const option = (args, name, fallback) => { const i = args.indexOf(name); return i < 0 ? fallback : args[i + 1]; };
 const [mode, ...args] = process.argv.slice(2);
 if (import.meta.main && !['prepare', 'run'].includes(mode)) {
-  console.log('prepare --config CONFIG --out DIRECTORY [--suite workspace|runtime|reconstruction|semantic|recurrence|recurrence-online] [--repetitions 1] [--seconds 600]\nrecurrence preparation also requires --binary BINARY --driver DRIVER --application APPLICATION_JSON [--cost-model JSON]\nrun --plan DIRECTORY --binary BINARY --application APPLICATION_JSON [--driver DRIVER] --authorize-inference (--credential-file PRIVATE_FILE | --chatgpt-account ACCOUNT)');
+  console.log('prepare --config CONFIG --out DIRECTORY [--suite workspace|runtime|reconstruction|semantic|recurrence|recurrence-online|interface-repair] [--repetitions 1] [--seconds 600]\nrecurrence and interface-repair preparation also require --binary BINARY --driver DRIVER --application APPLICATION_JSON [--cost-model JSON]\ninterface-repair options: --study episode|comparison --provider-route api-key|chatgpt\nrun --plan DIRECTORY --binary BINARY --application APPLICATION_JSON [--driver DRIVER] --authorize-inference (--credential-file PRIVATE_FILE | --chatgpt-account ACCOUNT)');
   process.exit(mode === '--help' || !mode ? 0 : 2);
 }
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -99,12 +100,12 @@ function guardCosts(archive) {
   }
   return {reference, candidate};
 }
-function command(binary, args) {
+export function command(binary, args) {
   const r = spawnSync(binary, args, {encoding: 'utf8', maxBuffer: 64 << 20});
   if (r.status !== 0) throw new Error(`native command ${args[0]} failed: ${r.stderr}`);
   return JSON.parse(r.stdout);
 }
-async function bytesUnder(path) {
+export async function bytesUnder(path) {
   let bytes = 0;
   for (const item of await readdir(path, {withFileTypes: true})) {
     const file = join(path, item.name);
@@ -115,7 +116,7 @@ async function bytesUnder(path) {
 }
 const validTokenCount = value => Number.isSafeInteger(value) && value >= 0;
 
-function capturedUsage(raw) {
+export function capturedUsage(raw) {
   const bytes = new TextDecoder('utf-8', {fatal: true}).decode(raw[3]);
   if (raw[7] !== 2) return null;
   if (raw[4] === 0) return JSON.parse(bytes)?.usage;
@@ -1456,7 +1457,7 @@ export async function resolveQuestion(client, taskId, question) {
     prompt_b64: bytes.toString('base64')};
 }
 
-async function readOutcome(client, taskId, result) {
+export async function readOutcome(client, taskId, result) {
   if (!result.outcome?.value_ref) return result;
   const bytes = await readArtifact(client, taskId, result.outcome.value_ref);
   result.outcome.value = JSON.parse(bytes.toString());
@@ -1721,7 +1722,18 @@ async function runRecurrence(directory, options) {
 }
 
 if (import.meta.main) {
-if (mode === 'prepare' && ['recurrence', 'recurrence-online'].includes(option(args, '--suite'))) {
+if (mode === 'prepare' && option(args, '--suite') === 'interface-repair') {
+  const directory = resolve(option(args, '--out', '')), costPath = option(args, '--cost-model');
+  const plan = await prepareInterfaceRepair({directory,
+    config:JSON.parse(await readFile(resolve(option(args, '--config', '')))),
+    binary:resolve(option(args, '--binary', '')), driver:resolve(option(args, '--driver', '')),
+    applicationPath:resolve(option(args, '--application', '')), study:option(args, '--study', 'episode'),
+    repetitions:Number(option(args, '--repetitions', '1')), seconds:Number(option(args, '--seconds', '600')),
+    route:option(args, '--provider-route', 'api-key'),
+    ...(costPath ? {costModel:JSON.parse(await readFile(resolve(costPath)))} : {})});
+  console.log(json({plan:join(directory,'plan.json'), study:plan.study, conditions:plan.conditions.length,
+    live_calls:0, efficacy:'unmeasured'}));
+} else if (mode === 'prepare' && ['recurrence', 'recurrence-online'].includes(option(args, '--suite'))) {
   const directory = resolve(option(args, '--out', ''));
   const costPath = option(args, '--cost-model');
   const plan = await prepareRecurrence({config: JSON.parse(await readFile(resolve(option(args, '--config', '')), 'utf8')),
@@ -1787,7 +1799,10 @@ if (mode === 'prepare' && ['recurrence', 'recurrence-online'].includes(option(ar
   inferenceArguments({credential, chatgptAccount, siwcBin, siwcAuthDir});
   const directory = resolve(option(args,'--plan','')), binary = resolve(option(args,'--binary','')), application = JSON.parse(await readFile(resolve(option(args,'--application','')),'utf8'));
   const plan = JSON.parse(await readFile(join(directory,'plan.json'),'utf8'));
-  if (['protean-recurrence-evaluation/1', 'protean-recurrence-evaluation/2'].includes(plan.format)) {
+  if (plan.format === 'protean-interface-repair/1') {
+    console.log(json(await runInterfaceRepair(directory,{binary, driver:resolve(option(args, '--driver', '')),
+      applicationPath:resolve(option(args, '--application', '')), credential,chatgptAccount,siwcBin,siwcAuthDir})));
+  } else if (['protean-recurrence-evaluation/1', 'protean-recurrence-evaluation/2'].includes(plan.format)) {
     console.log(json(await runRecurrence(directory, {binary, driver: resolve(option(args, '--driver', '')),
       applicationPath: resolve(option(args, '--application', '')), credential, chatgptAccount, siwcBin, siwcAuthDir})));
   } else {

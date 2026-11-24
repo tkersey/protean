@@ -466,7 +466,53 @@ fn Program(comptime controller: bool) type {
                 .profiles = try root.field(frozen, "profiles"),
                 .catalog = try root.field(frozen, "catalog"),
             });
-            return root.call(p.loop, .{ .bindings = policy, .state = initial });
+            const setup = try root.branch();
+            const ordinary = try root.branch();
+            const started = try ordinary.call(p.loop, .{ .bindings = policy, .state = initial });
+            return root.conditional(
+                try root.field(frozen, "observe_initial_consumer"),
+                try setup.ret(try p.selectInitial(setup, policy, initial)),
+                try ordinary.ret(started),
+            );
+        }
+
+        fn selectInitial(p: Self, b: anytype, bindings: anytype, state: V(t.State)) !V(t.Output) {
+            const e = p.e;
+            const input = try b.product(try e.context.schema(t.Preparation), .{
+                .state = state,
+                .offered = try p.offers(b, state),
+                .control = try e.context.literal(?t.ControlSubject, null),
+                .retained_calls = try e.context.literal(t.model.RetainedCalls, retained_calls),
+                .request_mode = try e.context.literal(t.PreparationMode, .complete),
+            });
+            _ = try b.perform(p.ops.workspace, try b.variant(
+                try e.context.schema(t.WorkspaceRequest),
+                "initial_consumer",
+                input,
+            ));
+            const selected = try b.perform(p.ops.bindings, try b.constant(void, {}));
+            const projection = try b.variantPayload(
+                try b.field(selected, "initial_projection"),
+                "some",
+                try e.failure(),
+            );
+            const evidence = try b.variant(
+                try e.context.schema(t.EvidenceReference),
+                "workspace",
+                try b.field(projection, "result"),
+            );
+            const next = try b.update(state, .{
+                .selected_view = try b.variant(
+                    try e.context.schema(@FieldType(t.State, "selected_view")),
+                    "some",
+                    try b.field(projection, "view"),
+                ),
+                .evidence = try b.sequenceValue(try e.context.schema(t.EvidenceList), &.{evidence}),
+                .programs = try b.sequenceValue(try e.context.schema(t.Programs), &.{
+                    try b.field(projection, "program"),
+                }),
+            });
+            return b.call(p.loop, .{ .bindings = bindings, .state = next });
         }
 
         fn defineEvidence(p: Self) !void {
@@ -596,21 +642,28 @@ fn Program(comptime controller: bool) type {
             const replay = try b.field(state, "replay");
             const present = try b.caseOf(replay, "some");
             const absent = try b.caseOf(replay, "none");
-            const previous_epoch = try b.match(replay, .{
-                .some = try present.ret(try present.body().field(present.payload(), "epoch")),
-                .none = try absent.ret(try absent.body().field(previous_control, "epoch")),
-            });
-            const next_control = try b.update(previous_control, .{
-                .epoch = try b.checkedAdd(previous_epoch, try b.constant(u64, 1), try e.failure()),
+            const resuming = present.body();
+            const changed = try resuming.update(previous_control, .{
+                .epoch = try resuming.checkedAdd(
+                    try resuming.field(present.payload(), "epoch"),
+                    try resuming.constant(u64, 1),
+                    try e.failure(),
+                ),
                 .epoch_reason = try e.context.literal(t.model.EpochReason, .projection_recovery),
+            });
+            const next = try b.match(replay, .{
+                .some = try present.ret(try resuming.update(state, .{ .control = changed })),
+                .none = try absent.ret(try absent.body().update(state, .{
+                    .evidence = try e.context.literal(t.EvidenceList, .{ .items = &.{} }),
+                    .programs = try e.context.literal(t.Programs, .{ .items = &.{} }),
+                })),
             });
             const messages = try b.append(try b.field(state, "messages"), try e.message(
                 b,
                 .assistant,
                 try p.projectionDiagnostic(b, rejection),
             ), .{});
-            return b.update(state, .{
-                .control = next_control,
+            return b.update(next, .{
                 .selected_view = try e.context.literal(?protean.contracts.workspace.Ref, null),
                 .selected_view_at = try b.constant(u64, 0),
                 .messages = messages,
@@ -1332,7 +1385,7 @@ fn Program(comptime controller: bool) type {
                 "placement",
             )) "placement" else "context";
             const request = try b.product(try e.context.schema(
-                t.WorkspaceRequest,
+                t.ModelWorkspaceRequest,
             ), .{
                 .context = try b.variantPayload(
                     try b.field(state, "replay"),
@@ -1341,12 +1394,16 @@ fn Program(comptime controller: bool) type {
                 ),
                 .call_id = call_id,
                 .action = try b.variant(
-                    try e.context.schema(@FieldType(t.WorkspaceRequest, "action")),
+                    try e.context.schema(@FieldType(t.ModelWorkspaceRequest, "action")),
                     command,
                     try b.field(value, "command"),
                 ),
             });
-            const reply = try b.perform(p.ops.workspace, request);
+            const reply = try b.perform(p.ops.workspace, try b.variant(
+                try e.context.schema(t.WorkspaceRequest),
+                "model",
+                request,
+            ));
             var updated = try p.selectedView(b, state, reply);
             const evidence_index = try p.workspaceEvidenceIndex(b, state, reply);
             updated = try p.appendWorkspaceObservations(b, updated, reply);
