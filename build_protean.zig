@@ -1196,11 +1196,16 @@ const BuildGraph = struct {
         );
         driver.dependOn(&install.step);
         driver.dependOn(s.adaptive_image_step);
+        s.recurrenceDriverChecks(executable);
+    }
+
+    fn recurrenceDriverChecks(s: *BuildGraph, executable: *std.Build.Step.Compile) void {
         const check = nativeCheckCommand(s.b);
+        const product = s.adaptive_product.executable.getEmittedBin();
         check.addArgs(&.{ "node", "test/protean/recurrence_driver.mjs" });
         check.addFileArg2(executable.getEmittedBin(), .{ .make_absolute = true });
         check.addFileArg2(s.adaptive_application, .{ .make_absolute = true });
-        check.addFileArg2(s.adaptive_product.executable.getEmittedBin(), .{ .make_absolute = true });
+        check.addFileArg2(product, .{ .make_absolute = true });
         if (s.native_direct) s.directHashCheck(&check.step);
         s.b.step("check-recurrence-driver", "Check sealed capture and external crash recovery")
             .dependOn(&check.step);
