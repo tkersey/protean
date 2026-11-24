@@ -782,15 +782,23 @@ export function decisionSupport(archive, application, specimen, sourceRefs, valu
       }
       return;
     }
-    const {input, use} = computed;
-    if (complete) covered.add(key);
-    else if (input) partialComputations.set(wanted.id, {kind, i, wanted, key});
+    const citation = container ?? wanted, hold = citation.kind + citation.id;
+    if (complete) {
+      covered.add(key);
+      partialComputations.delete(hold);
+    } else if (computed.input || !presented.has(computed.use.result.id)) {
+      partialComputations.set(hold, {i, kind, wanted, container, computed, key});
+      if (computed.input) note(routes, kind, i, {ref: wanted});
+      return;
+    }
+    settle(i, kind, wanted, container, computed, complete, key);
+  };
+  const settle = (i, kind, wanted, container, {input, use}, complete, key) => {
     if (input) return inputEvidence(i,kind,wanted,complete,key);
     const alreadyShown = presented.has(use.result.id);
     if (alreadyShown) {
       if (!use.one_computed_block) note(unresolved, kind, i, {ref: wanted});
-    } else if (!complete) partialComputations.set(wanted.id, {kind, i, wanted, key});
-    else if (use.semantic_judgment === 'supported') note(routes, kind, i, {ref: wanted});
+    } else if (use.semantic_judgment === 'supported') note(routes, kind, i, {ref: wanted});
     else note(unresolved, kind, i, {ref: wanted});
     const citation = container ?? wanted;
     if (!same(citation, use.result) && (!container || use.one_computed_block) && (alreadyShown || complete)) {
@@ -1002,8 +1010,9 @@ export function decisionSupport(archive, application, specimen, sourceRefs, valu
       } else note(unresolved, 'other_work_output', i);
     }
   }
-  for (const {kind, i, wanted, key} of partialComputations.values())
-    if (!covered.has(key)) note(unresolved, kind, i, {ref: wanted});
+  for (const {i, kind, wanted, container, computed, key} of partialComputations.values())
+    if (covered.has(key)) settle(i, kind, wanted, container, computed, true, key);
+    else note(unresolved, kind, i, {ref: wanted});
   const primaryMissing = [...missing].filter(path => primary.has(path));
   for (const {value, path} of handles.values()) if (completePaths.has(path))
     credit(value, path === 'scan.json' ? [path, ...primaryMissing] : [path]);

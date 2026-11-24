@@ -481,6 +481,8 @@ test('a partial preview of a verified result copy is resolved by presentation of
     {value: alias.handle, preview: f.page(JSON.stringify(alias.text), 0, 3)});
     if (presentedFirst) { present(); copy(); } else { copy(); present(); }
     assert.deepEqual(f.support([use]).unresolved, []);
+    const copied = f.support([use]).exposure.find(row => row.ref.id === alias.handle.id);
+    assert.deepEqual(copied?.projected_result, use.result);
   }
 });
 
@@ -493,6 +495,7 @@ test('a partial page of a verified canonical-input copy is covered by the remain
   assert(f.support([use]).unresolved.some(row => row.ref?.id === alias.handle.id));
   f.expand(f.input.handle, text, 3);
   assert.deepEqual(f.support([use]).unresolved, []);
+  assert(f.support([use]).exposure.some(row => row.ref.id === alias.handle.id && row.paths.includes(f.path)));
 });
 
 test('a host-limited recursive result preview preserves other verified source evidence', () => {
@@ -614,6 +617,25 @@ test('static guidance, bound controller metadata and a verified same-view reread
   assert(!read().projection_exposure.some(row => row.ref.id === f.input.handle.id));
   f.expand(schema, 'unverified schema');
   assert(read().unresolved.some(r => r.ref?.id === schema.id));
+});
+
+test('a partial view expansion is credited to the view once its result is presented in either order', () => {
+  for (const presentedFirst of [false, true]) {
+    const f = decisionFixture(), descriptor = {root: '0', types: [{tag:'text',value:{}}]};
+    const use = {view:{kind:'view',id:'c'.repeat(64)}, consumer:{kind:'observation',id:'d'.repeat(64)},
+      input:f.input.handle, result:f.result.handle, paths:[f.path,f.member], one_computed_block:true, payload:'value',
+      payload_schema_sha256:'schema', payload_descriptor:descriptor, semantic_judgment:'supported', schema_kind:'other',
+      exposures:[{id: presentedFirst ? '1' : '2', rendered: true, model_response: true, delivery: 'confirmed'}]};
+    const present = () => f.step('program', {tag: 'describe', value: {section: 'components'}}, {},
+      {selected: 'b'.repeat(64), block: {kind: 'computed', schema_identity: 'schema', schema: descriptor,
+        result: use.result, value: use.payload}});
+    const expand = () => f.step('context', {tag:'expand',value:{reference:use.view}}, {view:use.view,consumer:use.consumer,
+      projection_result:use.result,coverage:'selected_blocks_only',selection:f.page(JSON.stringify(f.result.text), 0, 5)});
+    if (presentedFirst) { present(); expand(); } else { expand(); present(); }
+    const support = f.support([use], {result:use.result});
+    assert.deepEqual(support.unresolved, []);
+    assert.deepEqual(support.exposure.find(row => row.ref.id === use.view.id)?.paths, use.paths);
+  }
 });
 
 test('a view citation requires delivery of its result and a matching view expansion', () => {
