@@ -102,6 +102,33 @@ test('answer grading requires exposed sources spanning the universe and the spec
     .errors.includes('unsupported_witness'));
 });
 
+test('a cited generic presentation leaves support open until its meaning or independent evidence establishes the answer', () => {
+  const [specimen, hole] = corpus.development;
+  const result = sourceRef(101), generic = {ref: result, paths: [], semantic_judgment: 'unestablished'};
+  const grade = (scan, changes = {}, exposure = [generic]) =>
+    gradeAnswer(report(scan, {support: [result], ...changes}), scan, exposure);
+  const unresolved = grade(specimen);
+  assert.equal(unresolved.outcome_correct, true);
+  assert.equal(unresolved.supported, null);
+  assert.equal(unresolved.unsupported_exhaustion, null);
+  assert.deepEqual(unresolved.errors, ['unadjudicated_payload']);
+  const knownLossy = grade(specimen, {}, [{...generic, known_lossy: true}]);
+  assert.equal(knownLossy.supported, false);
+  assert.equal(knownLossy.unsupported_exhaustion, true);
+  assert.ok(knownLossy.errors.includes('unsupported_coverage'));
+  assert.equal(grade(specimen, {}, [{...generic, semantic_judgment:'incorrect'}]).supported, false);
+  assert.equal(grade(specimen, {support:[sourceRef(100)]}).supported, false);
+  assert.equal(grade(specimen, {support:[result, sourceRef(102)]}).supported, false);
+  assert.equal(grade(specimen, {support:[]}, null).supported, false);
+  assert.equal(grade(specimen, {support:[result, sourceRef(100)]}, [generic, ...exposure(specimen)]).supported, true);
+  assert.equal(grade(hole, {outcome:complete}).unsupported_exhaustion, true);
+  assert.equal(grade(specimen, {domain_identity:'0'}).unsupported_exhaustion, true);
+  assert.equal(grade(specimen, {case_id:hole.case_id}).supported, false);
+  assert.equal(grade(hole, {explanation:'Unknown domain.'}).supported, false);
+  assert.equal(grade(hole, {explanation:'Missing successful coverage of member 2.'}).supported, null);
+  assert.equal(grade(corpus.transfer[4]).supported, null);
+});
+
 test('incomplete explanations are independently checked and unknown claims stay open', () => {
   const specimen = corpus.development[1];
   const grade = explanation => gradeAnswer(report(specimen, {explanation}), specimen, exposure(specimen));

@@ -6,7 +6,8 @@ import {prepareInterfaceRepair} from '../../tools/evaluation/interface_repair_ca
 import {executeRepairTask} from '../../tools/evaluation/interface_repair_task.mjs';
 import {assessScan} from '../../tools/evaluation/interface_repair.mjs';
 import {readArchive} from './native_archive.mjs';
-import {decodeValue} from '../support/values.mjs';
+import {contract} from './adaptive_capture_checks.mjs';
+import {decodeValue, encodeValue} from '../support/values.mjs';
 import {adjudicateRepairTrace} from '../../tools/evaluation/interface_repair_trace.mjs';
 import {RecurrenceDriver} from '../../tools/evaluation/workspace.mjs';
 
@@ -61,6 +62,52 @@ function sourceInventory(archive) {
   }).sort();
 }
 
+function checkUnrenderedCandidate(exact, use, exposure, change) {
+  const {archive, application} = exact;
+  const store = (schema, value) => {
+    const bytes = Buffer.from(encodeValue(schema, value)), digest = sha(bytes);
+    archive.objects.set(digest, bytes);
+    return [[...Buffer.from(digest, 'hex')], BigInt(bytes.length)];
+  };
+  const schema = contract(application, 'AdaptivePrepared');
+  const prepared = decodeValue(schema, archive.objects.get(exposure.prepared_sha256));
+  const body = JSON.parse(Buffer.from(prepared[2]).toString());
+  const part = body.input[exposure.input_index].content[0], envelope = JSON.parse(part.text);
+  const blocks = envelope.selected_context_data;
+  assert.equal(blocks.length, 1);
+  assert.deepEqual(blocks[0].result, use.result);
+  assert.deepEqual(blocks[0].value, use.payload);
+  if (change === 'missing') blocks.pop();
+  else blocks[0].value[0][0] = '0';
+  part.text = JSON.stringify(envelope);
+  prepared[2] = Buffer.from(JSON.stringify(body));
+  const replacement = store(schema, prepared);
+  const manifest = [...archive.manifest];
+  manifest[6] = manifest[6].map(([kind, id, reference]) => {
+    if ((kind !== 4 && kind !== 5) || Buffer.from(id).toString('hex') !== exposure.id) return [kind, id, reference];
+    const schema = archive.schemas.get(kind === 4 ? 'capture' : 'attempt');
+    const value = decodeValue(schema, archive.object(reference));
+    if (kind === 4) value[3] = replacement;
+    else value[7].value = replacement;
+    return [kind, id, store(schema, value)];
+  });
+  const observations = structuredClone(exact.observations);
+  for (const {report_producer} of observations) {
+    if (report_producer?.attempt_id === exposure.id) report_producer.prepared_sha256 = Buffer.from(replacement[0]).toString('hex');
+  }
+  const trace = adjudicateRepairTrace({...exact, archive: {...archive, manifest}, observations});
+  assert.equal(trace.report_bound, true);
+  assert.deepEqual(trace.candidate.program, use.program);
+  const altered = trace.uses.find(row => row.view.id === use.view.id);
+  assert(altered.canonical_input && altered.model_start && altered.model_select);
+  const [request] = altered.exposures;
+  assert.equal(request.delivery, 'confirmed');
+  assert.equal(request.input_index, exposure.input_index);
+  assert.equal(request.rendered, false);
+  assert.equal(trace.exposure.some(row => row.ref.id === use.result.id), false);
+  assert.equal(trace.authored_and_applied, false);
+}
+
 async function auditEvidence(report, application) {
   const specimen = JSON.parse(await readFile(report.subject.case_path));
   const archive = readArchive(await readFile(report.archive));
@@ -79,7 +126,12 @@ async function auditEvidence(report, application) {
     const other = {...specimen, files: {...specimen.files, 'scan.json': JSON.stringify(changed)}};
     assert.equal(adjudicateRepairTrace({...exact, specimen: other}).authored_and_applied, false);
   }
-  const exposures = report.adjudication.uses.find(use => use.view.id === report.fixture_receipt.view.id).exposures;
+  const use = report.adjudication.uses.find(use => use.view.id === report.fixture_receipt.view.id);
+  const {exposures} = use;
+  assert.equal(exposures.length, 1);
+  assert.equal(exposures[0].id, report.adjudication.report_attempt);
+  assert.equal(adjudicateRepairTrace(exact).authored_and_applied, true);
+  for (const change of ['missing', 'different']) checkUnrenderedCandidate(exact, use, exposures[0], change);
   const unconfirmed = new Set(exposures.map(row => row.id));
   const records = archive.manifest[6].filter(([kind, id]) =>
     kind !== 4 || !unconfirmed.has(Buffer.from(id).toString('hex')));
@@ -170,6 +222,7 @@ export async function checkInterfaceRepair(launch, root, {sources, application, 
       assert.equal(control.adjudication.uses.length, 0);
     } else {
       assert.equal(control.adjudication.projection.canonical_input, true);
+      assert.equal(control.adjudication.projection.known_lossy, arm === 'fixed-lossy');
       assert.equal(control.adjudication.projection.semantic_judgment,
         arm === 'fixed-adequate' ? 'supported' : 'unestablished');
     }

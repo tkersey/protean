@@ -84,6 +84,27 @@ test('unstarted and timed out cases prevent an all-cases claim, irrespective of 
   assert.equal(measured.end_to_end_resources.monetary_cost,null);
 });
 
+test('condition compliance requires the promised presentation in the first request', () => {
+  const subject = {phase:'transfer',case_id:'a'}, condition = {arm:'fixed-lossy',downstream:[subject]};
+  const first = {id:'first',preparation_cut:'2',prepared_sha256:'original',selected_view:'view',delivery:'confirmed'};
+  const later = {...first,id:'later',preparation_cut:'10',prepared_sha256:'subsequent'};
+  const report = {bootstrap:{view:{id:'view'}},effective_condition:'fixed-lossy',arm_violations:[],
+    adjudication:{delivery:[later,first],projection:{one_computed_block:true,result:{kind:'value',id:'result'},
+      exposures:[{id:'later',rendered:true},{id:'first',rendered:false}]}}};
+  const grade = () => gradeCondition(condition,[{subject,state:'completed',report}],{kind:'unpriced'}).cases[0];
+  assert.equal(grade().compliant,false);
+  report.adjudication.projection.exposures[1].rendered = true;
+  assert.equal(grade().compliant,true);
+  first.delivery = 'unknown';
+  assert.equal(grade().compliant,null);
+  first.delivery = 'confirmed';
+  report.effective_condition = 'ordinary';
+  report.adjudication.projection = null;
+  assert.equal(grade().compliant,false);
+  first.selected_view = null;
+  assert.equal(grade().compliant,true);
+});
+
 test('one exhausted condition preserves every later condition allowance', async t => {
   const root = await mkdtemp(join(tmpdir(),'repair-condition-deadlines-'));
   t.after(()=>rm(root,{recursive:true,force:true}));

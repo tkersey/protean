@@ -229,6 +229,21 @@ function resources(tasks, costModel) {
     cost_model:costModel.id ?? costModel.kind};
 }
 
+function initialPresentation(report) {
+  const trace = report?.adjudication;
+  const attempts = trace?.delivery;
+  if (!attempts?.length || attempts.some(a => a.preparation_cut == null)) return null;
+  const first = attempts.reduce((a, b) => BigInt(a.preparation_cut) <= BigInt(b.preparation_cut) ? a : b);
+  const sameCut = attempts.filter(a => BigInt(a.preparation_cut) === BigInt(first.preparation_cut));
+  if (sameCut.some(a => a.prepared_sha256 !== first.prepared_sha256)) return null;
+  const confirmed = sameCut.find(a => a.delivery === 'confirmed');
+  if (!confirmed) return null;
+  if (report.effective_condition === 'ordinary') return confirmed.selected_view === null;
+  if (!report.bootstrap?.view || !trace.projection) return false;
+  return confirmed.selected_view === report.bootstrap.view.id &&
+    trace.projection.exposures.some(e => e.id === confirmed.id && e.rendered);
+}
+
 export function gradeCondition(condition, tasks, costModel) {
   const author = tasks.find(t=>t.subject.phase === 'author')?.report;
   const diagnostic = tasks.find(t=>t.subject.phase === 'diagnostic')?.report;
@@ -237,12 +252,14 @@ export function gradeCondition(condition, tasks, costModel) {
   const cases = transfer.map(t=>{
     const r = t.report, grade = r?.grading, trace = r?.adjudication, projection = trace?.projection;
     const bound = trace?.report_bound === true;
-    const compliant = Array.isArray(r?.arm_violations) && !r.arm_violations.length &&
-      (!projection || projection.one_computed_block === true);
+    const initial = initialPresentation(r);
+    const compliant = r?.arm_violations?.length || projection?.one_computed_block === false ? false :
+      Array.isArray(r?.arm_violations) ? initial : null;
     const citedProjection = projection && grade?.answer?.support?.some(ref=>
       ref.kind === projection.result.kind && ref.id === projection.result.id);
     return {case_id:t.subject.case_id,state:t.state,task_report:t.file,answer:grade?.answer?.outcome ?? null,
       grading_errors:grade?.errors ?? null,errors:r?.errors ?? [],
+      initial_presentation_confirmed:initial,
       correct:bound ? grade?.outcome_correct ?? null : null, supported:bound ? grade?.supported ?? null : null,
       unsupported_exhaustion:grade?.unsupported_exhaustion ?? null, compliant:r ? compliant : null,
       transfer_bound:trace?.transfer_bound ?? null,ordinary_fallback:trace?.ordinary_fallback ?? null,
@@ -259,7 +276,8 @@ export function gradeCondition(condition, tasks, costModel) {
   const supportedUses = cases.filter(c=>c.state === 'completed' && c.supported && c.cited_projection &&
     c.transfer_bound && c.exposed_computed && c.semantic_judgment === 'supported' &&
     c.compliant && c.ordinary_fallback === false);
-  const authorCompliant = Array.isArray(author?.arm_violations) && !author.arm_violations.length &&
+  const initialAuthor = initialPresentation(author);
+  const authorCompliant = initialAuthor === true && Array.isArray(author?.arm_violations) && !author.arm_violations.length &&
     author.adjudication?.uses?.some(use => use.program.id === author.adjudication.candidate?.program.id &&
       use.one_computed_block && use.model_start && use.model_select && use.canonical_input);
   const demonstrated = authored && authorCompliant && collision?.distinction_preserved === true &&
@@ -267,7 +285,8 @@ export function gradeCondition(condition, tasks, costModel) {
   return {repetition:condition.repetition,arm:condition.arm,planned_cases:condition.downstream.length,cases,
     author_report:tasks.find(t=>t.subject.phase === 'author')?.file ?? null,
     diagnostic_report:tasks.find(t=>t.subject.phase === 'diagnostic')?.file ?? null,
-    authoring_attempted:!!author,candidate_admitted:!!author?.adjudication?.candidate,authored_and_applied:authored,
+    authoring_attempted:!!author,author_initial_presentation_confirmed:initialAuthor,
+    candidate_admitted:!!author?.adjudication?.candidate,authored_and_applied:authored,
     authoring_state:tasks.find(t=>t.subject.phase === 'author')?.state ?? null,
     nomination:author?.nomination?.status ?? null,nomination_error:author?.nomination_error ?? null,
     diagnosis:author?.nomination?.diagnosis ?? null,authoring_errors:author?.errors ?? [],

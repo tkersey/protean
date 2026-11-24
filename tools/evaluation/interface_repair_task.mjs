@@ -298,7 +298,8 @@ export async function executeRepairTask(options, {Client = RecurrenceDriver, scr
       }
       try {
         report.adjudication = adjudicateRepairTrace({archive: finalArchive, application, observations,
-          bootstrap: report.bootstrap, specimen, summary, nomination: report.nomination, candidate});
+          bootstrap: report.bootstrap, specimen, summary, nomination: report.nomination, candidate,
+          lossySourceDigest: plan.sources.lossy.sha256});
         if (scripted) {
           report.controlled_application_path = report.adjudication.authored_and_applied;
           report.adjudication.authored_and_applied = false;

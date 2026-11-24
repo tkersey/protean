@@ -231,29 +231,36 @@ export function gradeAnswer(summary, specimen, exposure) {
     errors.push('wrong_subject');
   if (answer.outcome !== expected.outcome) errors.push('wrong_outcome');
   const outcome_correct = errors.length === 0, paths = new Set();
+  let unadjudicatedPayload = false;
+  if (!answer.support.length) errors.push('missing_support');
   if (exposure == null) errors.push('unverified_exposure');
   else for (const cited of answer.support) {
     const matches = exposure.filter(row => isDeepStrictEqual(row.ref, cited));
     if (!matches.length) errors.push('unexposed_support');
-    for (const match of matches) for (const path of match.paths) paths.add(path);
+    for (const match of matches) {
+      for (const path of match.paths) paths.add(path);
+      if (match.semantic_judgment === 'unestablished' && !match.known_lossy) unadjudicatedPayload = true;
+    }
   }
+  const missingEvidence = [];
   let explanation_verified = null;
-  if (exposure != null && !paths.has('scan.json')) errors.push('unsupported_declaration');
+  if (exposure != null && !paths.has('scan.json')) missingEvidence.push('unsupported_declaration');
   if (answer.outcome === counterexample && exposure != null) {
-    if (!expected.witnesses.some(witness => paths.has(witness.path))) errors.push('unsupported_witness');
+    if (!expected.witnesses.some(witness => paths.has(witness.path))) missingEvidence.push('unsupported_witness');
   } else if (answer.outcome === exhausted && exposure != null) {
     if (!expected.domain.known || expected.domain.members.some(member =>
-      !expected.covered[member]?.some(path => paths.has(path)))) errors.push('unsupported_coverage');
-    if (expected.paths.some(path => !paths.has(path))) errors.push('unexamined_visit');
+      !expected.covered[member]?.some(path => paths.has(path)))) missingEvidence.push('unsupported_coverage');
+    if (expected.paths.some(path => !paths.has(path))) missingEvidence.push('unexamined_visit');
   } else if (answer.outcome === incomplete && expected.outcome === incomplete) {
     explanation_verified = checkExplanation(answer.explanation, expected);
     if (explanation_verified !== true) errors.push(explanation_verified === null ?
       'unadjudicated_explanation' : 'incorrect_explanation');
     if (exposure != null && expected.domain.known && expected.valid_visit_paths.some(path => !paths.has(path)))
-      errors.push('unexamined_visit');
+      missingEvidence.push('unexamined_visit');
   }
+  if (missingEvidence.length) errors.push(...(unadjudicatedPayload ? ['unadjudicated_payload'] : missingEvidence));
   const supported = !errors.length || (errors.every(error =>
-    error === 'unverified_exposure' || error === 'unadjudicated_explanation') ? null : false);
+    error === 'unverified_exposure' || error === 'unadjudicated_explanation' || error === 'unadjudicated_payload') ? null : false);
   return {answer, outcome_correct, supported, explanation_verified,
     unsupported_exhaustion: answer.outcome !== exhausted ? false : supported === null ? null : !supported,
     errors: [...new Set(errors)]};

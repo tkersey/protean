@@ -204,7 +204,7 @@ function execution(archive, programs, values, specimen, sourceRefs, programRef, 
   return {program, actual, output, payloadSchema, schemaKind, proof, semantic};
 }
 
-function projectionUse(archive, view, programs, values, specimen, sourceRefs, attempts, actions) {
+function projectionUse(archive, view, programs, values, specimen, sourceRefs, attempts, actions, lossySourceDigest) {
   const p = some(view.raw[3][3]);
   if (!p) return null;
   const [resultRef, workRef, programRef, inputRef] = p;
@@ -236,6 +236,7 @@ function projectionUse(archive, view, programs, values, specimen, sourceRefs, at
   return {view: viewReference, program: ref('program', digest(programRef)), input: ref('value', digest(inputRef)),
     result: resultReference, work: ref('work', hex(work[1])), consumer: ref('observation', actual[0][1]),
     canonical_input: proof, payload: renderedValue(output[1]), payload_schema_sha256: payloadSchema, schema_kind: schemaKind,
+    known_lossy: digest(result.program.raw[3][1]) === lossySourceDigest,
     ...semantic, one_computed_block: output[0][1].length === 1 && output[0][1][0].tag === 1,
     model_start: started ? {attempt_id: started.attempt_id, call_id: started.call_id, cut: started.cut} : null,
     model_select: selection ? {attempt_id: selection.attempt_id, call_id: selection.call_id, cut: selection.cut} : null,
@@ -266,7 +267,7 @@ function decisionSupport(archive, application, specimen, sourceRefs, values, int
   for (const use of uses) {
     const requests = use.exposures.filter(e => visibleAttempts.has(e.id) && e.delivery === 'confirmed' && e.rendered);
     if (requests.length) exposure.push({ref: use.result, paths: use.paths, semantic_judgment: use.semantic_judgment,
-      schema_sha256: use.payload_schema_sha256, value: use.payload, requests: requests.map(e => ({
+      known_lossy: use.known_lossy, schema_sha256: use.payload_schema_sha256, value: use.payload, requests: requests.map(e => ({
         attempt_id: e.id, prepared_sha256: e.prepared_sha256, input_index: e.input_index}))});
   }
   const sourcePaths = new Map(Object.entries(sourceRefs).map(([path, value]) => [value.id, path]));
@@ -362,7 +363,7 @@ function decisionSupport(archive, application, specimen, sourceRefs, values, int
 }
 
 export function adjudicateRepairTrace({archive, application, observations = [], bootstrap, specimen, summary,
-  nomination, candidate: frozen}) {
+  nomination, candidate: frozen, lossySourceDigest}) {
   const task = hex(archive.task.id), rows = (kind, schema) => inventory(archive, kind, schema)
     .filter(row => hex(row.raw[1]) === task);
   const programs = new Map(rows(8, 'workspace_program').map(row => [digest(row.raw[2]), row]));
@@ -383,7 +384,7 @@ export function adjudicateRepairTrace({archive, application, observations = [], 
   const candidate = build ? {...material(archive, programs.get(nomination.program.id)), author_task: task,
     build_attempt: build.attempt_id, build_call: build.call_id, build_result_cut: build.cut} : null;
   const uses = rows(11, 'workspace_view').map(row =>
-    projectionUse(archive, row, programs, values, specimen, sourceRefs, attempts, actions)).filter(Boolean);
+    projectionUse(archive, row, programs, values, specimen, sourceRefs, attempts, actions, lossySourceDigest)).filter(Boolean);
   const projected = uses.find(v => same(v.view, bootstrap?.view) && same(v.result, bootstrap?.result) &&
     same(v.program, bootstrap?.program) && same(v.input, bootstrap?.input) && same(v.work, bootstrap?.work) &&
     same(v.consumer, bootstrap?.consumer));
@@ -394,7 +395,7 @@ export function adjudicateRepairTrace({archive, application, observations = [], 
   const applied = candidate && uses.find(v => same(v.program, candidate.program) && v.canonical_input &&
     v.model_start && v.model_select && BigInt(v.model_start.cut) > BigInt(build.cut) &&
     BigInt(v.model_select.cut) > BigInt(v.model_start.cut) && v.exposures.some(e =>
-      e.delivery === 'confirmed' && e.input_index !== null && e.preparation_cut !== null && BigInt(e.preparation_cut) >= BigInt(v.model_select.cut)));
+      e.delivery === 'confirmed' && e.rendered && e.preparation_cut !== null && BigInt(e.preparation_cut) >= BigInt(v.model_select.cut)));
   const builtPrograms = new Set(builds.filter(b => b.disposition === 'admitted').map(b => b.program?.id));
   const work = inventory(archive, 9, 'workspace_work').flatMap(({raw}) => {
     const program = hex(raw[8]);
