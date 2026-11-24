@@ -722,10 +722,10 @@ export function decisionSupport(archive, application, specimen, sourceRefs, valu
       remember(item.value, item.path);
     }
   };
-  const inputEvidence = (i, kind, wanted, complete) => {
+  const inputEvidence = (i, kind, wanted, complete, key) => {
     note(routes, kind, i, {ref:wanted});
     if (!complete) return;
-    covered.add(wanted.id);
+    covered.add(key);
     credit(wanted, primary);
     embedded({schema_kind:'ScanEvidence', semantic_judgment:'supported', paths:[...primary],
       payload:renderedValue(canonicalEvidence(specimen,sourceRefs))});
@@ -734,6 +734,7 @@ export function decisionSupport(archive, application, specimen, sourceRefs, valu
     const item = wanted?.kind === 'source' ? bySource.get(wanted.id) : wanted?.kind === 'value' && byValue.get(wanted.id);
     const computed = !item && wanted?.kind === 'value' && computation.get(wanted.id);
     if (!item && !computed) { note(unresolved, kind, i, {ref: wanted}); return; }
+    const key = computed ? 'value' + (computed.input ? computed.use.input.id : computed.use.result.id) : wanted.kind + wanted.id;
     let text, evidenceStart;
     if (item) text = wanted.kind === 'source' ? expectedFiles.get(item.path) : JSON.stringify(item.text);
     else {
@@ -745,7 +746,7 @@ export function decisionSupport(archive, application, specimen, sourceRefs, valu
           if (selectedBlock.kind === 'judgment' && raw[4][0] === 3 && !Object.hasOwn(selectedBlock,'slice') &&
               same(selectedBlock.provenance,ref('provenance',digest(raw[3][3]))) &&
               samePresentedValue(selectedBlock.schema,displayedSchema(archive.object(raw[3][1]))) &&
-              samePresentedValue(selectedBlock.value,value)) inputEvidence(i,kind,wanted,true);
+              samePresentedValue(selectedBlock.value,value)) inputEvidence(i,kind,wanted,true,key);
           else note(unresolved,kind,i,{ref:wanted});
           return;
         }
@@ -761,7 +762,7 @@ export function decisionSupport(archive, application, specimen, sourceRefs, valu
     const bytes = Buffer.from(text), range = pageRange(page, bytes);
     if (!range) { note(unresolved, kind, i, {ref: wanted}); return; }
     const [start, end] = range;
-    const complete = coverRange(pages, wanted.kind + wanted.id, start, end,
+    const complete = coverRange(pages, key, start, end,
       evidenceStart === undefined ? bytes.length : bytes.length - 1, evidenceStart);
     if (item) {
       if (wanted.kind === 'source' || item.start === 0 && item.end === files.get(item.path).bytes.length)
@@ -771,7 +772,7 @@ export function decisionSupport(archive, application, specimen, sourceRefs, valu
       if (wanted.kind === 'source') markSource(i, kind, item.path, start, end);
       else {
         const ranges = complete ? [[0, item.end - item.start]] :
-          acquiredPageRanges(Buffer.from(item.text), true, pages.get(wanted.kind + wanted.id));
+          acquiredPageRanges(Buffer.from(item.text), true, pages.get(key));
         for (const [lo, hi] of ranges) {
           const start = item.start + lo, end = item.start + hi;
           markSource(i, kind, item.path, start, end);
@@ -782,13 +783,13 @@ export function decisionSupport(archive, application, specimen, sourceRefs, valu
       return;
     }
     const {input, use} = computed;
-    if (complete) covered.add(wanted.id);
-    else if (input) partialComputations.set(wanted.id, {kind, i, wanted});
-    if (input) return inputEvidence(i,kind,wanted,complete);
+    if (complete) covered.add(key);
+    else if (input) partialComputations.set(wanted.id, {kind, i, wanted, key});
+    if (input) return inputEvidence(i,kind,wanted,complete,key);
     const alreadyShown = presented.has(use.result.id);
     if (alreadyShown) {
       if (!use.one_computed_block) note(unresolved, kind, i, {ref: wanted});
-    } else if (!complete) partialComputations.set(wanted.id, {kind, i, wanted});
+    } else if (!complete) partialComputations.set(wanted.id, {kind, i, wanted, key});
     else if (use.semantic_judgment === 'supported') note(routes, kind, i, {ref: wanted});
     else note(unresolved, kind, i, {ref: wanted});
     const citation = container ?? wanted;
@@ -812,7 +813,7 @@ export function decisionSupport(archive, application, specimen, sourceRefs, valu
         requests: [{attempt_id: request.id, prepared_sha256: request.prepared_sha256, input_index: request.input_index}]};
       fromProjection(description, use);
       presented.set(use.result.id, description);
-      if (use.one_computed_block) covered.add(use.result.id);
+      if (use.one_computed_block) covered.add('value' + use.result.id);
       embedded(use, use);
     }
     const selection = selectedPresentation(i.attempt.selected_view, i.attempt.body);
@@ -1001,8 +1002,8 @@ export function decisionSupport(archive, application, specimen, sourceRefs, valu
       } else note(unresolved, 'other_work_output', i);
     }
   }
-  for (const {kind, i, wanted} of partialComputations.values())
-    if (!covered.has(wanted.id)) note(unresolved, kind, i, {ref: wanted});
+  for (const {kind, i, wanted, key} of partialComputations.values())
+    if (!covered.has(key)) note(unresolved, kind, i, {ref: wanted});
   const primaryMissing = [...missing].filter(path => primary.has(path));
   for (const {value, path} of handles.values()) if (completePaths.has(path))
     credit(value, path === 'scan.json' ? [path, ...primaryMissing] : [path]);

@@ -467,6 +467,34 @@ test('unfamiliar projected results retain verified copy ancestry after projector
   assert(unbound.unresolved.some(row => row.kind === 'unbound_alias'));
 });
 
+test('a partial preview of a verified result copy is resolved by presentation of the result in either order', () => {
+  for (const presentedFirst of [false, true]) {
+    const f = decisionFixture(), selected = 'b'.repeat(64), descriptor = {root: '0', types: [{tag:'text',value:{}}]};
+    const use = {input: f.input.handle, result: f.result.handle, paths: [], one_computed_block: true, payload: 'value',
+      payload_schema_sha256: 'schema', payload_descriptor: descriptor, schema_kind: 'other', semantic_judgment: 'unestablished',
+      exposures: [{id: presentedFirst ? '1' : '2', rendered: true, model_response: true, delivery: 'confirmed'}]};
+    const present = () => f.step('program', {tag: 'describe', value: {section: 'components'}}, {},
+      {selected, block: {kind: 'computed', schema_identity: 'schema', schema: descriptor, result: use.result, value: use.payload}});
+    const alias = f.value('copy', f.result.text, [3, [f.witness.raw[2], f.result.raw[2]], null, null, {tag: 0}]);
+    const copy = () => f.step('context', {tag: 'materialize', value: {sources: [f.witness.handle],
+      input: {tag: 'value', value: {tag: 'reference', value: use.result}}}},
+    {value: alias.handle, preview: f.page(JSON.stringify(alias.text), 0, 3)});
+    if (presentedFirst) { present(); copy(); } else { copy(); present(); }
+    assert.deepEqual(f.support([use]).unresolved, []);
+  }
+});
+
+test('a partial page of a verified canonical-input copy is covered by the remaining pages of the original', () => {
+  const f = decisionFixture(), use = {canonical_input: true, input: f.input.handle, result: f.result.handle, exposures: []};
+  const alias = f.value('input-copy', f.input.text, [3, [f.witness.raw[2], f.input.raw[2]], null, null, {tag: 0}]);
+  const text = JSON.stringify(f.input.text);
+  f.step('context', {tag: 'materialize', value: {sources: [f.witness.handle],
+    input: {tag: 'value', value: {tag: 'reference', value: f.input.handle}}}}, {value: alias.handle, preview: f.page(text, 0, 3)});
+  assert(f.support([use]).unresolved.some(row => row.ref?.id === alias.handle.id));
+  f.expand(f.input.handle, text, 3);
+  assert.deepEqual(f.support([use]).unresolved, []);
+});
+
 test('a host-limited recursive result preview preserves other verified source evidence', () => {
   const f = decisionFixture();
   f.result.raw[3][1] = f.put(encodeSchema({types: [{seq: 0}], root: 0}));
