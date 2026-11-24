@@ -266,6 +266,7 @@ export function gradeAnswer(summary, specimen, exposure, evidenceComplete = expo
     errors.push('wrong_subject');
   if (answer.outcome !== expected.outcome) errors.push('wrong_outcome');
   const outcome_correct = errors.length === 0, paths = new Set();
+  const ranges = new Map(), declaredMissing = new Set();
   let unadjudicatedPayload = false, allCitationsInsufficient = answer.support.length > 0;
   if (!answer.support.length) errors.push('missing_support');
   if (exposure == null) errors.push('unverified_exposure');
@@ -276,7 +277,26 @@ export function gradeAnswer(summary, specimen, exposure, evidenceComplete = expo
       allCitationsInsufficient = false;
     for (const match of matches) {
       for (const path of match.paths) paths.add(path);
+      if (match.range) {
+        const {path, start, end} = match.range, size = Object.hasOwn(specimen.files, path) ? Buffer.byteLength(specimen.files[path]) : -1;
+        if (Number.isSafeInteger(start) && Number.isSafeInteger(end) && start >= 0 && start <= end && end <= size) {
+          if (!ranges.has(path)) ranges.set(path, []);
+          ranges.get(path).push([start, end]);
+          if (path === 'scan.json') for (const missing of match.declared_missing ?? []) declaredMissing.add(missing);
+        }
+      }
       if (match.semantic_judgment === 'unestablished' && !match.known_lossy) unadjudicatedPayload = true;
+    }
+  }
+  for (const [path, parts] of ranges) {
+    let covered = 0;
+    for (const [start, end] of parts.sort((a, b) => a[0] - b[0])) {
+      if (start > covered) break;
+      covered = Math.max(covered, end);
+    }
+    if (covered === Buffer.byteLength(specimen.files[path])) {
+      paths.add(path);
+      if (path === 'scan.json') for (const missing of declaredMissing) paths.add(missing);
     }
   }
   const missingEvidence = [];

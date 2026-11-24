@@ -25,12 +25,47 @@ const Plan = struct {
     program_sha256: ?C.Text(64),
 };
 
+pub const Cut = enum {
+    complete,
+    build,
+    consumer,
+    acquisition,
+    start,
+    primary,
+    selection,
+    not_sent,
+};
+const BuildMetrics = struct {
+    build_commands: u32 = 0,
+    rejected_build_commands: ?u32 = 0,
+    elapsed_ns: ?u64 = 0,
+
+    fn json(self: @This(), a: Allocator) !Json.Value {
+        var out = Json.object();
+        try Json.put(a, &out, "build_commands", try Json.number(a, self.build_commands));
+        try Json.put(a, &out, "rejected_build_commands", if (self.rejected_build_commands) |n|
+            try Json.number(a, n)
+        else
+            .null);
+        try Json.put(a, &out, "build_elapsed_nanoseconds", if (self.elapsed_ns) |n|
+            Json.string(try std.fmt.allocPrint(a, "{d}", .{n}))
+        else
+            .null);
+        try Json.put(a, &out, "compiler_nanoseconds", if (self.build_commands == 0)
+            Json.string("0")
+        else
+            .null);
+        return out;
+    }
+};
+
 pub const Session = struct {
     expected: ?[32]u8 = null,
     source_path: ?[]const u8 = null,
     task: ?[16]u8 = null,
     started: bool = false,
     ready: bool = false,
+    metrics: ?BuildMetrics = null,
     fixture_used: bool = false,
     downstream_task: ?[16]u8 = null,
     selected: ?struct {
@@ -47,7 +82,7 @@ pub const Session = struct {
         worker: *native.testing.Worker,
         a: Allocator,
         params: Json.Value,
-        selection_only: bool,
+        cut: Cut,
     ) !Json.Value {
         const expected = self.expected orelse return error.BootstrapNotEnabled;
         if (self.started) return error.InitialCutRequired;
@@ -67,42 +102,43 @@ pub const Session = struct {
         const env: *environment.State = @ptrCast(@alignCast(service.profile.environment orelse
             return error.MissingConfiguration));
         try validatePlan(a, plan, source, env);
-        try requireCut(service, a, task, plan);
+        const remaining = try requireCut(service, a, task, plan, expected);
         self.started = true;
         self.task = task;
+        self.metrics = .{};
         if (plan.phase == .downstream) self.downstream_task = task;
-        if (plan.condition == .ordinary) return self.ordinary(service, a, task);
-        env.initial_selection = .{ .task = task };
-        errdefer env.initial_selection = null;
-        const read = try initialConsumer(service, worker, a, task);
         var run: Bootstrap = .{
             .a = a,
             .service = service,
             .task = task,
             .snapshot = try snapshotRef(a, service.profile.bytes),
-            .interface = read.interface,
-            .consumer = read.reference,
+            .prefix = try progressPrefix(a, expected),
+            .cut = cut,
+            .remaining = remaining,
         };
-        const output = try self.buildAndSelect(&run, env, plan, source);
-        if (plan.phase != .diagnostic and !selection_only)
-            try self.prepare(service, worker, a);
+        var output = if (plan.condition == .ordinary)
+            try self.ordinary(&run)
+        else
+            try self.projected(&run, worker, env, plan, source);
+        try Json.put(a, &output, "build_metrics", try self.metrics.?.json(a));
         return output;
     }
 
-    fn ordinary(self: *@This(), service: *Service, a: Allocator, task: [16]u8) !Json.Value {
-        var run: Bootstrap = .{
-            .a = a,
-            .service = service,
-            .task = task,
-            .snapshot = try snapshotRef(a, service.profile.bytes),
-        };
-        const scan = try sources.acquireScan(a, &run);
+    pub fn buildMetrics(self: *const @This(), a: Allocator, task: [16]u8) !Json.Value {
+        if (self.task == null or !std.meta.eql(self.task.?, task)) return .null;
+        return if (self.metrics) |m| m.json(a) else .null;
+    }
+
+    fn ordinary(self: *@This(), run: *Bootstrap) !Json.Value {
+        const a = run.a;
+        const scan = try sources.acquireScan(a, run);
         var output = try run.evidence(scan);
         const absent = [_][]const u8{
             "program", "input_schema", "output_schema", "consumer", "input",
             "work",    "result",       "view",          "paired",
         };
         for (absent) |name| try Json.put(a, &output, name, .null);
+        if (run.remaining != 0) return error.InitialCutRequired;
         const key = try receiptKey(a, self.expected.?, "ordinary");
         const manifest = try run.acquireAt("scan.json", key) orelse
             return error.MissingScanDeclaration;
@@ -112,23 +148,41 @@ pub const Session = struct {
         return output;
     }
 
-    fn buildAndSelect(
+    fn projected(
         self: *@This(),
         run: *Bootstrap,
+        worker: *native.testing.Worker,
         env: *environment.State,
         plan: Plan,
         source: []const u8,
     ) !Json.Value {
+        const built = try run.build(source, &self.metrics.?);
+        if (run.cut == .build) return error.FixtureCut;
+        env.initial_selection = .{ .task = run.task };
+        defer env.initial_selection = null;
+        const read = try initialConsumer(run.service, worker, run.a, run.task, run.remaining);
+        if (run.cut == .consumer) return error.FixtureCut;
+        run.interface = read.interface;
+        run.consumer = read.reference;
+        const output = try self.selectProgram(run, env, plan, built);
+        if (plan.phase != .diagnostic and run.cut != .selection)
+            try self.prepare(run.service, worker, run.a, run.cut == .not_sent);
+        return output;
+    }
+
+    fn selectProgram(
+        self: *@This(),
+        run: *Bootstrap,
+        env: *environment.State,
+        plan: Plan,
+        built: Json.Value,
+    ) !Json.Value {
         const a = run.a;
-        const built = try run.command(.{ .program = .{ .build = .{
-            .source = .{ .json_text = .{ .bytes = source } },
-            .source_kind = .source_records,
-            .exposures = .{ .items = &.{} },
-        } } });
         const program = try ref(a, built, "program");
         const schema = try ref(a, built, "input_schema");
         try run.admitProgram(program, plan);
         var output = try run.project(program, schema, .primary);
+        if (run.cut == .primary) return error.FixtureCut;
         try Json.put(a, &output, "program", try field(built, "program"));
         try Json.put(a, &output, "input_schema", try field(built, "input_schema"));
         try Json.put(a, &output, "output_schema", try field(built, "result_schema"));
@@ -137,6 +191,7 @@ pub const Session = struct {
             try run.project(program, schema, .paired)
         else
             .null);
+        if (run.remaining != 0) return error.InitialCutRequired;
         try self.activate(run, env, plan.phase, &output);
         return output;
     }
@@ -193,6 +248,7 @@ pub const Session = struct {
         service: *Service,
         worker: *native.testing.Worker,
         a: Allocator,
+        not_sent: bool,
     ) !void {
         const selected = self.selected orelse return error.BootstrapRequired;
         const env: *environment.State = @ptrCast(@alignCast(service.profile.environment.?));
@@ -202,12 +258,13 @@ pub const Session = struct {
         var handoff = try capturedInitialContext(service, a, selected.task, view);
         if (handoff == .pending or handoff == .not_sent) {
             for (0..16384) |_| {
-                if (try stepSetup(service, worker, a, selected.task, true)) break;
+                if (try stepSetup(service, worker, a, selected.task, true, not_sent)) break;
             } else return error.InitialHandoffMissing;
             handoff = try capturedInitialContext(service, a, selected.task, view);
         }
         switch (handoff) {
             .ready => self.ready = true,
+            .failed => return error.InitialPreparationFailed,
             .pending => return error.InitialHandoffMissing,
             .rejected => |reason| return switch (reason) {
                 .oversized => error.ProjectionPreparationOversized,
@@ -228,6 +285,7 @@ pub const Session = struct {
             var receipt = found;
             defer receipt.deinit();
             _ = try receiptObject(receipt.value, task, .value);
+            self.metrics = .{};
             self.started = true;
             self.downstream_task = task;
             self.ready = true;
@@ -247,6 +305,7 @@ pub const Session = struct {
             const run = view.value.description.projection orelse
                 return error.InvalidBootstrapReceipt;
             self.started = true;
+            self.metrics = .{ .build_commands = 1, .elapsed_ns = null };
             self.ready = try capturedInitialContext(service, a, task, id) == .ready;
             if (phase == .downstream) self.downstream_task = task;
             self.selected = .{
@@ -258,6 +317,17 @@ pub const Session = struct {
             };
             return;
         }
+        const key = try std.fmt.allocPrint(a, "{s}1", .{try progressPrefix(a, digest)});
+        var first = (try service.operationLookup(a, key)) orelse return;
+        defer first.deinit();
+        if (!std.meta.eql(first.value.task, task) or first.value.method != .workspace)
+            return error.InvalidBootstrapReceipt;
+        const kind = first.value.workspace_kind orelse return error.InvalidBootstrapReceipt;
+        self.metrics = switch (kind) {
+            .program => .{ .build_commands = 1, .elapsed_ns = null },
+            .value => .{},
+            else => return error.InvalidBootstrapReceipt,
+        };
     }
 };
 
@@ -279,6 +349,7 @@ fn receiptKey(a: Allocator, digest: [32]u8, label: []const u8) ![]u8 {
 
 const Handoff = union(enum) {
     pending,
+    failed,
     ready,
     rejected: types.ProjectionRejectionCode,
     unknown,
@@ -316,9 +387,9 @@ fn capturedInitialContext(service: *Service, a: Allocator, task: [16]u8, view: [
         .settled_reply => |v| v.attempt,
         .admitted => |v| switch (v) {
             .reply => |reply| reply.attempt,
-            .cancelled => return error.InitialPreparationFailed,
+            .cancelled => return .failed,
         },
-        .awaiting => return error.InitialPreparationFailed,
+        .awaiting => return .failed,
     };
     const bytes = (try store.recordBytes(a, "attempt", id, task)) orelse
         return error.InvalidBootstrapReceipt;
@@ -365,7 +436,7 @@ fn captureOutcome(
             break :blk research.view;
         },
         .projection_rejected => |rejected| rejected.view,
-        .rejected => return error.InitialPreparationFailed,
+        .rejected => return .failed,
     };
     if (bound.kind != .view or !std.mem.eql(u8, bound.id.bytes, expected))
         return error.InvalidBootstrapReceipt;
@@ -430,23 +501,70 @@ fn validatePlan(
     }
 }
 
-fn requireCut(service: *Service, a: Allocator, task: [16]u8, plan: Plan) !void {
+fn progressPrefix(a: Allocator, digest: [32]u8) ![]u8 {
+    return std.fmt.allocPrint(a, "ir-{s}-", .{&std.fmt.bytesToHex(digest, .lower)});
+}
+
+fn requireCut(service: *Service, a: Allocator, task: [16]u8, plan: Plan, digest: [32]u8) !u64 {
     const tasks = try service.namespace.store.taskIds(a, false);
     if (tasks.len != 1 or !std.meta.eql(tasks[0], task)) return error.InitialCutRequired;
-    var receipt = (try service.operationLookup(a, plan.submission_id.bytes)) orelse
+    var submitted = (try service.operationLookup(a, plan.submission_id.bytes)) orelse
         return error.ChangedSubmission;
-    defer receipt.deinit();
+    defer submitted.deinit();
     var parent = try service.task(a, task);
     defer parent.deinit();
-    if (receipt.value.method != .submit or !std.meta.eql(receipt.value.task, task) or
-        receipt.value.revision != parent.value.revision or parent.value.inference_attempts != 0 or
-        parent.value.terminal()) return error.InitialCutRequired;
+    if (submitted.value.method != .submit or !std.meta.eql(submitted.value.task, task) or
+        parent.value.inference_attempts != 0 or parent.value.terminal())
+        return error.InitialCutRequired;
     const bytes = try service.namespace.store.object(a, parent.value.input, null);
     var input = try C.decodeOwned(types.Input, a, bytes);
     defer input.deinit();
     const expected = try native.client.identifier(32, Json.string(plan.prompt_sha256.bytes));
     if (!std.meta.eql(native.testing.digest(input.value.task.bytes), expected))
         return error.ChangedSubmission;
+    if (submitted.value.revision == parent.value.revision) return 0;
+    const prefix = try progressPrefix(a, digest);
+    const first = try std.fmt.allocPrint(a, "{s}1", .{prefix});
+    var started = (try service.operationLookup(a, first)) orelse return error.InitialCutRequired;
+    defer started.deinit();
+    const kind: @FieldType(wc.Ref, "kind") = if (plan.condition == .ordinary) .value else .program;
+    _ = try receiptObject(started.value, task, kind);
+    if (started.value.revision != try std.math.add(u64, submitted.value.revision, 1))
+        return error.InitialCutRequired;
+    return setupOperations(service, a, task, prefix, submitted.value);
+}
+
+fn setupOperations(
+    service: *Service,
+    a: Allocator,
+    task: [16]u8,
+    prefix: []const u8,
+    submitted: State.Receipt,
+) !u64 {
+    var count: u64 = 0;
+    const store = &service.namespace.store;
+    var rows = try store.database.prepare(
+        "SELECT o.body FROM operations p JOIN objects o ON o.digest=p.receipt WHERE p.task=?",
+        &.{.{ .blob = &task }},
+    );
+    defer rows.deinit();
+    while (try rows.step() == .row) {
+        var saved = try C.decodeOwned(State.Receipt, a, try rows.bytes(0));
+        defer saved.deinit();
+        const receipt = saved.value;
+        if (!std.meta.eql(receipt.task, task)) return error.InvalidBootstrapReceipt;
+        switch (receipt.method) {
+            .submit => if (!std.meta.eql(receipt.id, submitted.id)) return error.InitialCutRequired,
+            .@"resume" => {},
+            .workspace => {
+                if (!std.mem.startsWith(u8, receipt.client_operation_id.bytes, prefix))
+                    return error.InitialCutRequired;
+                count += 1;
+            },
+            else => return error.InitialCutRequired,
+        }
+    }
+    return count;
 }
 
 const Consumer = struct { reference: wc.Ref, interface: native.workspace.ConsumerInterface };
@@ -477,10 +595,12 @@ fn initialConsumer(
     worker: *native.testing.Worker,
     a: Allocator,
     task: [16]u8,
+    remaining: u64,
 ) !Consumer {
     for (0..16384) |_| {
         if (try observedConsumer(service, a, task)) |found| return found;
-        _ = try stepSetup(service, worker, a, task, false);
+        if (remaining != 0) return error.InitialCutRequired;
+        _ = try stepSetup(service, worker, a, task, false, false);
     }
     return error.MissingInitialConsumer;
 }
@@ -491,6 +611,7 @@ fn stepSetup(
     a: Allocator,
     task: [16]u8,
     accept_preparation: bool,
+    not_sent: bool,
 ) !bool {
     const next = try service.pump(a);
     switch (next) {
@@ -506,6 +627,10 @@ fn stepSetup(
     {
         try service.notSent(a, work);
         return error.UnexpectedSetupWork;
+    }
+    if (prepared and not_sent) {
+        try service.notSent(a, work);
+        return error.FixtureCut;
     }
     worker.start(work, service.profile.authority, service.profile.environment) catch |err| {
         try service.notSent(a, work);
@@ -564,8 +689,15 @@ fn observation(a: Allocator, reply: wc.Reply, command: wc.Command) !Json.Value {
 pub fn programPure(service: *Service, a: Allocator, d: native.workspace.ProgramArtifact) !bool {
     if (d.controller != null or d.exposures.items.len != 0 or d.ports.items.len != 0) return false;
     const store = &service.namespace.store;
-    const source = try store.object(a, d.source, null);
-    const image = try store.object(a, d.image, null);
+    const source = switch (d.source_kind) {
+        .source_records, .source_derivation => try store.object(a, d.source, null),
+        .component_recipe => "",
+        .instrument_model, .instrument_snapshot => return false,
+    };
+    const image = if (d.source_kind == .component_recipe)
+        try store.object(a, d.image, null)
+    else
+        "";
     native.program_construction.requirePure(a, d.source_kind, source, image) catch |err| {
         if (err == error.ImpureSlice or err == error.ImpureProjection) return false;
         return err;
@@ -580,27 +712,67 @@ const Bootstrap = struct {
     snapshot: State.Reference,
     interface: ?native.workspace.ConsumerInterface = null,
     consumer: ?wc.Ref = null,
+    prefix: []const u8,
+    cut: Cut,
+    remaining: u64,
     sequence: u64 = 0,
 
     fn id(self: *@This(), a: Allocator) ![]const u8 {
         self.sequence += 1;
-        return std.fmt.allocPrint(a, "interface-repair-{s}-{d}", .{
-            &std.fmt.bytesToHex(self.task, .lower), self.sequence,
-        });
+        return std.fmt.allocPrint(a, "{s}{d}", .{ self.prefix, self.sequence });
+    }
+
+    fn build(self: *@This(), source: []const u8, metrics: *BuildMetrics) !Json.Value {
+        const resumed = self.remaining != 0;
+        metrics.* = .{ .build_commands = 1, .elapsed_ns = null };
+        const started = std.Io.Clock.awake.now(self.service.io);
+        defer if (!resumed) {
+            const now = std.Io.Clock.awake.now(self.service.io);
+            const elapsed = now.nanoseconds - started.nanoseconds;
+            metrics.elapsed_ns = std.math.cast(u64, elapsed);
+        };
+        return self.command(.{ .program = .{ .build = .{
+            .source = .{ .json_text = .{ .bytes = source } },
+            .source_kind = .source_records,
+            .exposures = .{ .items = &.{} },
+        } } }) catch |err| {
+            metrics.rejected_build_commands = if (err == error.ProjectionBuildRejected) 1 else null;
+            return err;
+        };
+    }
+
+    fn expectReplay(self: *@This(), operation: []const u8, missing: bool) !void {
+        if (self.remaining == 0) return;
+        var saved = (try self.service.operationLookup(self.a, operation)) orelse {
+            if (missing) return;
+            return error.InitialCutRequired;
+        };
+        defer saved.deinit();
+        if (!std.meta.eql(saved.value.task, self.task) or saved.value.method != .workspace)
+            return error.InitialCutRequired;
+        self.remaining -= 1;
     }
 
     fn command(self: *@This(), operation: wc.Command) !Json.Value {
         const id_value = try self.id(self.a);
+        try self.expectReplay(id_value, false);
         const reply = try self.service.workspaceCommand(self.a, id_value, self.task, operation);
         return observation(self.a, reply, operation);
     }
 
     pub fn acquireFile(self: *@This(), path: []const u8) !?sources.Acquired {
-        return self.acquireAt(path, try self.id(self.a));
+        const file = try self.acquireAt(path, try self.id(self.a));
+        if (self.cut == .acquisition) return error.FixtureCut;
+        return file;
     }
 
     fn acquireAt(self: *@This(), path: []const u8, operation: []const u8) !?sources.Acquired {
         const a = self.a;
+        if (self.remaining != 0) {
+            const env: *const environment.State =
+                @ptrCast(@alignCast(self.service.profile.environment.?));
+            try self.expectReplay(operation, env.snapshot.get(path) == null);
+        }
         const reply = try Commands.workspaceCommandFrom(self.service, a, operation, self.task, .{
             .command = .{ .context = .{ .materialize = .{
                 .input = .{ .snapshot = .{
@@ -696,6 +868,7 @@ const Bootstrap = struct {
             .input = .{ .reference = input },
             .policy = .{ .stop = .terminal, .continuation = .owner_scheduled },
         } } });
+        if (self.cut == .start) return error.FixtureCut;
         const work = try ref(self.a, started, "work");
         const result = try self.complete(work);
         try self.checkResult(result);
@@ -722,30 +895,46 @@ const Bootstrap = struct {
         return output;
     }
 
+    fn workSnapshot(self: *@This(), receipt: State.Receipt, index: [32]u8) !State.Reference {
+        if (!std.meta.eql(try receiptObject(receipt, self.task, .work), index))
+            return error.InvalidBootstrapReceipt;
+        return receipt.workspace_observation orelse error.InvalidBootstrapReceipt;
+    }
+
     fn complete(self: *@This(), work: wc.Ref) !wc.Ref {
+        const key = try std.fmt.allocPrint(self.a, "{s}{d}", .{ self.prefix, self.sequence });
+        var start = (try self.service.operationLookup(self.a, key)) orelse
+            return error.InvalidBootstrapReceipt;
+        defer start.deinit();
         const index = try native.client.identifier(32, Json.string(work.id.bytes));
+        var frozen = try self.workSnapshot(start.value, index);
         while (true) { // tiger: event-loop
             var iteration = std.heap.ArenaAllocator.init(self.service.allocator);
             defer iteration.deinit();
-            const scratch = iteration.allocator();
-            var current = try self.service.workspaceWork(scratch, self.task, index);
-            defer current.deinit();
-            if (current.value.outcome_kind == .completed) return .{ .kind = .value, .id = .{
-                .bytes = try self.a.dupe(u8, &std.fmt.bytesToHex(
-                    (current.value.result_value orelse return error.MissingResult).digest,
-                    .lower,
-                )),
-            } };
-            if (current.value.outcome_kind == .failed or current.value.current_port != null)
+            const a = iteration.allocator();
+            const bytes = try self.service.namespace.store.object(a, frozen, null);
+            var saved = try C.decodeOwned(native.workspace.WorkObservation, a, bytes);
+            defer saved.deinit();
+            const current = saved.value.work;
+            if (!std.meta.eql(current.task, self.task) or !std.meta.eql(current.id, index))
+                return error.InvalidBootstrapReceipt;
+            if (current.outcome_kind == .completed) {
+                const result = current.result_value orelse return error.MissingResult;
+                return .{ .kind = .value, .id = .{
+                    .bytes = try self.a.dupe(u8, &std.fmt.bytesToHex(result.digest, .lower)),
+                } };
+            }
+            if (current.outcome_kind == .failed or current.current_port != null)
                 return error.ProjectionWorkFailed;
-            if (current.value.outcome_kind == .cancelled) return error.BootstrapWorkCancelled;
-            _ = try self.service.workspacePump(scratch, try self.id(scratch), self.task, .{
-                .expected = .{
-                    .work = work,
-                    .execution_revision = current.value.execution_revision,
-                    .control_revision = current.value.control_revision,
-                },
-            });
+            if (current.outcome_kind == .cancelled) return error.BootstrapWorkCancelled;
+            const operation = try self.id(a);
+            try self.expectReplay(operation, false);
+            const next = try self.service.workspacePump(a, operation, self.task, .{ .expected = .{
+                .work = work,
+                .execution_revision = current.execution_revision,
+                .control_revision = current.control_revision,
+            } });
+            frozen = try self.workSnapshot(next.receipt, index);
         }
     }
 };

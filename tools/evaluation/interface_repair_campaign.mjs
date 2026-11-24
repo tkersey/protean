@@ -7,7 +7,7 @@ import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {readArchive} from '../../test/protean/native_archive.mjs';
 import {makeRepairCorpus, assessScan, scanContract, taskContract, candidateContract} from './interface_repair.mjs';
-import {RecurrenceDriver, bytesUnder, command, tariffErrors} from './workspace.mjs';
+import {RecurrenceDriver, bytesUnder, command, inferenceArguments, tariffErrors} from './workspace.mjs';
 import {executeRepairTask} from './interface_repair_task.mjs';
 
 const repository = fileURLToPath(new URL('../../', import.meta.url));
@@ -57,6 +57,13 @@ async function exportSources(driver, build) {
   } finally { await rm(scratch,{recursive:true,force:true}); }
 }
 
+function validateEfforts(efforts, selected) {
+  const supported = ['none','minimal','low','medium','high','xhigh','max'];
+  assert(Array.isArray(efforts) && efforts.every(effort=>supported.includes(effort)) &&
+    new Set(efforts).size === efforts.length, 'Invalid approved effort list.');
+  assert(efforts.includes(selected), 'Initial effort is unavailable.');
+}
+
 export function selectRepairProfile(config) {
   assert.equal(config.schema, 'adaptive-agent.configuration.v3');
   const adaptive = config.adaptive;
@@ -64,7 +71,7 @@ export function selectRepairProfile(config) {
   assert.equal(selected.length, 1, 'Select exactly one approved initial profile.');
   const [profile] = selected;
   assert(/^gpt-[0-9]+(?:\.[0-9]+)*-astra$/.test(profile.model), 'Directed repair requires an approved Astra model.');
-  assert(profile.efforts.includes(adaptive.initial_effort), 'Initial effort is unavailable.');
+  validateEfforts(profile.efforts,adaptive.initial_effort);
   return {...profile, efforts:[adaptive.initial_effort], effort_update:false};
 }
 
@@ -120,6 +127,8 @@ async function freezeSubject({root, iteration, arm, phase, specimen, paired, cas
 
 export async function prepareInterfaceRepair({config,directory,binary,driver,applicationPath,study='episode',
   repetitions=1,seconds=600,route='api-key',costModel={kind:'unpriced'}}, deps = {}) {
+  config = structuredClone(config);
+  costModel = structuredClone(costModel);
   assert(['episode','comparison'].includes(study));
   assert(Number.isSafeInteger(repetitions) && repetitions>0 && (study !== 'episode' || repetitions===1));
   assert(Number.isSafeInteger(seconds) && seconds>0 && Number.isSafeInteger(seconds*1000*repetitions*arms.length));
@@ -128,6 +137,7 @@ export async function prepareInterfaceRepair({config,directory,binary,driver,app
     'The approved configuration must allow build and run for the authoring task.');
   validateCostModel(costModel);
   const profile = selectRepairProfile(config);
+  const approvedEfforts = config.adaptive.profiles.find(p=>p.id === profile.id).efforts;
   const ids = await identities({binary,driver},await readFile(applicationPath));
   const build = (deps.describeBuild ?? command)(binary,['describe-build']);
   assert.equal(build.application_assets_sha256,ids.application_sha256);
@@ -175,7 +185,7 @@ export async function prepareInterfaceRepair({config,directory,binary,driver,app
   const campaign_ceiling_ms = conditions.length*(condition_ms+60_000);
   assert(Number.isSafeInteger(campaign_ceiling_ms));
   const plan = {format,suite:'interface-repair',study,seed,repetitions,identities:ids,build,profile,
-    initial_effort:config.adaptive.initial_effort,route,cost_model:costModel,
+    initial_effort:config.adaptive.initial_effort,approved_efforts:approvedEfforts,route,cost_model:costModel,
     approved_tools:{build:config.tools.build,run:config.tools.run},
     condition_ms,campaign_ceiling_ms,
     deadline_scope:'Each condition has its own allowance for setup, authoring, replay and downstream work. The campaign reserves an additional minute per condition for process closure and post-expiry archive measurement. Finalization time is charged and recorded.',
@@ -204,6 +214,8 @@ async function readRepairPlan(directory,options) {
   const plan = JSON.parse(bytes);
   assert.equal(plan.format,format);
   validateCostModel(plan.cost_model);
+  validateEfforts(plan.approved_efforts,plan.initial_effort);
+  assert.deepEqual(plan.profile.efforts,[plan.initial_effort]);
   assert.deepEqual(plan.approved_tools,{build:true,run:true},'Missing original build and run permissions.');
   const applicationBytes = await readFile(options.applicationPath);
   assert.deepEqual(plan.identities,await identities(options,applicationBytes),'Executable, application, evaluator or repository changed.');
@@ -215,6 +227,8 @@ async function readRepairPlan(directory,options) {
   for (const condition of plan.conditions) for (const subject of [condition.author,...condition.downstream].filter(Boolean)) {
     const config = JSON.parse(await validateFile({path:subject.config,sha256:subject.config_sha256}));
     assert.deepEqual(config.adaptive.profiles,[plan.profile]);
+    assert.equal(config.adaptive.initial_profile,plan.profile.id);
+    assert.equal(config.adaptive.initial_effort,plan.initial_effort);
     assert.equal(config.adaptive.snapshot_root,subject.snapshot);
     assert.deepEqual(config.adaptive.skills,[]);
     const author = subject.phase === 'author';
@@ -232,6 +246,22 @@ export async function validateRepairPlan(directory,options) {
   return (await readRepairPlan(directory,options)).plan;
 }
 
+function bootstrapBuild(report) {
+  const observed = report?.bootstrap?.build_metrics ?? report?.bootstrap_build_metrics;
+  const readsOnly = report?.effective_condition === 'ordinary';
+  const beforeBootstrap = report?.errors?.some(error=>error.stage === 'setup');
+  const performed = report?.bootstrap?.program?.kind === 'program' || Boolean(report?.candidate_rejection);
+  const commands = observed?.build_commands ?? (performed ? 1 : readsOnly || beforeBootstrap ? 0 : null);
+  const ns = field => {
+    const raw = observed?.[field];
+    const value = typeof raw === 'string' && /^[0-9]+$/.test(raw) ? Number(raw) : raw;
+    return Number.isSafeInteger(value) && value >= 0 ? value : commands === 0 ? 0 : null;
+  };
+  return {commands, rejected:observed?.rejected_build_commands ??
+    (commands === 0 || report?.bootstrap?.program || (performed && report.candidate_rejection !== 'ProjectionBuildRejected') ? 0 : null),
+    elapsed:ns('build_elapsed_nanoseconds'),compiler:ns('compiler_nanoseconds')};
+}
+
 function resources(tasks, costModel) {
   const started = tasks.filter(t=>t.state !== 'not_started');
   const attempts = started.flatMap(t=>t.report?.metrics?.physical_attempts ?? t.report?.observed_provider_attempts ?? []);
@@ -242,11 +272,15 @@ function resources(tasks, costModel) {
   const missingUsage = attempts.filter(a=>!count(a.usage?.input_tokens) || !count(a.usage?.output_tokens)).length;
   const bodyBytes = attempts.map(a=>a.request_body_bytes);
   const knownBodyBytes = knownSum(bodyBytes);
+  const total = values=>values.every(count) ? knownSum(values) : null;
   const taskMetric = key => {
     const fields = started.map(t=>t.report?.metrics?.[key]);
     return fields.every(count) && countKnown ? knownSum(fields) : null;
   };
   const namespaces = started.map(t=>t.report?.retained_namespace_bytes);
+  const bootstrap = started.map(t=>bootstrapBuild(t.report));
+  const bootstrapCommands = bootstrap.map(b=>b.commands), capturedBuilds = taskMetric('builds');
+  const capturedRejected = taskMetric('rejected_builds'), capturedCompiler = taskMetric('compiler_nanoseconds');
   const rss = started.map(t=>t.report?.peak_rss_sampled_bytes).filter(count);
   const charges = started.map(t=>t.report?.cost).filter(c=>c?.complete === true &&
     Number.isFinite(c.total) && c.total >= 0);
@@ -255,8 +289,11 @@ function resources(tasks, costModel) {
     usage_complete:countKnown && !missingUsage, known_input_tokens:knownSum(attempts.map(a=>a.usage?.input_tokens)),
     known_output_tokens:knownSum(attempts.map(a=>a.usage?.output_tokens)), missing_usage_attempts:missingUsage,
     known_request_body_bytes:knownBodyBytes, request_body_bytes:countKnown && bodyBytes.every(count) ? knownBodyBytes : null,
-    builds:taskMetric('builds'), rejected_builds:taskMetric('rejected_builds'), work_items:taskMetric('work_items'),
-    compiler_nanoseconds:taskMetric('compiler_nanoseconds'), result_bytes:taskMetric('result_bytes'),
+    captured_builds:capturedBuilds,bootstrap_builds:total(bootstrapCommands),known_bootstrap_builds:knownSum(bootstrapCommands),
+    builds:total([capturedBuilds,...bootstrapCommands]),rejected_builds:total([capturedRejected,...bootstrap.map(b=>b.rejected)]),
+    work_items:taskMetric('work_items'),captured_compiler_nanoseconds:capturedCompiler,
+    bootstrap_build_elapsed_nanoseconds:total(bootstrap.map(b=>b.elapsed)),
+    compiler_nanoseconds:total([capturedCompiler,...bootstrap.map(b=>b.compiler)]),result_bytes:taskMetric('result_bytes'),
     retained_namespace_bytes:namespaces.every(count) ? knownSum(namespaces) : null,
     max_sampled_rss_bytes:rss.length ? rss.reduce((a,b)=>Math.max(a,b)) : null,
     monetary_scope:'task_execution_and_retention',
@@ -267,17 +304,19 @@ function resources(tasks, costModel) {
 
 function initialPresentation(report) {
   const trace = report?.adjudication;
-  const attempts = trace?.delivery;
-  if (!attempts?.length || attempts.some(a => a.preparation_cut == null)) return null;
+  const attempts = trace?.delivery?.filter(a=>a.delivery !== 'not_sent' && a.model_response !== false);
+  const unknown = {confirmed:null,one_computed_block:null};
+  if (!attempts?.length || attempts.some(a => a.preparation_cut == null)) return unknown;
   const first = attempts.reduce((a, b) => BigInt(a.preparation_cut) <= BigInt(b.preparation_cut) ? a : b);
   const sameCut = attempts.filter(a => BigInt(a.preparation_cut) === BigInt(first.preparation_cut));
-  if (sameCut.some(a => a.prepared_sha256 !== first.prepared_sha256)) return null;
-  const confirmed = sameCut.find(a => a.delivery === 'confirmed');
-  if (!confirmed) return null;
-  if (report.effective_condition === 'ordinary') return confirmed.selected_view === null;
-  if (!report.bootstrap?.view || !trace.projection) return false;
-  return confirmed.selected_view === report.bootstrap.view.id &&
-    trace.projection.exposures.some(e => e.id === confirmed.id && e.rendered);
+  if (sameCut.some(a => a.prepared_sha256 !== first.prepared_sha256)) return unknown;
+  const confirmed = sameCut.find(a => a.delivery === 'confirmed' && a.model_response === true);
+  if (!confirmed) return unknown;
+  if (report.effective_condition === 'ordinary') return {confirmed:confirmed.selected_view === null,one_computed_block:null};
+  const view = report.bootstrap?.view;
+  const exposure = view && view.id === confirmed.selected_view ?
+    trace.projection?.exposures.find(e=>e.id === confirmed.id && e.rendered) : null;
+  return {confirmed:Boolean(exposure),one_computed_block:exposure?.one_computed_block ?? null};
 }
 
 function decisionState(report) {
@@ -306,23 +345,29 @@ export function gradeCondition(condition, tasks, costModel) {
     const initial = initialPresentation(r);
     const ordinary = condition.arm === 'evidence' || condition.arm === 'repair' && !author?.adjudication?.candidate;
     const expectedArm = ordinary ? 'ordinary' : condition.arm;
-    const compliant = allObserved([initial, r?.effective_condition == null ? null : r.effective_condition === expectedArm,
+    const compliant = allObserved([initial.confirmed, r?.effective_condition == null ? null : r.effective_condition === expectedArm,
       Array.isArray(r?.arm_violations) ? r.arm_violations.length === 0 : null,
-      expectedArm === 'ordinary' || (projection?.one_computed_block ?? null)]);
+      expectedArm === 'ordinary' || allObserved([projection?.one_computed_block,initial.one_computed_block])]);
     const decision = decisionState(r), answered = decision === 'answered';
-    const citedProjection = answered ? Boolean(projection && grade.answer.support.some(ref=>
-      ref.kind === projection.result.kind && ref.id === projection.result.id)) : null;
+    const sameRef = (a,b) => a && b && a.kind === b.kind && a.id === b.id;
+    const citedProjection = answered ? Boolean(projection && grade.answer.support.some(ref=>sameRef(ref,projection.result))) : null;
+    const citedAlias = answered ? Boolean(projection && trace.exposure?.some(row=>
+      sameRef(row.projected_result,projection.result) && !sameRef(row.ref,projection.result) &&
+      grade.answer.support.some(ref=>sameRef(ref,row.ref)))) : null;
     const exposures = projection?.exposures ?? [];
-    const exposed = exposures.some(e=>e.rendered && e.delivery === 'confirmed') ? true :
-      exposures.length && exposures.every(e=>!e.rendered || e.delivery === 'not_sent') ? false : null;
+    const ordinaryOnly = r?.effective_condition === 'ordinary' && !projection && bound && trace.evidence_complete &&
+      trace.delivery?.some(e=>e.model_response === true) && trace.delivery.every(e=>
+        e.selected_view === null || e.delivery === 'not_sent' || e.model_response === false);
+    const exposed = exposures.some(e=>e.rendered && e.delivery === 'confirmed' && e.model_response === true) ? true :
+      ordinaryOnly || exposures.length && exposures.every(e=>!e.rendered || e.delivery === 'not_sent' || e.model_response === false) ? false : null;
     const projectionBinding = condition.arm === 'repair' ? trace?.transfer_bound : projection?.canonical_input;
-    const supportedUse = !answered ? null : allObserved([grade.supported, citedProjection, compliant, exposed,
+    const supportedUse = !answered ? null : allObserved([grade.supported, citedProjection || citedAlias, compliant, exposed,
       projectionBinding, projection?.semantic_judgment === 'unestablished' ? null : projection?.semantic_judgment === 'supported',
       trace?.ordinary_fallback == null ? null : !trace.ordinary_fallback]);
     return {case_id:t.subject.case_id,state:t.state === 'completed' && !answered ? decision : t.state,
       decision, native_status:r?.status?.status ?? null,task_report:t.file ?? null,answer:grade?.answer?.outcome ?? null,
       grading_errors:grade?.errors ?? null,errors:r?.errors ?? [],
-      initial_presentation_confirmed:initial,
+      initial_presentation_confirmed:initial.confirmed,
       correct:bound ? grade?.outcome_correct ?? null : null, supported:bound ? grade?.supported ?? null : null,
       unsupported_exhaustion:bound ? grade?.unsupported_exhaustion ?? null : null, compliant:r ? compliant : null,
       transfer_bound:trace?.transfer_bound ?? null,ordinary_fallback:trace?.ordinary_fallback ?? null,
@@ -331,7 +376,7 @@ export function gradeCondition(condition, tasks, costModel) {
       semantic_judgment:projection?.semantic_judgment ?? null,
       schema_judgment:projection?.schema_judgment ?? null,
       exact_evidence_preservation:projection?.exact_evidence_preservation ?? null,
-      cited_projection:citedProjection, supported_view_use:supportedUse,
+      cited_projection:citedProjection,cited_projection_alias:citedAlias,supported_view_use:supportedUse,
       needs_payload_adjudication:answered && grade.supported == null && grade.errors?.includes('unadjudicated_payload') === true,
       exposed_computed:exposed};
   });
@@ -339,7 +384,7 @@ export function gradeCondition(condition, tasks, costModel) {
   const allSupported = complete && cases.every(c=>c.supported === true);
   const authored = author?.adjudication?.authored_and_applied === true;
   const supportedUses = cases.filter(c=>c.state === 'completed' && c.supported_view_use === true);
-  const initialAuthor = initialPresentation(author);
+  const initialAuthor = initialPresentation(author).confirmed;
   const authorCompliant = initialAuthor === true && author?.effective_condition === 'repair' &&
     Array.isArray(author.arm_violations) && !author.arm_violations.length && author.adjudication?.applied_use?.one_computed_block === true;
   const completeOutcome = 'exhausted_declared_domain';
@@ -351,22 +396,28 @@ export function gradeCondition(condition, tasks, costModel) {
     supportedUses.some(c=>c.case_id === condition.coverage_pair?.partial && c.answer === 'incomplete');
   const incorrectProjections = cases.filter(c=>c.transfer_bound === true &&
     (c.schema_judgment === 'incorrect' || c.semantic_judgment === 'incorrect')).map(c=>c.case_id);
+  const rejectedReplays = cases.filter(c=>c.candidate_rejection != null).map(c=>c.case_id);
   const opportunity = authorTask?.state === 'not_started' ? false : author?.authoring_opportunity ?? null;
+  const buildAction = author?.metrics?.actions?.some(a=>a.name === 'program' && a.arguments?.command?.tag === 'build');
+  const attempted = author?.execution_mode === 'scripted_fixture' ? false :
+    author?.adjudication?.builds?.length || buildAction ? true :
+    opportunity === false || author?.final_metrics_complete && buildAction === false ? false : null;
   return {repetition:condition.repetition,arm:condition.arm,planned_cases:condition.downstream.length,cases,
     author_report:authorTask?.file ?? null,
     diagnostic_report:tasks.find(t=>t.subject.phase === 'diagnostic')?.file ?? null,
-    authoring_attempted:opportunity,author_initial_presentation_confirmed:initialAuthor,
+    authoring_opportunity:opportunity,authoring_attempted:attempted,author_initial_presentation_confirmed:initialAuthor,
     candidate_admitted:!!author?.adjudication?.candidate,authored_and_applied:authored,
     authoring_state:authorTask?.state ?? null,
     nomination:author?.nomination?.status ?? null,nomination_error:author?.nomination_error ?? null,
     diagnosis:author?.nomination?.diagnosis ?? null,authoring_errors:author?.errors ?? [],
     collision,coverage_pair:condition.coverage_pair ?? null,
     coverage_repair_demonstrated:condition.arm === 'repair' ? coverageDemonstrated : null,
-    incorrect_projection_cases:incorrectProjections,
-    supported_repair:condition.arm !== 'repair' ? null : coverageDemonstrated && !incorrectProjections.length ?
+    incorrect_projection_cases:incorrectProjections,rejected_replay_cases:rejectedReplays,
+    supported_repair:condition.arm !== 'repair' ? null : coverageDemonstrated && !incorrectProjections.length && !rejectedReplays.length ?
       'demonstrated_on_tested_cases' : 'unestablished',
     supported_view_use_cases:supportedUses.map(c=>c.case_id),
     answered_cases:cases.filter(c=>c.decision === 'answered').length,
+    completed_cases:cases.filter(c=>c.state === 'completed' && c.decision === 'answered').length,
     all_cases_completed:complete,all_cases_supported:allSupported,supported_answers:cases.filter(c=>c.supported).length,
     end_to_end_resources:resources(tasks,costModel), downstream_resources:resources(transfer,costModel)};
 }
@@ -386,21 +437,25 @@ function taskState(report) {
 }
 
 function markdown(results) {
-  const rows = results.conditions.map(c=>`| ${c.repetition+1} | ${c.arm} | ${c.answered_cases}/${c.planned_cases} | ${c.supported_answers} | ${c.authored_and_applied ? 'yes' : '—'} | ${c.end_to_end_resources.known_physical_attempts} | ${c.elapsed_ms.toFixed(0)} |`);
+  const rows = results.conditions.map(c=>`| ${c.repetition+1} | ${c.arm} | ${c.answered_cases}/${c.planned_cases} | ${c.completed_cases} | ${c.supported_answers} | ${c.authored_and_applied ? 'yes' : '—'} | ${c.end_to_end_resources.known_physical_attempts} | ${c.elapsed_ms.toFixed(0)} |`);
   const lines = ['# Directed interface repair','',
-    '| Repetition | Condition | Completed decisions | Supported answers | Authored and applied | Known provider attempts | Elapsed ms |',
-    '|---|---|---:|---:|---|---:|---:|',...rows,'',
+    '| Repetition | Condition | Answered decisions | Completed cases | Supported answers | Authored and applied | Known provider attempts | Elapsed ms |',
+    '|---|---|---:|---:|---:|---|---:|---:|',...rows,'',
     'One candidate reused across multiple cases counts as one authoring attempt.',''];
+  const label = flag => flag == null ? 'unknown' : flag ? 'yes' : 'no';
   for (const c of results.conditions) {
     const counts = new Map();
     for (const row of c.cases) counts.set(row.state,(counts.get(row.state) ?? 0)+1);
     lines.push('## Repetition '+(c.repetition+1)+' · '+c.arm,'');
     if (c.arm === 'repair') {
-      lines.push('Authoring ended with `'+c.authoring_state+'`. Nomination was `'+(c.nomination ?? 'unavailable')+
+      lines.push('Authoring opportunity was recorded as '+label(c.authoring_opportunity)+
+        ' and a build attempt as '+label(c.authoring_attempted)+'. Authoring ended with `'+c.authoring_state+'`. Nomination was `'+(c.nomination ?? 'unavailable')+
         '`. Supported repair was `'+c.supported_repair+'`.','');
       if (c.coverage_repair_demonstrated) lines.push('The authored view supported the fresh complete and partial coverage decisions.','');
       if (c.incorrect_projection_cases.length) lines.push('The transfer projector gave an incorrect payload on '+
         c.incorrect_projection_cases.map(id=>'`'+id+'`').join(', ')+'.','');
+      if (c.rejected_replay_cases.length) lines.push('The candidate was rejected during replay on '+
+        c.rejected_replay_cases.map(id=>'`'+id+'`').join(', ')+'.','');
     }
     const r = c.end_to_end_resources;
     lines.push([...counts].map(([state,count])=>count+' '+state).join(', ')+'.',
@@ -411,7 +466,6 @@ function markdown(results) {
       (r.monetary_cost === null ? ' Total task charges are unknown.' : ' Task charges under the frozen tariff were '+r.monetary_cost+'.'),'',
       '| Case | Status | Answer | Supported | Ordinary evidence use | Supported view use |',
       '|---|---|---|---|---|---|');
-    const label = flag => flag == null ? 'unknown' : flag ? 'yes' : 'no';
     for (const row of c.cases) lines.push('| '+[row.case_id,row.state,row.answer ?? '—',label(row.supported),
       label(row.ordinary_fallback),label(row.supported_view_use)].join(' | ')+' |');
     lines.push('');
@@ -420,6 +474,8 @@ function markdown(results) {
 }
 
 export async function runInterfaceRepair(directory, options, {execute=executeRepairTask,now=()=>performance.now()} = {}) {
+  options = {...options};
+  inferenceArguments(options);
   const campaignStart = now();
   const {plan,plan_sha256,application} = await readRepairPlan(directory,options);
   assert.equal(options.chatgptAccount ? 'chatgpt' : 'api-key',plan.route,'Credential route differs from preparation.');

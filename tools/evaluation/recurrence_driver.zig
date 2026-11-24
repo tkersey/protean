@@ -297,10 +297,16 @@ const Driver = struct {
         if (std.mem.eql(u8, method, "evaluation.pause")) return self.pause(a, params);
         if (self.paused) return error.EvaluationPaused;
         if (std.mem.eql(u8, method, "evaluation.interface_repair.bootstrap"))
-            return self.repair_session.bootstrap(self.service, self.worker, a, params, false);
+            return self.repair_session.bootstrap(self.service, self.worker, a, params, .complete);
         if (std.mem.eql(u8, method, "evaluation.interface_repair.fixture_select")) {
             if (!self.fixture_workspace) return error.OfflineFixtureRequired;
-            return self.repair_session.bootstrap(self.service, self.worker, a, params, true);
+            var input = params;
+            if (input != .object) return error.InvalidParams;
+            const cut: repair.Cut = if (input.object.fetchOrderedRemove("stop_after")) |item|
+                try native.values.fromJson(repair.Cut, a, item.value)
+            else
+                .selection;
+            return self.repair_session.bootstrap(self.service, self.worker, a, input, cut);
         }
         if (std.mem.eql(u8, method, "evaluation.interface_repair.fixture"))
             return self.repairFixture(a, params, false);
@@ -471,7 +477,7 @@ const Driver = struct {
 
     fn step(self: *Driver, a: std.mem.Allocator) !Json.Value {
         if (self.repair_session.expected != null and !self.repair_session.ready) {
-            try self.repair_session.prepare(self.service, self.worker, a);
+            try self.repair_session.prepare(self.service, self.worker, a, false);
             return self.boundary(a, "bootstrap_ready");
         }
         if (try self.finishWorker(a)) return self.boundary(a, "captured");
@@ -590,6 +596,12 @@ const Driver = struct {
             }
         }
         var result = try self.boundary(a, "observed");
+        if (self.repair_session.expected != null) try Json.put(
+            a,
+            &result,
+            "bootstrap_build_metrics",
+            try self.repair_session.buildMetrics(a, task),
+        );
         try Json.put(a, &result, "events", .{ .array = events });
         try Json.put(a, &result, "attempts", .{ .array = attempts });
         try Json.put(a, &result, "cursor", try Json.number(a, cursor));

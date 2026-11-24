@@ -112,6 +112,102 @@ async function restartAtSelection(launch, root, subject, plan_sha256, source, ov
   } finally { await close(); }
 }
 
+async function recoverBootstrap(launch, root, subject, plan_sha256, source, mode, programId = null) {
+  const ordinary = mode === 'ordinary';
+  const diagnostic = mode === 'diagnostic';
+  const condition = diagnostic ? 'repair' : ordinary ? 'ordinary' : 'fixed-lossy';
+  const descriptor = JSON.stringify({version: 1, plan_sha256, submission_id: subject.id,
+    prompt_sha256: sha(subject.prompt), phase: diagnostic ? 'diagnostic' : 'downstream', condition,
+    files: subject.evidence, source_sha256: sha(source), program_sha256: programId});
+  const state = 'bootstrap-cuts-' + mode;
+  const flags = ['--fixture-workspace', '--config', subject.config, '--interface-repair-bootstrap', sha(descriptor)];
+  let child = launch(null, state, flags), task;
+  const close = async () => {
+    child.stdin.end();
+    assert.deepEqual(await child.exited, [0, null]);
+  };
+  const capture = async label => {
+    const path = join(root, state + '-' + label + '.agnx');
+    await child.call('evaluation.export', {...task, path});
+    return readArchive(await readFile(path));
+  };
+  try {
+    const {profile} = await child.call('describe');
+    const submitted = await child.call('task.submit', {client_operation_id: subject.id,
+      application_id: 'adaptive-agent', profile_id: profile.id,
+      input: {schema_id: 'adaptive-agent.input.v2', value: {task: subject.prompt}}});
+    task = {task_id: submitted.task_id};
+    const params = {...task, descriptor, source};
+    const cuts = diagnostic ? ['primary'] : ordinary ? ['acquisition'] : mode === 'cancelled' ? ['not_sent'] :
+      mode === 'message' ? ['build'] : ['build', 'consumer', 'acquisition', 'start', 'primary'];
+    let program = null, consumer = null, work = null;
+    for (const stop_after of cuts) {
+      await assert.rejects(child.call('evaluation.interface_repair.fixture_select', {...params, stop_after}),
+        /FixtureCut/, stop_after);
+      const before = await capture(stop_after);
+      assert.equal(before.task.inference_attempts, 0n);
+      const rows = n => before.manifest[6].filter(row => row[0] === n);
+      if (!ordinary) {
+        const match = rows(8).filter(row => {
+          const record = decodeValue(before.schemas.get('workspace_program'), before.object(row[2]));
+          return before.object(record[3][1]).equals(Buffer.from(source));
+        });
+        assert.equal(match.length, 1);
+        const id = Buffer.from(match[0][1]).toString('hex');
+        if (program) assert.equal(id, program);
+        program = id;
+      }
+      for (const [kind, prior] of [[17, consumer], [9, work]]) {
+        assert(rows(kind).length <= 1);
+        if (prior) assert.equal(Buffer.from(rows(kind)[0][1]).toString('hex'), prior);
+      }
+      consumer = rows(17).length ? Buffer.from(rows(17)[0][1]).toString('hex') : null;
+      work = rows(9).length ? Buffer.from(rows(9)[0][1]).toString('hex') : null;
+      if (mode === 'cancelled') {
+        await child.call('task.cancel', {...task, client_operation_id: 'cancel-unsent'});
+        for (let n = 0; n < 32 && (await child.call('task.status', task)).status !== 'cancelled'; n++)
+          await child.call('evaluation.step').catch(e => {
+            assert.match(e.message, /InitialSetupBlocked|InitialPreparationFailed/);
+          });
+        assert.equal((await child.call('task.status', task)).status, 'cancelled');
+      }
+      await close();
+      child = launch(task.task_id, state, flags);
+      const reopened = await child.call('task.status', task);
+      const restored = await capture(stop_after + '-reopen');
+      assert.deepEqual(restored.task.input, before.task.input);
+      assert.equal(restored.task.inference_attempts, 0n);
+      if (mode === 'cancelled') {
+        assert.equal(reopened.status, 'cancelled');
+        await assert.rejects(child.call('evaluation.step'), /InitialPreparationFailed/);
+        return;
+      }
+      if (reopened.status === 'parked') await child.call('task.resume', {...task,
+        client_operation_id: 'resume-' + reopened.revision, expected_revision: reopened.revision});
+      if (mode === 'message') {
+        await child.call('task.message', {...task, client_operation_id: 'operator-message',
+          message: {schema_id: 'adaptive-agent.message.v2', value: {message: 'Updated task instructions.'}}});
+        await assert.rejects(child.call(bootstrapMethod, params), /InitialCutRequired/);
+        return;
+      }
+    }
+    const ready = await child.call(bootstrapMethod, params);
+    assert.equal(ready.build_metrics.build_commands, ordinary ? 0 : 1);
+    assert.equal(ready.build_metrics.build_elapsed_nanoseconds, ordinary ? '0' : null);
+    assert.equal(ready.build_metrics.compiler_nanoseconds, ordinary ? '0' : null);
+    assert.equal(ready.consumer?.id ?? null, consumer);
+    assert.equal(ready.work?.id ?? null, work);
+    assert.equal(Boolean(ready.view), !ordinary && !diagnostic);
+    if (diagnostic) {
+      assert.notEqual(ready.work.id, ready.paired.work.id);
+      const readyArchive = await capture('ready');
+      assert.equal(readyArchive.manifest[6].filter(row => row[0] === 9).length, 2);
+      assert.equal(readyArchive.manifest[6].filter(row => row[0] === 17).length, 1);
+      assert.equal(readyArchive.task.inference_attempts, 0n);
+    }
+  } finally { await close(); }
+}
+
 async function rejectIncompatibleProgram(launch, root, subject, plan_sha256, scalar, large) {
   const state = large ? 'large-source' : 'scalar-input';
   const source = large ? scalar.source + ' '.repeat(1024 * 1024) : scalar.source;
@@ -256,6 +352,10 @@ export async function checkInterfaceRepair(launch, root, {sources, application, 
     await restartAtSelection(launch, root, fixed, plan_sha256, sources.lossy, oversized);
   for (const large of [false, true])
     await rejectIncompatibleProgram(launch, root, diagnostic, plan_sha256, scalarProjection, large);
+  const evidence = plan.conditions.find(c => c.arm === 'evidence').downstream[0];
+  await recoverBootstrap(launch, root, evidence, plan_sha256, '', 'ordinary');
+  for (const mode of ['projected', 'message', 'cancelled'])
+    await recoverBootstrap(launch, root, fixed, plan_sha256, sources.lossy, mode);
   const episode = async (subject, candidate = null) => {
     const output = join(root, 'result-' + subject.id);
     await mkdir(output);
@@ -301,6 +401,8 @@ export async function checkInterfaceRepair(launch, root, {sources, application, 
   assert.equal(first.selected_view, development.bootstrap.view.id);
   assert(trace.projection.exposures.some(row => row.id === first.id && row.rendered));
   await auditEvidence(development, application);
+  await recoverBootstrap(launch, root, diagnostic, plan_sha256,
+    Buffer.from(candidate.source_b64, 'base64').toString(), 'diagnostic', candidate.program.id);
   const probe = await episode(diagnostic, candidate);
   assert.equal(probe.bootstrap.view, null);
   assert.equal(probe.adjudication.delivery.length, 0);

@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {adjudicateRepairTrace, confirmedApplication, diagnosticPresentation, inspectProjectionResult,
+import {adjudicateRepairTrace, canonicalProjectionInput, capturedModelResponse, confirmedApplication, diagnosticPresentation, inspectProjectionResult,
   selectedPresentation} from '../../tools/evaluation/interface_repair_trace.mjs';
-import {collisionProbe, makeRepairCorpus} from '../../tools/evaluation/interface_repair.mjs';
+import {canonicalEvidence, collisionProbe, makeRepairCorpus} from '../../tools/evaluation/interface_repair.mjs';
 import {encodeValue} from '../support/values.mjs';
 
 const view = 'a'.repeat(64);
@@ -13,6 +13,42 @@ const user = {role: 'user', content: [part]};
 const mistaken = [{role: 'assistant', content: [part]}, {type: 'function_call_output', output: [part]},
   {role: 'user', content: [{...part, prompt_cache_breakpoint: {mode: 'explicit'}}]},
   {role: 'user', content: [{...part, text: JSON.stringify({inputs: JSON.parse(envelope)})}]}];
+
+test('successful HTTP transport and explicit model response are independent evidence', () => {
+  const raw = (body, format = 0, status = 200) => [status, true, null, Buffer.from(body), format, null, null, 2];
+  const body = {status: 'completed', error: null, output: [{type: 'function_call', status: 'completed',
+    name: 'report', call_id: 'x', arguments: '{}'}]};
+  const sse = (type, response) => 'data: ' + JSON.stringify({type, response}) + '\n\n';
+  assert.equal(capturedModelResponse(raw(JSON.stringify(body))), true);
+  assert.equal(capturedModelResponse(raw(sse('response.completed', body), 1)), true);
+  assert.equal(capturedModelResponse(raw(sse('response.failed', {status: 'failed'}), 1)), false);
+  assert.equal(capturedModelResponse(raw(JSON.stringify({status: 'failed', error: {code: 'invalid_user'}}))), false);
+  assert.equal(capturedModelResponse(raw('{}', 0, 403)), false);
+  assert.equal(capturedModelResponse(raw('unparseable')), null);
+  assert.equal(capturedModelResponse(raw(JSON.stringify({...body, output: []}))), null);
+  assert.equal(capturedModelResponse(raw(JSON.stringify(body)), [{tag: 4}]), null);
+  for (const output of [body.output, [{type: 'message', role: 'assistant', status: 'incomplete', content: [
+    {type: 'output_text', text: 'Partial output.'}]}], [{type: 'message', role: 'assistant', status: 'completed',
+    content: [{type: 'refusal', refusal: 'Declined.'}]}]]) {
+    const incomplete = {...body, status: 'incomplete', output};
+    assert.equal(capturedModelResponse(raw(JSON.stringify(incomplete)), [{tag: 3}]), true);
+    assert.equal(capturedModelResponse(raw(sse('response.incomplete', incomplete), 1)), true);
+  }
+  assert.equal(capturedModelResponse(raw(sse('response.incomplete', {...body, status:'incomplete', output:[]}), 1)), null);
+});
+
+test('canonical scan work requires the task-owned consumer observation as well as source-backed scan facts', () => {
+  const specimen = makeRepairCorpus('canonical').development[0];
+  const refs = Object.fromEntries(Object.keys(specimen.files).map((path, i) => [path, {kind: 'value', id: (i+1).toString(16).padStart(64, '0')}]));
+  const input = [Buffer.alloc(32, 255), 1n], facts = canonicalEvidence(specimen, refs);
+  const origins = Object.values(refs).map(r => [Buffer.from(r.id, 'hex'), 1n]);
+  const values = new Map([[input[0].toString('hex'), {raw:[,,,,[null, origins]]}]]);
+  const matches = (kind, id, observed) => canonicalProjectionInput(values, input, specimen, refs, [[kind, id], facts], observed);
+  assert.equal(matches(12, view, view), true);
+  assert.equal(matches(3, view, view), false);
+  assert.equal(matches(12, view, null), false);
+  assert.equal(matches(12, view, 'f'.repeat(64)), false);
+});
 
 test('selected rendering requires an authentic prepared selection and its unique native user envelope', () => {
   assert.equal(selectedPresentation(null, {input: [user]}), null);
@@ -75,11 +111,11 @@ test('incompatible output envelopes and host materialization limits have local i
 test('single-block compliance belongs to the same ordered and confirmed author application', () => {
   const use = {program, canonical_input: true, view, model_start: {cut: '12'}, model_select: {cut: '15'},
     one_computed_block: true, exposures: []};
-  const delivered = {id: 'one', delivery: 'confirmed', rendered: true, one_computed_block: true, preparation_cut: '15'};
+  const delivered = {id: 'one', delivery: 'confirmed', model_response: true, rendered: true, one_computed_block: true, preparation_cut: '15'};
   const multiple = {...use, view: 'multiple', one_computed_block: false, exposures: [delivered]};
   const seen = new Set(['one']);
   const applied = (...uses) => confirmedApplication(uses, {program}, '10', seen);
-  for (const altered of [{rendered: false}, {delivery: 'unknown'}, {id: 'elsewhere'}, {preparation_cut: '14'}]) {
+  for (const altered of [{rendered: false}, {model_response: null}, {model_response: false}, {id: 'elsewhere'}, {preparation_cut: '14'}]) {
     const other = {...use, exposures: [{...delivered, ...altered}]};
     assert.equal(applied(other), null);
     assert.equal(applied(other, multiple).one_computed_block, false);

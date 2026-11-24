@@ -27,6 +27,12 @@ test('only the approved initial Astra model and effort survive preparation',()=>
   assert.equal(p.id,changed.adaptive.initial_profile);
   assert.deepEqual(p.efforts,[changed.adaptive.initial_effort]);
   assert.equal(p.effort_update,false);
+  for (const efforts of ['xhigh',['high','invalid'],['high','high']]) {
+    const invalid = structuredClone(changed);
+    invalid.adaptive.initial_effort = 'high';
+    invalid.adaptive.profiles[0].efforts = efforts;
+    assert.throws(()=>selectRepairProfile(invalid),/effort/);
+  }
   changed.adaptive.profiles[0].model = 'not-astra';
   assert.throws(()=>selectRepairProfile(changed));
   assert.deepEqual(new Set(Array.from({length:4},(_,i)=>repairOrder('comparison',i)[0])),
@@ -38,11 +44,19 @@ test('a frozen episode isolates all snapshots and retains an unsuccessful author
   t.after(()=>rm(root,{recursive:true,force:true}));
   const app = join(root,'application.json');
   await writeFile(app,'{}');
-  const opts = {binary:app,driver:app,applicationPath:app,config,directory:join(root,'episode'),route:'chatgpt'};
+  const costModel = {kind:'tariff',predeclared:true,id:'synthetic',currency:'USD',provider_source:'fixture',
+    deployment_source:'fixture',host_includes_attempt_storage:true,input_per_million:1,cached_input_per_million:1,
+    output_per_million:2,host_per_second:0,storage_per_byte_second:0,retention_seconds:0};
+  const opts = {binary:app,driver:app,applicationPath:app,config:structuredClone(config),costModel,directory:join(root,'episode'),route:'chatgpt'};
   const deps = {describeBuild:()=>({application_assets_sha256:sha('{}')}),
     validateConfiguration:()=>({valid:true}),
     exportSources:()=>({lossy:'sliced loss',adequate:'private reference program'})};
-  const plan = await prepareInterfaceRepair(opts,deps);
+  const preparing = prepareInterfaceRepair(opts,deps);
+  costModel.output_per_million = 5;
+  opts.config.adaptive.profiles[0].efforts.push('max');
+  const plan = await preparing;
+  assert.equal(plan.cost_model.output_per_million,2);
+  assert.deepEqual(plan.approved_efforts,config.adaptive.profiles[0].efforts);
   assert.equal(plan.conditions.length,1);
   const [condition] = plan.conditions;
   assert.equal(condition.downstream.length,10);
@@ -59,10 +73,17 @@ test('a frozen episode isolates all snapshots and retains an unsuccessful author
   await validateRepairPlan(opts.directory,opts);
   await assert.rejects(prepareInterfaceRepair(opts,deps),{code:'EEXIST'});
   await assert.rejects(runInterfaceRepair(opts.directory,{...opts,credential:'dummy'}),/route differs/);
+  await assert.rejects(runInterfaceRepair(opts.directory,opts),/one inference source/);
+  await assert.rejects(runInterfaceRepair(opts.directory,{...opts,credential:'dummy',chatgptAccount:'fixture'}),/one inference source/);
   const calls = [];
-  const {results} = await runInterfaceRepair(opts.directory,{...opts,chatgptAccount:'fixture'},
-    {execute:async ({subject,output,candidate})=>{
+  const dispatch = {...opts,chatgptAccount:'fixture'};
+  const {results,summary} = await runInterfaceRepair(opts.directory,dispatch,
+    {execute:async ({subject,output,candidate,chatgptAccount,credential})=>{
       assert.equal(candidate,null);
+      assert.equal(chatgptAccount,'fixture');
+      assert.equal(credential,undefined);
+      dispatch.credential = 'concurrent-api-key';
+      delete dispatch.chatgptAccount;
       calls.push(subject.id);
       const report = {subject,nomination:{status:'no_candidate'},arm_violations:[],status:{status:'completed'},
         errors:[],adjudication:{report_bound:true,authored_and_applied:false},metrics:{physical_attempts:[{usage:null}]},
@@ -71,6 +92,7 @@ test('a frozen episode isolates all snapshots and retains an unsuccessful author
       return report;
     }});
   assert.equal(calls.length,11);
+  assert.match(await readFile(summary,'utf8'), /Answered decisions/);
   const [measured] = JSON.parse(await readFile(results)).conditions;
   assert.equal(measured.end_to_end_resources.known_physical_attempts,11);
   assert.equal(measured.downstream_resources.known_physical_attempts,10);
@@ -96,18 +118,27 @@ test('unstarted and timed out cases prevent an all-cases claim, irrespective of 
 
 test('condition compliance requires the promised presentation in the first request', () => {
   const subject = {phase:'transfer',case_id:'a'}, condition = {arm:'fixed-lossy',downstream:[subject]};
-  const first = {id:'first',preparation_cut:'2',prepared_sha256:'original',selected_view:'view',delivery:'confirmed'};
+  const first = {id:'first',preparation_cut:'2',prepared_sha256:'original',selected_view:'view',delivery:'confirmed',model_response:true};
   const later = {...first,id:'later',preparation_cut:'10',prepared_sha256:'subsequent'};
   const report = {bootstrap:{view:{id:'view'}},effective_condition:'fixed-lossy',arm_violations:[],
     adjudication:{delivery:[later,first],projection:{one_computed_block:true,result:{kind:'value',id:'result'},
-      exposures:[{id:'later',rendered:true},{id:'first',rendered:false}]}}};
+      exposures:[{id:'later',rendered:true,one_computed_block:true},{id:'first',rendered:false,one_computed_block:false}]}}};
   const grade = () => gradeCondition(condition,[{subject,state:'completed',report}],{kind:'unpriced'}).cases[0];
   assert.equal(grade().compliant,false);
   report.adjudication.projection.exposures[1].rendered = true;
+  assert.equal(grade().initial_presentation_confirmed,true);
+  assert.equal(grade().compliant,false);
+  report.adjudication.projection.exposures[1].one_computed_block = true;
   assert.equal(grade().compliant,true);
   first.delivery = 'unknown';
+  first.model_response = null;
   assert.equal(grade().compliant,null);
+  first.delivery = 'not_sent';
+  first.model_response = false;
+  assert.equal(grade().compliant,true);
   first.delivery = 'confirmed';
+  assert.equal(grade().compliant,true);
+  first.model_response = true;
   report.effective_condition = 'ordinary';
   report.adjudication.projection = null;
   assert.equal(grade().compliant,false);
@@ -128,6 +159,8 @@ test('one exhausted condition preserves every later condition allowance', async 
     describeBuild:()=>({application_assets_sha256:sha('{}')}),
     validateConfiguration:()=>({valid:true}),exportSources:()=>({lossy:'lossy',adequate:'adequate'})
   });
+  await assert.rejects(runInterfaceRepair(opts.directory,opts),/one inference source/);
+  assert.equal(existsSync(join(opts.directory,'run')),false);
   let clock = 0;
   const {results} = await runInterfaceRepair(opts.directory,{...opts,credential:'fixture'},{
     now:()=>existsSync(join(opts.directory,'run','results.md')) ? clock + plan.campaign_ceiling_ms : clock,
@@ -156,13 +189,13 @@ const unpriced = {kind:'unpriced'};
 
 function presentedReport(arm, id, outcome) {
   const result = {kind:'value',id:'result-'+id}, view = {kind:'view',id:'view-'+id};
-  const attempt = {id:'first',selected_view:view.id,preparation_cut:'1',prepared_sha256:'prepared',delivery:'confirmed'};
+  const attempt = {id:'first',selected_view:view.id,preparation_cut:'1',prepared_sha256:'prepared',delivery:'confirmed',model_response:true};
   return {effective_condition:arm,bootstrap:{view},arm_violations:[],errors:[],
     status:{status:'completed'},result:{outcome:{value:{result:{tag:'report'}}}},
     grading:{answer:{outcome,support:[result]},errors:[],outcome_correct:true,supported:true,unsupported_exhaustion:false},
     adjudication:{report_bound:true,delivery:[attempt],ordinary_fallback:false,transfer_bound:arm === 'repair',
       projection:{result,canonical_input:true,semantic_judgment:'supported',one_computed_block:true,
-        exposures:[{...attempt,rendered:true}]}}};
+        exposures:[{...attempt,rendered:true,one_computed_block:true}]}}};
 }
 
 function coverageEpisode() {
@@ -213,6 +246,14 @@ test('fixed controls earn supported view use and uncertain evidence routes and s
   const report = presentedReport('fixed-adequate','full',exhausted);
   const grade = ()=>gradeCondition(condition,[{subject,state:'completed',report}],unpriced);
   assert.deepEqual(grade().supported_view_use_cases,['full']);
+  const original = report.adjudication.projection.result, alias = {kind:'value',id:'alias'};
+  report.grading.answer.support = [alias];
+  report.adjudication.exposure = [{ref:alias,paths:['scan.json']}];
+  assert.equal(grade().cases[0].supported_view_use,false);
+  report.adjudication.exposure[0].projected_result = original;
+  assert.equal(grade().cases[0].cited_projection,false);
+  assert.equal(grade().cases[0].cited_projection_alias,true);
+  assert.equal(grade().cases[0].supported_view_use,true);
   report.adjudication.ordinary_fallback = null;
   assert.equal(grade().cases[0].supported_view_use,null);
   report.adjudication.ordinary_fallback = true;
@@ -225,6 +266,76 @@ test('fixed controls earn supported view use and uncertain evidence routes and s
   report.grading.supported = null;
   report.grading.errors = ['unadjudicated_payload'];
   assert.equal(grade().cases[0].needs_payload_adjudication,true);
+});
+
+test('a failed replay blocks the broader verdict while the demonstrated coverage distinction remains',()=>{
+  const {cases,grade} = coverageEpisode();
+  const replay = cases[4];
+  replay.state = 'candidate_rejected';
+  replay.report = {effective_condition:'repair',candidate_rejection:'ProjectionResultRejected'};
+  const measured = grade();
+  assert.equal(measured.coverage_repair_demonstrated,true);
+  assert.equal(measured.supported_repair,'unestablished');
+  assert.deepEqual(measured.rejected_replay_cases,['mismatch']);
+  assert.deepEqual(measured.incorrect_projection_cases,[]);
+});
+
+test('observed authoring opportunities and actual build attempts have separate denominators',()=>{
+  const {author,grade} = coverageEpisode();
+  const report = author.report;
+  report.metrics = {actions:[]};
+  report.final_metrics_complete = true;
+  Object.assign(report.adjudication,{builds:[],candidate:null,authored_and_applied:false,applied_use:null});
+  assert.equal(grade().authoring_opportunity,true);
+  assert.equal(grade().authoring_attempted,false);
+  report.adjudication.builds.push({disposition:'rejected'});
+  assert.equal(grade().authoring_attempted,true);
+  report.adjudication.builds = [];
+  report.metrics.actions = [{name:'program',arguments:{command:{tag:'build'}}}];
+  assert.equal(grade().authoring_attempted,true);
+  report.metrics = null;
+  report.final_metrics_complete = false;
+  assert.equal(grade().authoring_attempted,null);
+});
+
+test('a bound ordinary decision can establish that no computed view reached the consumer',()=>{
+  const subject = {phase:'transfer',case_id:'ord'};
+  const report = presentedReport('ordinary','ord',exhausted);
+  const trace = report.adjudication;
+  trace.projection = null;
+  trace.delivery[0].selected_view = null;
+  const grade = arm=>gradeCondition({arm,downstream:[subject]},[{subject,state:'completed',report}],unpriced).cases[0];
+  assert.equal(grade('evidence').exposed_computed,null);
+  trace.evidence_complete = true;
+  assert.equal(grade('evidence').exposed_computed,false);
+  assert.equal(grade('repair').exposed_computed,false);
+  trace.delivery.push({...trace.delivery[0],selected_view:'other',model_response:null,delivery:'unknown'});
+  assert.equal(grade('evidence').exposed_computed,null);
+});
+
+test('build totals include direct setup work and retain unmeasured compiler time',()=>{
+  const subject = {phase:'transfer',case_id:'compiled'};
+  const report = {effective_condition:'fixed-adequate',bootstrap:{program:{kind:'program',id:'p'}},
+    metrics:{physical_attempts:[],builds:2,rejected_builds:0,compiler_nanoseconds:15}};
+  const grade = ()=>gradeCondition({arm:'fixed-adequate',downstream:[subject]},[{subject,state:'completed',report}],unpriced)
+    .downstream_resources;
+  assert.equal(grade().builds,3);
+  assert.equal(grade().bootstrap_builds,1);
+  assert.equal(grade().bootstrap_build_elapsed_nanoseconds,null);
+  assert.equal(grade().compiler_nanoseconds,null);
+  assert.equal(grade().captured_compiler_nanoseconds,15);
+  report.bootstrap.build_metrics = {build_commands:1,build_elapsed_nanoseconds:'123',compiler_nanoseconds:null};
+  assert.equal(grade().bootstrap_build_elapsed_nanoseconds,123);
+  assert.equal(grade().compiler_nanoseconds,null);
+  report.bootstrap = null;
+  report.candidate_rejection = 'ProjectionWorkFailed';
+  assert.equal(grade().bootstrap_builds,1);
+  report.candidate_rejection = null;
+  assert.equal(grade().builds,null);
+  report.effective_condition = 'ordinary';
+  assert.equal(grade().bootstrap_builds,0);
+  assert.equal(grade().builds,2);
+  assert.equal(grade().compiler_nanoseconds,15);
 });
 
 test('native terminal outcomes and incomplete reports do not supply decisions; bound wrong classifications do',()=>{
@@ -249,6 +360,10 @@ test('native terminal outcomes and incomplete reports do not supply decisions; b
   assert.equal(grade().all_cases_completed,true);
   assert.equal(grade().all_cases_supported,false);
   assert.equal(grade().answered_cases,5);
+  cases[0].state = 'timed_out';
+  assert.equal(grade().answered_cases,5);
+  assert.equal(grade().completed_cases,4);
+  assert.equal(grade().all_cases_completed,false);
 });
 
 test('attempt costs retain partial nonnegative usage and physical request bytes through failed authoring',()=>{

@@ -4,14 +4,13 @@ import {createHash} from 'node:crypto';
 import {appendFile, readFile, realpath, writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {setTimeout as wait} from 'node:timers/promises';
-import {isDeepStrictEqual} from 'node:util';
 import {readArchive} from '../../test/protean/native_archive.mjs';
 import {contract} from '../../test/protean/adaptive_capture_checks.mjs';
 import {decodeValue} from '../../test/support/values.mjs';
 import {armViolations, bytesUnder, capturedUsage, decodeRecurrenceObservation, inferenceArguments, readOutcome, RecurrenceDriver,
   providerRequestBodyBytes, recurrenceCost, workspaceMetrics} from './workspace.mjs';
 import {parseCandidate, gradeAnswer} from './interface_repair.mjs';
-import {adjudicateRepairTrace, adjudicateRepairCollision, selectedPresentation} from './interface_repair_trace.mjs';
+import {adjudicateRepairTrace, adjudicateRepairCollision, capturedModelResponse, computedPresentation, selectedPresentation} from './interface_repair_trace.mjs';
 import {campaignIdentity} from './recurrence.mjs';
 
 const json = value => JSON.stringify(value, (_, v) => typeof v === 'bigint' ? String(v) : v);
@@ -78,13 +77,12 @@ function observeAttempts(observations, schemas, application, attempts, initialPr
         assert.equal(BigInt(bytes.length), BigInt(row.capture.response.bytes));
         const body = decodeValue(response, bytes);
         try { item.usage = capturedUsage(body) ?? null; } catch {}
-        if (initialProjection && role === 'controller' && prepared && body[0] >= 200 && body[0] < 300 && body[7] === 2) {
+        if (initialProjection && role === 'controller' && prepared && capturedModelResponse(body) === true) {
           const request = decodeValue(contract(application, 'AdaptivePrepared'), prepared);
           const view = request[3].tag === 1 ? Buffer.from(request[3].value[0]).toString('hex') : null;
           const presented = view === initialProjection.view.id && selectedPresentation(view, JSON.parse(Buffer.from(request[2])));
-          item.initial_projection_delivered = Boolean(presented && presented.blocks.some(block => block.kind === 'computed' &&
-            isDeepStrictEqual(block.result, initialProjection.result) && block.schema_identity === initialProjection.payload_schema_sha256 &&
-            isDeepStrictEqual(block.value, initialProjection.payload)));
+          item.initial_projection_delivered = Boolean(presented && presented.blocks.some(block => computedPresentation(
+            block, initialProjection.result, initialProjection.payload_schema_sha256, initialProjection.payload)));
         }
       }
       attempts.set(id, item);
@@ -143,6 +141,8 @@ export async function executeRepairTask(options, {Client = RecurrenceDriver, scr
   let stepStarted = false, initialProjection;
   const observe = async () => {
     const raw = await client.call('evaluation.observe', {task_id: report.task.task_id, after: cursor, acquisition: true});
+    if (!report.bootstrap?.build_metrics && raw.bootstrap_build_metrics != null)
+      report.bootstrap_build_metrics ??= raw.bootstrap_build_metrics;
     assert(!raw.events.length || BigInt(raw.cursor) > BigInt(cursor), 'Native observation cursor did not advance.');
     cursor = String(raw.cursor);
     if (raw.events.length || raw.attempts.length || raw.records.length || raw.report_producer) {
@@ -302,6 +302,10 @@ export async function executeRepairTask(options, {Client = RecurrenceDriver, scr
           await wait(100);
         }
       } catch (error) { if (!report.timed_out) record('drain', error); }
+      if (stage === 'bootstrap' && !report.bootstrap && !report.timed_out) {
+        try { checkDeadline(); await observe(); }
+        catch (error) { if (!report.timed_out) record('bootstrap_observation', error); }
+      }
     }
     clearTimeout(timer);
     await close('close', report.timed_out);
@@ -365,10 +369,12 @@ export async function executeRepairTask(options, {Client = RecurrenceDriver, scr
     report.observed_provider_attempts = [...attempts.values()];
   }
   if (subject.phase === 'author' && !scripted) {
-    if (report.adjudication?.projection?.exposures.some(item => item.delivery === 'confirmed' && item.rendered) ||
+    const attempts = report.adjudication?.delivery.filter(item => item.delivery !== 'not_sent');
+    if (report.adjudication?.projection?.exposures.some(item => item.delivery === 'confirmed' && item.model_response === true && item.rendered) ||
         report.observed_provider_attempts?.some(item => item.initial_projection_delivered))
       report.authoring_opportunity = true;
-    else if (!stepStarted || report.final_metrics_complete && !report.metrics.controller.calls)
+    else if (!stepStarted || report.final_metrics_complete && (!report.metrics.controller.calls ||
+        attempts?.length === report.metrics.controller.calls && attempts.every(item => item.model_response === false)))
       report.authoring_opportunity = false;
   }
   report.elapsed_ms = elapsed();

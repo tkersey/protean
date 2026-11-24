@@ -26,6 +26,18 @@ function report(specimen, changes = {}) {
 }
 const exposure = specimen => [{ref: sourceRef(100), paths: assessScan(specimen).paths}];
 
+test('only cited and verified byte ranges contribute to declaration coverage', () => {
+  const specimen = corpus.transfer.find(s => assessScan(s).domain.known && !assessScan(s).domain.members.length);
+  const path = 'scan.json', end = Buffer.byteLength(specimen.files[path]);
+  const left = {ref: sourceRef(1), paths: [], range: {path, start: 0, end: 7}};
+  const right = {ref: sourceRef(2), paths: [], range: {path, start: 7, end}};
+  const answer = refs => report(specimen, {support: refs});
+  assert.equal(gradeAnswer(answer([left.ref]), specimen, [left, right]).supported, false);
+  assert.equal(gradeAnswer(answer([left.ref, right.ref]), specimen, [left, right]).supported, true);
+  assert.equal(gradeAnswer(answer([left.ref, right.ref]), specimen, [left,
+    {...right, range: {...right.range, start: 8}}]).supported, false);
+});
+
 test('frozen corpus separates the original visible pair from ten new instances on each repetition', () => {
   assert.deepEqual(corpus.development.map(c => assessScan(c).outcome), [complete, partial]);
   assert.deepEqual(corpus.transfer.map(c => assessScan(c).outcome), [complete, partial, partial, complete,

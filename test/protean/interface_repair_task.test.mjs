@@ -162,8 +162,8 @@ function decisionFixture() {
     const input = [{type: 'function_call_output', call_id, output: [{type: 'input_text', text: JSON.stringify({
       disposition, observation: mismatch ? {} : observation})}]}];
     if (block) input.push({role: 'user', content: [{type: 'input_text', text: JSON.stringify({selected_context_data: [block]})}]});
-    history.push({interaction_id: id, event_cut: id, attempt: {id, delivery: 'confirmed', selected_view: selected, body: {input}},
-      previous: {id: 'previous', delivery: 'confirmed'}, results: [{call_id, output: {tag: 'workspace', value: {reply}}}],
+    history.push({interaction_id: id, event_cut: id, attempt: {id, delivery: 'confirmed', model_response: true, selected_view: selected, body: {input}},
+      previous: {id: 'previous', delivery: 'confirmed', model_response: true}, results: [{call_id, output: {tag: 'workspace', value: {reply}}}],
       result_actions: [{call_id, action: {tag, value: {command}}}]});
   };
   const expand = (handle, text, start, end) => step('context', {tag: 'expand', value: {reference: handle}}, page(text, start, end));
@@ -171,26 +171,97 @@ function decisionFixture() {
     {value: item.handle, source: item.source, preview: page(JSON.stringify(item.text))});
   const workSchema = {root: 0, types: [{product: [1,2,3,3,4,3,5,3,4]}, 'u8', 'bytes', 'unit', 'text', {sum:[6,10]},
     {product:[7,8]}, {product:[4,4]}, {product:[9,16,4]}, {seq:13}, {product:[11,12]},
-    {product:[4,14,1]}, {sum:[15,4]}, {product:[4,14]}, 'u64', {product:[2,4,4,14,14,14,4]}, 'boolean']};
+    {product:[4,14,1]}, {sum:[15,4,4]}, {product:[4,14]}, 'u64', {product:[2,4,4,14,14,14,4]}, 'boolean']};
   const work = (result, rendered) => {
     const task = Buffer.alloc(16), id = String(history.length + 1), call_id = 'work-' + id;
     const text = JSON.stringify(rendered);
     const artifact = put(encodeValue(workSchema, [2, task, null, null, call_id, null, result, null, text]));
-    history.push({interaction_id: id, task_id: task.toString('hex'), event_cut: id, previous: {delivery: 'confirmed'},
-      attempt: {id, delivery: 'confirmed', body: {input: [{type:'function_call_output', call_id, output: text}]}},
+    history.push({interaction_id: id, task_id: task.toString('hex'), event_cut: id, previous: {delivery: 'confirmed', model_response: true},
+      attempt: {id, delivery: 'confirmed', model_response: true, body: {input: [{type:'function_call_output', call_id, output: text}]}},
       results: [{call_id, output: {tag: 'work', value: {digest: [...artifact[0]], bytes: String(artifact[1])}}}], result_actions: []});
   };
-  const support = (uses = []) => decisionSupport(archive, {support: {WorkArtifact: schemaSupport(workSchema)}},
-    specimen, refs, values, history, uses, history.at(-1));
-  return {step, support, expand, materialize, work, snapshot, history, page, path, member, absent, file, slice, full, witness, input, result, value};
+  const support = (uses = [], projector = null) => decisionSupport(archive, {support: {WorkArtifact: schemaSupport(workSchema)}},
+    specimen, refs, values, history, uses, history.at(-1), projector);
+  return {step, support, expand, acquire, materialize, work, snapshot, history, page, path, member, absent, file, slice, full, witness, input, result, value, put};
 }
+
+test('verified partial snapshot handles each carry only their own source interval', () => {
+  const f = decisionFixture(), tail = f.acquire(f.path, 4, f.file.length);
+  f.materialize(f.slice);
+  f.materialize(tail);
+  const {exposure} = f.support();
+  for (const [item, start, end] of [[f.slice, 0, 4], [tail, 4, f.file.length]]) {
+    const entry = exposure.find(e => e.ref.id === item.handle.id);
+    assert.deepEqual(entry.paths, []);
+    assert.deepEqual(entry.range, {path: f.path, start, end});
+  }
+});
+
+test('confirmed range rejections distinguish file presence from returned file contents', () => {
+  const f = decisionFixture(), reason = 'Read requires maximum 1..4096 and an offset within the file.';
+  f.work({tag: 1, value: [[f.member, 99n, 1], {tag: 2, value: reason}]}, {tag: 'invalid', value: reason});
+  f.step('context', {tag: 'materialize', value: {input: {tag: 'snapshot', value: {path:f.path, offset:'99999', maximum:'1'}}}},
+    {error: 'InvalidRange'}, {disposition:'rejected'});
+  const result = f.support();
+  assert.deepEqual(result.routes.map(r => [r.kind, r.path]), [['file_present', f.member], ['file_present', f.path]]);
+  assert.deepEqual(result.exposure, []);
+});
+
+test('a bound report correction discloses metadata only', () => {
+  const f = decisionFixture(), rejection = {reason: 'empty_report', claim_index: null, evidence_position: null};
+  f.step('context', {tag: 'inspect', value: {}}, {});
+  const i = f.history[0];
+  i.results[0].output = {tag: 'report_rejection', value: rejection};
+  i.attempt.body.input[0].output[0].text = JSON.stringify(rejection);
+  assert.deepEqual(f.support().unresolved, []);
+  i.attempt.body.input[0].output[0].text = 'different text';
+  assert.equal(f.support().unresolved[0].kind, 'unbound_report_rejection');
+});
+
+test('unfamiliar projected results retain verified copy ancestry after projector inspection', () => {
+  const f = decisionFixture(), selected = 'b'.repeat(64), descriptor = {root: '0', types: [{tag:'text',value:{}}]};
+  const use = {input: f.input.handle, result: f.result.handle, paths: [], one_computed_block: true, payload: 'value',
+    payload_schema_sha256: 'schema', schema_kind: 'other', semantic_judgment: 'unestablished',
+    exposures: [{id: '1', rendered: true, model_response: true, delivery: 'confirmed'}]};
+  const projector = {program: {kind:'program', id:'c'.repeat(64)}, source:f.slice.source, source_bytes:Buffer.from('projector')};
+  f.step('program', {tag: 'inspect', value: {target: {tag: 'program', value: projector.program}}},
+    f.page('projector descriptor'), {selected, block: {kind: 'computed', schema_identity: 'schema', schema: descriptor,
+      result: use.result, value: use.payload}});
+  f.expand(projector.source, 'projector', 0, 5);
+  const alias = f.value('copy', f.result.text, [3, [f.witness.raw[2], f.result.raw[2]], null, null, {tag: 0}]);
+  const cmd = {tag: 'materialize', value: {sources: [f.witness.handle], input: {tag: 'value', value: {tag: 'reference', value: use.result}}}};
+  f.step('context', cmd, {value: alias.handle, preview: f.page(JSON.stringify(alias.text))});
+  const linked = f.support([use], projector);
+  assert.deepEqual(linked.routes, []);
+  assert.deepEqual(linked.unresolved, []);
+  assert.equal(linked.exposure[0].schema_sha256, 'schema');
+  const copied = linked.exposure.find(row => row.ref.id === alias.handle.id);
+  assert.deepEqual(copied.projected_result, use.result);
+  assert.deepEqual(copied.paths, []);
+  assert.equal(copied.semantic_judgment, 'unestablished');
+  alias.raw[4][1] = [];
+  const unbound = f.support([use], projector);
+  assert(!unbound.exposure.some(row => row.ref.id === alias.handle.id));
+  assert(unbound.unresolved.some(row => row.kind === 'unbound_alias'));
+});
+
+test('a host-limited recursive result preview preserves other verified source evidence', () => {
+  const f = decisionFixture();
+  f.result.raw[3][1] = f.put(encodeSchema({types: [{seq: 0}], root: 0}));
+  f.result.raw[3][2] = f.put(Buffer.concat([Buffer.alloc(12000, 1), Buffer.from([0])]));
+  f.expand(f.result.handle, '[]', 0);
+  f.materialize(f.full);
+  const support = f.support([{input:f.input.handle, result:f.result.handle, exposures:[]}]);
+  assert(support.unresolved.some(r => r.ref?.id === f.result.handle.id));
+  assert(support.exposure.some(r => r.ref.id === f.full.handle.id && r.paths.includes(f.path)));
+});
 
 test('verified acquisition previews and ranged source expansions bind both manifest references to observed misses', () => {
   const f = decisionFixture();
   f.materialize(f.slice);
-  assert.deepEqual(f.support().exposure, []);
+  assert(!f.support().exposure.some(row => row.paths.length));
   f.expand(f.slice.source, f.file, 8);
-  assert.deepEqual(f.support().exposure, []);
+  assert(!f.support().exposure.some(row => row.paths.length));
   f.expand(f.slice.source, f.file, 0, 8);
   f.materialize(f.full);
   f.step('context', {tag: 'materialize', value: {input: {tag: 'snapshot', value: {path: f.absent}}}},
@@ -200,17 +271,17 @@ test('verified acquisition previews and ranged source expansions bind both manif
   assert(routes.some(row => row.kind === 'missing_read'));
   for (const ref of [f.full.handle, f.full.source, f.slice.source])
     assert(exposure.some(row => row.ref.id === ref.id && row.paths.includes(f.path) && row.paths.includes(f.absent)));
-  assert(!exposure.some(row => row.ref.id === f.slice.handle.id));
+  assert.deepEqual(exposure.find(row => row.ref.id === f.slice.handle.id).range, {path: f.path, start: 0, end: 4});
 });
 
 test('only confirmed returned bytes credit a retained reference or its copied alias', () => {
   const f = decisionFixture();
-  const alias = f.value('copy', f.file, [3, [f.full.raw[2]], null, null, {tag: 0}]);
-  const cmd = {tag: 'materialize', value: {input: {tag: 'value', value: {tag: 'reference', value: f.full.handle}}}};
+  const alias = f.value('copy', f.file, [3, [f.witness.raw[2], f.full.raw[2]], null, null, {tag: 0}]);
+  const cmd = {tag: 'materialize', value: {sources: [f.witness.handle], input: {tag: 'value', value: {tag: 'reference', value: f.full.handle}}}};
   const observation = {value: alias.handle, preview: f.page(JSON.stringify(f.file))};
   f.step('context', cmd, observation, {mismatch: true});
   assert.equal(f.support().unresolved.length, 1);
-  assert.deepEqual(f.support().exposure, []);
+  assert(!f.support().exposure.some(row => row.paths.length));
   f.step('context', cmd, observation);
   assert(f.support().exposure.some(row => row.ref.id === alias.handle.id && row.paths.includes(f.path)));
 });
@@ -221,7 +292,7 @@ test('same-result previews retain projection credit and paged canonical-input re
   const payload = [[1, 1, true, [1]], [row]];
   const use = {canonical_input: true, input: f.input.handle, result: f.result.handle, paths: [f.path, f.member],
     one_computed_block: true, payload, payload_schema_sha256: 's', schema_kind: 'ScanEvidence', semantic_judgment: 'supported',
-    exposures: [{id: '1', rendered: true, delivery: 'confirmed'}]};
+    exposures: [{id: '1', rendered: true, delivery: 'confirmed', model_response: true}]};
   f.step('work', {tag: 'inspect'}, {result: use.result, result_preview: f.page(JSON.stringify(f.result.text))},
     {selected, block: {kind: 'computed', schema_identity: 's', result: use.result, value: payload}});
   assert.deepEqual(f.support([use]).routes, []);
@@ -229,7 +300,7 @@ test('same-result previews retain projection credit and paged canonical-input re
   assert(f.support([use]).exposure.some(e => e.ref.id === f.witness.handle.id && e.paths.length === 1 && e.paths[0] === f.member));
   const text = JSON.stringify(f.input.text);
   f.expand(f.input.handle, text, 3);
-  assert(f.support([use]).unresolved.some(row => row.ref?.id === f.input.handle.id));
+  assert(f.support([use]).routes.some(row => row.ref?.id === f.input.handle.id));
   assert(!f.support([use]).exposure.some(row => row.ref.id === f.input.handle.id));
   f.expand(f.input.handle, text, 0, 3);
   assert(f.support([use]).routes.some(row => row.ref?.id === f.input.handle.id));
@@ -249,7 +320,7 @@ test('delivered ordinary listings establish scoped absence and ordinary read pag
         file_bytes: String(f.file.length), content}});
   };
   read(0, 20);
-  assert.deepEqual(f.support().exposure, []);
+  assert(!f.support().exposure.some(row => row.paths.length));
   read(20, f.file.length);
   const {routes, exposure, unresolved} = f.support();
   assert.deepEqual(unresolved, []);

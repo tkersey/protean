@@ -308,10 +308,14 @@ export function workspaceMetrics(archive, application) {
 }
 
 const resultSchema = {root: 0, types: [{product: [1, 3]}, {array: {element: 2, length: 32}}, 'u8', 'bytes']};
-function resultValue(bytes) {
+export function decodeEffectResult(bytes) {
   assert.equal(bytes.subarray(0, 8).toString(), 'ABL_ERS3');
   assert.equal(bytes.readBigUInt64LE(12), BigInt(bytes.length - 20));
-  return Buffer.from(decodeValue(resultSchema, bytes.subarray(20))[1]);
+  return decodeValue(resultSchema, bytes.subarray(20));
+}
+
+function resultValue(bytes) {
+  return Buffer.from(decodeEffectResult(bytes)[1]);
 }
 
 // Return an observation even when the runner fails after a potentially paid
