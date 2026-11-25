@@ -22,6 +22,22 @@ const name = task_types.name;
 const operation = task_types.operation;
 const same = task_types.same;
 
+pub const StoredBuild = struct {
+    image: storage.Content,
+    interface: @FieldType(build_job.Compiled, "interface"),
+    ports: @FieldType(build_job.Compiled, "ports"),
+    controller: @FieldType(build_job.Compiled, "controller") = null,
+
+    pub fn of(compiled: build_job.Compiled) StoredBuild {
+        return .{
+            .image = .of(compiled.image.bytes),
+            .interface = compiled.interface,
+            .ports = compiled.ports,
+            .controller = compiled.controller,
+        };
+    }
+};
+
 pub fn Operations(comptime Types: type, comptime Self: type) type {
     return struct {
         const compatible = Controller.compatible;
@@ -729,10 +745,10 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             defer built.deinit();
             try store(self).begin();
             defer store(self).rollback();
-            const saved = try workspaceStoreProgram(self, a, task_id, source, @fromBackingInt(
+            const saved = try workspaceStoreProgram(self, a, task_id, .of(source), @fromBackingInt(
                 @intCast(@backingInt(source_kind)),
             ), catalog, exposures, .{
-                .image = .{ .bytes = built.image },
+                .image = .of(built.image),
                 .interface = built.interface,
                 .ports = .{ .items = built.ports },
                 .controller = built.controller,
@@ -759,11 +775,11 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             self: *Self,
             a: std.mem.Allocator,
             task_id: state.TaskId,
-            source: []const u8,
+            source: storage.Content,
             source_kind: @FieldType(workspace.ProgramArtifact, "source_kind"),
             catalog: ?state.Reference,
             exposures: []const wc.Exposure,
-            built: build_job.Compiled,
+            built: StoredBuild,
         ) !state.Reference {
             const ports = try a.alloc(workspace.PortInterface, built.ports.items.len);
             defer a.free(ports);
@@ -787,7 +803,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 .command = try store(self).putObject(port.command.bytes),
             };
             const artifact: workspace.ProgramArtifact = .{
-                .source = try store(self).putObject(source),
+                .source = try store(self).putContent(source),
                 .source_kind = source_kind,
                 .construction_contract = try name(
                     if (built.controller !=
@@ -799,7 +815,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     },
                 ),
                 .authoring_identity = storage.digest(@import("native_options").horos_identity),
-                .image = try store(self).putObject(built.image.bytes),
+                .image = try store(self).putContent(built.image),
                 .input_schema = try store(self).putObject(built.interface.input.bytes),
                 .result_schema = try store(self).putObject(built.interface.output.bytes),
                 .failure_schema = try store(self).putObject(built.interface.failure.bytes),
@@ -851,11 +867,9 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             artifact: workspace.ProgramArtifact,
         ) !bool {
             if (self.application.controller) |seed| {
-                if (std.meta.eql(artifact.source.digest, storage.digest(seed.source)) and
-                    artifact.source.bytes == seed.source.len and std.meta.eql(
-                    artifact.image.digest,
-                    storage.digest(self.assets.image),
-                ) and artifact.image.bytes == self.assets.image.len) {
+                if (std.meta.eql(artifact.source, self.seed_source.?.reference) and
+                    std.meta.eql(artifact.image, self.image.reference))
+                {
                     if (artifact.source_kind != .source_records or
                         artifact.catalog != null or
                         artifact.exposures.items.len != 0 or

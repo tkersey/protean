@@ -1,6 +1,7 @@
 //! Transactional environmental state. Kosmos bytes are opaque objects; every
 //! acknowledged mutation publishes its receipt, records and events together.
 const std = @import("std");
+const builtin = @import("builtin");
 const contracts = @import("protean_contracts");
 const sqlite = @import("sqlite.zig");
 const state = @import("state.zig");
@@ -10,6 +11,7 @@ const Digest = state.Digest;
 pub const format: u32 = @import("native_options").state_format;
 
 pub fn digest(bytes: []const u8) Digest {
+    if (comptime builtin.is_test) digest_observation.observe(bytes);
     var hash: hash_abi.State = undefined;
     hash_abi.protean_native_sha256_init(&hash);
     hash_abi.protean_native_sha256_update(&hash, bytes.ptr, bytes.len);
@@ -17,6 +19,31 @@ pub fn digest(bytes: []const u8) Digest {
     hash_abi.protean_native_sha256_final(&hash, &result);
     return result;
 }
+
+pub const Content = struct {
+    bytes: []const u8,
+    reference: state.Reference,
+
+    pub fn of(bytes: []const u8) Content {
+        return .{ .bytes = bytes, .reference = .{ .digest = digest(bytes), .bytes = bytes.len } };
+    }
+};
+
+pub const digest_observation = if (builtin.is_test) struct {
+    var subject: []const u8 = &.{};
+    var count: std.atomic.Value(u64) = .init(0);
+
+    pub fn watch(bytes: []const u8) void {
+        subject = bytes;
+        count.store(0, .seq_cst);
+    }
+    pub fn observed() u64 {
+        return count.load(.seq_cst);
+    }
+    fn observe(bytes: []const u8) void {
+        if (subject.len != 0 and std.mem.eql(u8, bytes, subject)) _ = count.fetchAdd(1, .seq_cst);
+    }
+} else struct {};
 
 test "object digests retain SHA-256 across padding and large input boundaries" {
     try std.testing.expectEqualStrings(
@@ -844,22 +871,43 @@ pub const Store = struct {
     }
 
     pub fn putObject(self: *Store, bytes: []const u8) !state.Reference {
-        const ref: state.Reference = .{ .digest = digest(bytes), .bytes = bytes.len };
+        return self.putContent(.of(bytes));
+    }
+
+    pub fn putContent(self: *Store, content: Content) !state.Reference {
         var source = struct {
             bytes: []const u8,
             pub fn read(this: *@This(), target: []u8) !void {
                 @memcpy(target, this.bytes[0..target.len]);
                 this.bytes = this.bytes[target.len..];
             }
-        }{ .bytes = bytes };
-        try self.acquireObject(ref, &source);
-        return ref;
+        }{ .bytes = content.bytes };
+        try self.storeObject(content.reference, &source);
+        return content.reference;
     }
 
     /// Acquire an exact-size source inside the caller's unpublished transaction.
     /// Neither a new object nor a duplicate is trusted until every byte matches
     /// its digest. A failed acquisition rolls back the entire transaction.
     pub fn acquireObject(self: *Store, ref: state.Reference, source: anytype) !void {
+        try self.writing();
+        errdefer self.rollback();
+        var hashed = struct {
+            source: @TypeOf(source),
+            hash: hash_abi.State,
+            pub fn read(this: *@This(), target: []u8) !void {
+                try this.source.read(target);
+                hash_abi.protean_native_sha256_update(&this.hash, target.ptr, target.len);
+            }
+        }{ .source = source, .hash = undefined };
+        hash_abi.protean_native_sha256_init(&hashed.hash);
+        try self.storeObject(ref, &hashed);
+        var observed: Digest = undefined;
+        hash_abi.protean_native_sha256_final(&hashed.hash, &observed);
+        if (!std.mem.eql(u8, &observed, &ref.digest)) return error.InvalidObject;
+    }
+
+    fn storeObject(self: *Store, ref: state.Reference, source: anytype) !void {
         try self.writing();
         errdefer self.rollback();
         if (ref.bytes > (try self.database.blobLimit())) return error.Capacity;
@@ -876,15 +924,12 @@ pub const Store = struct {
             std.log.err("object blob cleanup failed: {s}", .{@errorName(err)});
         };
         if (blob.length() != ref.bytes) return error.CorruptState;
-        var hash: hash_abi.State = undefined;
-        hash_abi.protean_native_sha256_init(&hash);
         var buffer: [64 * 1024]u8 = undefined;
         var prior: [64 * 1024]u8 = undefined;
         var offset: usize = 0;
         while (offset < ref.bytes) {
             const chunk = buffer[0..@min(buffer.len, ref.bytes - offset)];
             try source.read(chunk);
-            hash_abi.protean_native_sha256_update(&hash, chunk.ptr, chunk.len);
             if (inserted) {
                 try blob.write(chunk, offset);
             } else {
@@ -895,9 +940,6 @@ pub const Store = struct {
         }
         closed = true;
         try blob.close();
-        var observed: Digest = undefined;
-        hash_abi.protean_native_sha256_final(&hash, &observed);
-        if (!std.mem.eql(u8, &observed, &ref.digest)) return error.InvalidObject;
     }
     pub fn object(self: *Store, a: std.mem.Allocator, ref: state.Reference, limit: ?usize) ![]u8 {
         if (limit != null and ref.bytes > limit.?) return error.Capacity;

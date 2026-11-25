@@ -33,9 +33,8 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
         pub fn compatibleApplication(self: *Self, value: state.Task) !void {
             if (!same(value.application_id.bytes, Types.application_id))
                 return error.IncompatibleProfile;
-            const cached = if (self.compiler_facts) |facts| facts.export_image_digest else null;
-            const image = cached orelse storage.digest(self.assets.image);
-            if (!same(&value.image.digest, &image)) return error.IncompatibleProfile;
+            if (!same(&value.image.digest, &self.image.reference.digest))
+                return error.IncompatibleProfile;
             if ((self.application.controller != null) != (value.controller != null))
                 return error.IncompatibleProfile;
         }
@@ -177,7 +176,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 .profile_id = try name(self.profile.id),
                 .profile = try store(self).putObject(self.profile.bytes),
                 .resources = .{ .items = resources },
-                .image = try store(self).putObject(self.assets.image),
+                .image = try store(self).putContent(self.image),
                 .controller = controller_id,
                 .runtime_identity = self.profile.runtime_identity,
                 .input = try store(self).putObject(input_bytes),
@@ -221,7 +220,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 seed.descriptor,
             );
             defer descriptor.deinit();
-            var image = try data.program_image.decode(seed_allocator, self.assets.image);
+            var image = try data.program_image.decode(seed_allocator, self.image.bytes);
             defer image.deinit();
             const interface = try construction.interfaceOf(seed_allocator, image.program);
             defer {
@@ -233,12 +232,12 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 self,
                 seed_allocator,
                 task_id,
-                seed.source,
+                self.seed_source.?,
                 .source_records,
                 null,
                 &.{},
                 .{
-                    .image = .{ .bytes = self.assets.image },
+                    .image = self.image,
                     .interface = interface,
                     .ports = .{ .items = &.{} },
                     .controller = descriptor.value,

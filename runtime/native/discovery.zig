@@ -218,11 +218,9 @@ pub const Application = struct {
         try sameField(metadata, "application_version", Types.application_version);
         const client_mapping = values.schemas.client_mapping;
         try sameField(metadata, "client_mapping", client_mapping);
-        sameField(
-            metadata,
-            "program_sha256",
-            try digest(storage, assets.image),
-        ) catch return error.ApplicationProgramDigestMismatch;
+        const program_sha256 = try digest(storage, assets.image);
+        sameField(metadata, "program_sha256", program_sha256) catch
+            return error.ApplicationProgramDigestMismatch;
         try sameField(manifest, "format", "agent-native-build/v2");
         try sameField(manifest, "client_mapping", client_mapping);
         try sameField(
@@ -230,11 +228,8 @@ pub const Application = struct {
             "state_format",
             std.fmt.comptimePrint("agent-native-state/{d}", .{@import("store.zig").format}),
         );
-        sameField(
-            manifest,
-            "program_sha256",
-            try digest(storage, assets.image),
-        ) catch return error.ManifestProgramDigestMismatch;
+        sameField(manifest, "program_sha256", program_sha256) catch
+            return error.ManifestProgramDigestMismatch;
         try sameField(
             manifest,
             "application_assets_sha256",

@@ -529,13 +529,15 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 self,
                 a,
                 task_id,
-                instrument.identity,
+                .of(instrument.identity),
                 if (kind == .model) .instrument_model else .instrument_snapshot,
                 null,
                 &.{},
-                .{ .image = .{
-                    .bytes = built.image,
-                }, .interface = built.interface, .ports = .{ .items = &.{} } },
+                .{
+                    .image = .of(built.image),
+                    .interface = built.interface,
+                    .ports = .{ .items = &.{} },
+                },
             );
             // This publication grants reusable immutable code, never execution.
             _ = try workspaceCommit(
