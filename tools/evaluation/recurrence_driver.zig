@@ -84,7 +84,7 @@ const Options = struct {
 
 fn digest(bytes: []const u8) [32]u8 {
     var result: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(bytes, &result, .{});
+    native.Sha256.hash(bytes, &result, .{});
     return result;
 }
 

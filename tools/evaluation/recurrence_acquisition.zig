@@ -304,7 +304,7 @@ pub fn reportProducer(service: *Service, a: std.mem.Allocator, task_id: [16]u8) 
     defer a.free(completed);
     if (!std.mem.eql(u8, proposed, completed)) return .null;
     var summary_digest: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(
+    native.Sha256.hash(
         result.value.result.report.summary.bytes,
         &summary_digest,
         .{},

@@ -2,12 +2,13 @@
 const contracts = @import("protean_contracts");
 const state = @import("state.zig");
 const std = @import("std");
+const Sha256 = @import("hash_abi.zig").Sha256;
 
 pub fn custodyId(a: std.mem.Allocator, task: state.TaskId, content: state.Digest) !state.Digest {
     const Key = struct { task: state.TaskId, program: state.Digest };
     const bytes = try contracts.encodeOwned(Key, a, .{ .task = task, .program = content });
     defer a.free(bytes);
-    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    var hash = Sha256.init(.{});
     hash.update("agent.native.operation.v1\x00");
     hash.update(bytes);
     var result: state.Digest = undefined;

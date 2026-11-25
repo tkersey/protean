@@ -9,6 +9,7 @@ const kosmos = @import("kosmos");
 const registry = @import("../registry.zig");
 const json = @import("../json.zig");
 const workspace = @import("../workspace_state.zig");
+const Sha256 = @import("../hash_abi.zig").Sha256;
 const wc = contracts.workspace;
 
 /// Terminal execution and settled cleanup are distinct Kosmos observations.
@@ -256,7 +257,7 @@ pub fn same(a: []const u8, b: []const u8) bool {
 pub fn operation(comptime T: type, a: std.mem.Allocator, value: T) !state.Digest {
     const bytes = try contracts.encodeOwned(T, a, value);
     defer a.free(bytes);
-    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    var hash = Sha256.init(.{});
     hash.update("agent.native.operation.v1\x00");
     hash.update(bytes);
     var result: state.Digest = undefined;

@@ -15,7 +15,7 @@ fn equal(left: []const u8, right: []const u8) bool {
 }
 fn digest(bytes: []const u8) [32]u8 {
     var value: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(bytes, &value, .{});
+    native.Sha256.hash(bytes, &value, .{});
     return value;
 }
 fn encodedEqual(a: std.mem.Allocator, comptime T: type, left: T, right: T) !bool {

@@ -21,9 +21,9 @@ groups as local qualification, against a private checkout of the commit.
 
 | Lane | Groups | Checks |
 | --- | --- | --- |
-| `authoring` | `authoring-https` | Source inventory, `check-protean` and `check-native-https`: authoring, model/value contracts, construction, compile-time rejection, helper integrity, adaptive asset emission, formatting, the bundled-Clang header and failure witness, wire checks and the independent HTTPS endpoint. |
+| `authoring` | `authoring-https` | Source inventory, `check-protean`, `check-native-hash` and `check-native-https`: authoring, model/value contracts, construction, compile-time rejection, helper integrity, adaptive asset emission, formatting, the bundled-Clang header and failure witness, SHA-256 dispatch against the software oracle, wire checks and the independent HTTPS endpoint. |
 | `native` | `native-smoke`, `native-placement` | Build the adaptive product with LLVM; verify its manifest and protocol/state rejection through the isolated native deployment; execute the same binary through authenticated transfer, reopen, refusal and duplicate-acceptance checks. |
-| `direct` | `direct-smoke` | Build the product with direct Zig x86-64 code generation and Zig’s bundled Clang for SQLite and the POSIX shim, run the split SHA-256 vectors against the direct fallback, and run the same deployment smoke. |
+| `direct` | `direct-smoke` | Build the product with direct Zig x86-64 code generation and Zig’s bundled Clang for SQLite and the POSIX shim, check direct SHA-256 dispatch against the software oracle, and run the same deployment smoke. |
 | `downstream` | `downstream` | Independently acquire, authenticate, package, build, install and execute the public `addNativeSystem` consumer; reject altered Horos and Kosmos inputs. |
 
 The `native` and `downstream` lanes each upload a small build-identity file. The

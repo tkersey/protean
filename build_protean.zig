@@ -210,9 +210,14 @@ const BuildGraph = struct {
         if (product_supported) {
             s.productBuild();
             s.recurrenceDriver();
+            s.hashCheck(
+                s.b.step("check-native-hash", "Check SHA-256 dispatch against the software oracle"),
+                s.native_target,
+                if (linuxX86(s.native_target)) true else null,
+            );
             if (s.native_direct) s.directHashCheck(s.b.step(
                 "check-native-direct-hash",
-                "Check the direct x86-64 SHA-256 fallback",
+                "Check direct x86-64 SHA-256 dispatch against the software oracle",
             ));
             s.nativeSmoke();
             s.runtimeDiagnostics();
@@ -343,6 +348,8 @@ const BuildGraph = struct {
             }),
             .use_llvm = !s.native_direct or !linuxX86(s.b.graph.host),
         });
+        const host_hash = build_hash.root_module;
+        linkAcceleratedHash(s.b, host_hash, s.b.graph.host, .safe, build_hash.use_llvm);
         s.host_tool.root_module.linkLibrary(build_hash);
     }
 
@@ -1227,19 +1234,29 @@ const BuildGraph = struct {
     }
 
     fn directHashCheck(s: *BuildGraph, check: *std.Build.Step) void {
+        s.hashCheck(check, s.b.resolveTargetQuery(.{
+            .cpu_arch = .x86_64,
+            .cpu_model = .baseline,
+            .os_tag = .linux,
+            .abi = .musl,
+        }), false);
+    }
+
+    fn hashCheck(
+        s: *BuildGraph,
+        check: *std.Build.Step,
+        target: std.Build.ResolvedTarget,
+        use_llvm: ?bool,
+    ) void {
         const hash = s.b.createModule(.{
             .root_source_file = s.b.path("runtime/native/hash.zig"),
-            .target = s.b.resolveTargetQuery(.{
-                .cpu_arch = .x86_64,
-                .cpu_model = .baseline,
-                .os_tag = .linux,
-                .abi = .musl,
-            }),
+            .target = target,
             .optimize = s.optimize,
             .strip = true,
         });
+        linkAcceleratedHash(s.b, hash, target, s.optimize, use_llvm);
         const tests = s.native_graph.testModule(check, hash);
-        tests.use_llvm = false;
+        tests.use_llvm = use_llvm;
     }
 
     fn nativeSmoke(s: *BuildGraph) void {
@@ -1756,6 +1773,7 @@ fn nativeLibrary(
     _ = inputs.addCopyFile(shim_obj, "native_c.o");
     module.addObjectFile(sql_obj);
     module.addObjectFile(shim_obj);
+    linkAcceleratedHash(b, module, target, optimize, !direct);
     const library = b.addLibrary(.{
         .name = "protean-native-c",
         .linkage = .static,
@@ -1763,4 +1781,34 @@ fn nativeLibrary(
         .use_llvm = !direct,
     });
     return .{ .library = library, .clang_inputs = inputs.getDirectory() };
+}
+
+fn linkAcceleratedHash(
+    b: *std.Build,
+    module: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    use_llvm: ?bool,
+) void {
+    var query = target.query;
+    query.cpu_model = .baseline;
+    query.cpu_features_sub = .empty;
+    query.cpu_features_add = switch (target.result.cpu.arch) {
+        .x86_64 => std.Target.x86.featureSet(&.{ .sha, .avx2 }),
+        .aarch64 => if (target.result.os.tag == .linux)
+            std.Target.aarch64.featureSet(&.{.sha2})
+        else
+            return,
+        else => return,
+    };
+    module.addObject(b.addObject(.{
+        .name = "protean-accelerated-sha256",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("runtime/native/hash_accelerated.zig"),
+            .target = b.resolveTargetQuery(query),
+            .optimize = optimize,
+            .strip = optimize != .debug,
+        }),
+        .use_llvm = use_llvm,
+    }));
 }

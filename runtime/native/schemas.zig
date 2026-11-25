@@ -4,6 +4,7 @@ const std = @import("std");
 const json = @import("json.zig");
 const protocol = @import("protocol.zig");
 const state = @import("state.zig");
+const Sha256 = @import("hash_abi.zig").Sha256;
 
 const Property = struct { []const u8, json.Value };
 fn literal(a: std.mem.Allocator, bytes: []const u8) !json.Value {
@@ -1102,7 +1103,7 @@ fn finishDocument(a: std.mem.Allocator, definitions: json.Value) !json.Value {
         json.string("https://json-schema.org/draft/2020-12/schema"),
     );
     var hash: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(try json.canonical(a, definitions), &hash, .{});
+    Sha256.hash(try json.canonical(a, definitions), &hash, .{});
     try json.put(
         a,
         &result,

@@ -99,7 +99,7 @@ fn answerMatches(
     var port = try C.decodeOwned(W.Port, a, try object(service, a, delegation.port));
     defer port.deinit();
     var digest: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(result.value.answer.bytes, &digest, .{});
+    native.Sha256.hash(result.value.answer.bytes, &digest, .{});
     return std.meta.eql(value.description.schema, port.value.interface.argument) and
         std.meta.eql(value.description.value, State.Reference{
             .digest = digest,

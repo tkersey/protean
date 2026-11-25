@@ -4,6 +4,7 @@
 const std = @import("std");
 const contracts = @import("protean_contracts");
 const state = @import("state.zig");
+const Sha256 = @import("hash_abi.zig").Sha256;
 const Ed25519 = std.crypto.sign.Ed25519;
 pub const Digest = state.Digest;
 pub const Site = struct { key: [32]u8, namespace: Digest };
@@ -330,7 +331,7 @@ pub fn operationId(site: Site, task: state.TaskId, operation_name: []const u8, k
     action,
     move,
 }) Digest {
-    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    var hash = Sha256.init(.{});
     hash.update("protean-placement/1/operation\x00");
     hash.update(@tagName(kind));
     hash.update(&site.key);
@@ -342,7 +343,7 @@ pub fn operationId(site: Site, task: state.TaskId, operation_name: []const u8, k
 pub fn digest(comptime T: type, a: std.mem.Allocator, value: T) !Digest {
     const bytes = try contracts.encodeOwned(T, a, value);
     defer a.free(bytes);
-    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    var hash = Sha256.init(.{});
     hash.update(domain(T));
     hash.update(bytes);
     return hash.finalResult();
@@ -365,7 +366,7 @@ pub fn verify(comptime T: type, a: std.mem.Allocator, signed: Signed(T), expecte
     );
 }
 pub fn subjectId(subject: Subject) Digest {
-    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    var hash = Sha256.init(.{});
     hash.update("protean-placement/1/subject\x00");
     hash.update(&subject.task);
     hash.update(&.{@intFromBool(subject.work != null)});
@@ -373,7 +374,7 @@ pub fn subjectId(subject: Subject) Digest {
     return hash.finalResult();
 }
 pub fn controlId(control: Control) Digest {
-    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    var hash = Sha256.init(.{});
     hash.update("protean-placement/1/controller-operation\x00");
     hash.update(&control.subject.task);
     hash.update(&control.controller.key);

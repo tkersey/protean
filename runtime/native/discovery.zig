@@ -6,6 +6,7 @@ const values = @import("values.zig");
 const protocol = @import("protocol.zig");
 const registry = @import("registry.zig");
 const contracts = @import("protean_contracts");
+const Sha256 = @import("hash_abi.zig").Sha256;
 
 pub const Assets = struct { image: []const u8, application: []const u8, manifest: []const u8 };
 /// Non-secret identities derived from the currently admitted launch profile.
@@ -19,7 +20,7 @@ pub const Artifact = struct {
     fn freeze(a: std.mem.Allocator, value: json.Value, schema_id: []const u8) !Artifact {
         const bytes = try json.canonical(a, value);
         var sha256: [32]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(bytes, &sha256, .{});
+        Sha256.hash(bytes, &sha256, .{});
         return .{ .bytes = bytes, .sha256 = sha256, .schema_id = schema_id };
     }
     fn reference(self: Artifact, a: std.mem.Allocator) !json.Value {
@@ -143,7 +144,7 @@ fn publicMetadata(a: std.mem.Allocator, metadata: json.Value) !json.Value {
 
 pub fn digest(a: std.mem.Allocator, bytes: []const u8) ![]const u8 {
     var hash: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(bytes, &hash, .{});
+    Sha256.hash(bytes, &hash, .{});
     return a.dupe(u8, &std.fmt.bytesToHex(hash, .lower));
 }
 

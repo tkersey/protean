@@ -824,7 +824,7 @@ pub const Store = struct {
     pub fn commit(self: *Store, transition: []const u8) !Head {
         try self.writing();
         if (self.head.generation == std.math.maxInt(i64)) return error.Capacity;
-        var hash = std.crypto.hash.sha2.Sha256.init(.{});
+        var hash = hash_abi.Sha256.init(.{});
         hash.update("agent.native.store.v1\x00");
         hash.update(&self.head.digest);
         var generation: [8]u8 = undefined;
