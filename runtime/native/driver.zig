@@ -23,7 +23,7 @@ fn Record(comptime T: type) type {
                         @compileError("not a natural record field: " ++ @typeName(T));
                     natural(digest, value);
                 },
-                .@"enum" => natural(digest, @backingInt(value)),
+                .@"enum" => |info| Record(info.tag_type).hash(digest, @backingInt(value)),
                 .pointer => |info| {
                     if (info.size != .slice or info.child != u8)
                         @compileError("not a byte record field: " ++ @typeName(T));
@@ -38,7 +38,8 @@ fn Record(comptime T: type) type {
                 .@"struct" => |info| inline for (info.field_names, info.field_types) |field, Field|
                     Record(Field).hash(digest, @field(value, field)),
                 .@"union" => {
-                    natural(digest, @backingInt(std.meta.activeTag(value)));
+                    const tag = std.meta.activeTag(value);
+                    Record(@TypeOf(tag)).hash(digest, tag);
                     switch (value) {
                         inline else => |payload| Record(@TypeOf(payload)).hash(digest, payload),
                     }
@@ -425,7 +426,7 @@ pub const Driver = opaque {
     }
 };
 
-test "record digests stream the Horos record encoding into the SHA-256 entry point" {
+test "record digests match the Horos record encoding hashed by std, including declared tag values" {
     const Oracle = struct {
         fn expect(comptime T: type, value: T) !void {
             var hash = std.crypto.hash.sha2.Sha256.init(.{});
@@ -443,6 +444,14 @@ test "record digests stream the Horos record encoding into the SHA-256 entry poi
     }
     try Oracle.expect(Control, .none);
     try Oracle.expect(Control, .resume_yield);
+    const Wide = enum(u64) { a = 127, b = 128, c = 16383, d = 16384, e = std.math.maxInt(u64) };
+    inline for (comptime std.enums.values(Wide)) |tag| try Oracle.expect(Wide, tag);
+    const Open = enum(u8) { first = 255, second = 1, _ };
+    for ([_]Open{ .first, .second, @fromBackingInt(128) }) |tag| try Oracle.expect(Open, tag);
+    const Tag = enum(u16) { later = 300, earlier = 2 };
+    const Tagged = union(Tag) { later: []const u8, earlier: u64 };
+    try Oracle.expect(Tagged, .{ .later = "payload" });
+    try Oracle.expect(Tagged, .{ .earlier = 1 << 40 });
     const Fact = @import("tasks/types.zig").CompilerFact;
     const Reference = @import("state.zig").Reference;
     const Context = struct { execution: Driver.Segment, guest_work: u64, outcome: Reference };
