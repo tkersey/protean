@@ -1,11 +1,14 @@
 //! Private C ABI between the application and the optimized
 //! hash implementation. Both compile this one storage definition; neither
 //! needs SQLite/libc header translation to establish the hash ABI.
+const std = @import("std");
+const builtin = @import("builtin");
+
 pub const State = extern struct { storage: [256]u8 align(16) };
 
-pub extern fn protean_native_sha256_init(storage: *State) void;
-pub extern fn protean_native_sha256_update(storage: *State, bytes: [*]const u8, length: usize) void;
-pub extern fn protean_native_sha256_final(storage: *State, output: *[32]u8) void;
+extern fn protean_native_sha256_init(storage: *State) void;
+extern fn protean_native_sha256_update(storage: *State, bytes: [*]const u8, length: usize) void;
+extern fn protean_native_sha256_final(storage: *State, output: *[32]u8) void;
 
 pub extern fn protean_native_sha3_256(bytes: [*]const u8, length: usize, output: *[32]u8) void;
 
@@ -27,6 +30,7 @@ pub const Sha256 = struct {
 
     pub fn final(self: *Sha256, output: *[digest_length]u8) void {
         protean_native_sha256_final(&self.state, output);
+        if (comptime builtin.is_test) observation.observe(output);
     }
 
     pub fn finalResult(self: *Sha256) [digest_length]u8 {
@@ -41,3 +45,37 @@ pub const Sha256 = struct {
         self.final(output);
     }
 };
+
+pub const observation = if (builtin.is_test) struct {
+    const subjects_max = 4;
+    var keys: [subjects_max]std.atomic.Value(u64) = @splat(.init(0));
+    var counts: [subjects_max]std.atomic.Value(u64) = @splat(.init(0));
+
+    pub fn watch(subjects: []const []const u8) void {
+        std.debug.assert(subjects.len <= subjects_max);
+        for (&keys, &counts) |*watched, *count| {
+            watched.store(0, .seq_cst);
+            count.store(0, .seq_cst);
+        }
+        for (subjects, 0..) |subject, index| {
+            var named: [Sha256.digest_length]u8 = undefined;
+            Sha256.hash(subject, &named, .{});
+            keys[index].store(key(&named), .seq_cst);
+        }
+    }
+
+    pub fn observed(subject: usize) u64 {
+        return counts[subject].load(.seq_cst);
+    }
+
+    fn observe(result: *const [Sha256.digest_length]u8) void {
+        const observed_key = key(result);
+        for (&keys, &counts) |*watched, *count| {
+            if (watched.load(.seq_cst) == observed_key) _ = count.fetchAdd(1, .seq_cst);
+        }
+    }
+
+    fn key(value: *const [Sha256.digest_length]u8) u64 {
+        return @max(1, std.mem.readInt(u64, value[0..8], .little));
+    }
+} else struct {};

@@ -3,7 +3,6 @@
 const std = @import("std");
 const contracts = @import("protean_contracts");
 const state = @import("state.zig");
-const storage = @import("store.zig");
 const occurrence = @import("occurrence.zig");
 const Namespace = @import("namespace.zig").Namespace;
 const evaluator = @import("driver.zig");
@@ -52,8 +51,6 @@ pub fn Service(comptime Types: type) type {
         io: std.Io,
         namespace: *Namespace,
         assets: discovery.Assets,
-        image: storage.Content,
-        seed_source: ?storage.Content,
         application: *const discovery.Application,
         handlers: registry.Registry,
         profile: Profile,

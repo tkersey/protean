@@ -7,6 +7,7 @@ const protocol = @import("protocol.zig");
 const registry = @import("registry.zig");
 const contracts = @import("protean_contracts");
 const Sha256 = @import("hash_abi.zig").Sha256;
+const Content = @import("store.zig").Content;
 
 pub const Assets = struct { image: []const u8, application: []const u8, manifest: []const u8 };
 /// Non-secret identities derived from the currently admitted launch profile.
@@ -148,13 +149,14 @@ pub fn digest(a: std.mem.Allocator, bytes: []const u8) ![]const u8 {
     return a.dupe(u8, &std.fmt.bytesToHex(hash, .lower));
 }
 
-pub const SeedController = struct { source: []const u8, descriptor: []const u8 };
+pub const SeedController = struct { source: Content, descriptor: []const u8 };
 
 pub const Application = struct {
     arena: std.heap.ArenaAllocator,
     metadata: json.Value,
     manifest: json.Value,
     manifest_id: []const u8,
+    image: Content,
     image_identity: [32]u8,
     controller: ?SeedController = null,
     protocol_schema: json.Value = .null,
@@ -162,6 +164,8 @@ pub const Application = struct {
     public_metadata: json.Value = .null,
     schema_artifacts: [2]?Artifact = @splat(null),
     execution_mode: enum { offline, live } = .offline,
+
+    const Admission = struct { image: Content, image_identity: [32]u8, descriptor: ?[]const u8 };
 
     pub fn init(
         comptime Types: type,
@@ -174,7 +178,7 @@ pub const Application = struct {
         const storage = temporary.allocator();
         const metadata = try json.parseAsset(storage, assets.application, assets.application.len);
         const manifest = try json.parseAsset(storage, assets.manifest, assets.manifest.len);
-        try admitMetadata(Types, storage, assets, metadata.value, manifest.value);
+        const image = try admitMetadata(Types, storage, assets, metadata.value, manifest.value);
         const admitted = try data.program_image.Admitted.decode(a, assets.image);
         defer admitted.deinit();
         const image_identity = admitted.identity();
@@ -188,7 +192,7 @@ pub const Application = struct {
         const scratch = validation_arena.allocator();
         try admitSchemas(Types, scratch, metadata.value);
         try admitCapabilities(Types, scratch, metadata.value, handlers);
-        const controller = try admitController(
+        const descriptor = try admitController(
             Types,
             storage,
             scratch,
@@ -196,15 +200,11 @@ pub const Application = struct {
             admitted,
             handlers,
         );
-        return retain(
-            a,
-            storage,
-            assets,
-            metadata.value,
-            manifest.value,
-            image_identity,
-            controller,
-        );
+        return retain(a, storage, assets, metadata.value, manifest.value, .{
+            .image = image,
+            .image_identity = image_identity,
+            .descriptor = descriptor,
+        });
     }
 
     fn admitMetadata(
@@ -213,14 +213,15 @@ pub const Application = struct {
         assets: Assets,
         metadata: json.Value,
         manifest: json.Value,
-    ) !void {
+    ) !Content {
         try sameField(metadata, "format", "agent-native-application/v1");
         try sameField(metadata, "application_id", Types.application_id);
         try sameField(metadata, "application_version", Types.application_version);
         const client_mapping = values.schemas.client_mapping;
         try sameField(metadata, "client_mapping", client_mapping);
-        const program_sha256 = try digest(storage, assets.image);
-        sameField(metadata, "program_sha256", program_sha256) catch
+        const image: Content = .of(assets.image);
+        const program_sha256 = std.fmt.bytesToHex(image.reference.digest, .lower);
+        sameField(metadata, "program_sha256", &program_sha256) catch
             return error.ApplicationProgramDigestMismatch;
         try sameField(manifest, "format", "agent-native-build/v2");
         try sameField(manifest, "client_mapping", client_mapping);
@@ -229,13 +230,14 @@ pub const Application = struct {
             "state_format",
             std.fmt.comptimePrint("agent-native-state/{d}", .{@import("store.zig").format}),
         );
-        sameField(manifest, "program_sha256", program_sha256) catch
+        sameField(manifest, "program_sha256", &program_sha256) catch
             return error.ManifestProgramDigestMismatch;
         try sameField(
             manifest,
             "application_assets_sha256",
             try digest(storage, assets.application),
         );
+        return image;
     }
 
     fn admitSchemas(comptime Types: type, scratch: std.mem.Allocator, metadata: json.Value) !void {
@@ -382,7 +384,7 @@ pub const Application = struct {
         metadata: json.Value,
         admitted: *const data.program_image.Admitted,
         handlers: registry.Registry,
-    ) !?SeedController {
+    ) !?[]const u8 {
         return if (json.get(metadata, "controller")) |item| if (item != .null) blk: {
             if (comptime !@hasDecl(Types, "ControllerInput")) return error.InvalidAssets;
             const encoded = try json.text(
@@ -420,12 +422,8 @@ pub const Application = struct {
                 )) return error.InvalidAssets;
             }
             try admitControllerImports(scratch, program, descriptor.value, handlers);
-            break :blk .{
-                .source = try json.text(
-                    json.get(item, "source_records") orelse return error.InvalidAssets,
-                ),
-                .descriptor = try storage.dupe(u8, bytes),
-            };
+            _ = try json.text(json.get(item, "source_records") orelse return error.InvalidAssets);
+            break :blk try storage.dupe(u8, bytes);
         } else null else null;
     }
 
@@ -435,8 +433,7 @@ pub const Application = struct {
         assets: Assets,
         metadata: json.Value,
         manifest: json.Value,
-        image_identity: [32]u8,
-        controller: ?SeedController,
+        admission: Admission,
     ) !Application {
         const protocol_schema = try @import("schemas.zig").document(storage, metadata, .{});
         const public_metadata = try publicMetadata(storage, metadata);
@@ -462,11 +459,11 @@ pub const Application = struct {
         const retained_protocol = try json.copy(retained, protocol_schema);
         const retained_manifest = try json.copy(retained, manifest);
         const retained_public = try publicMetadata(retained, retained_metadata);
-        const retained_controller: ?SeedController = if (controller) |seed| .{
-            .source = try json.text(
+        const retained_controller: ?SeedController = if (admission.descriptor) |descriptor| .{
+            .source = .of(try json.text(
                 json.get(json.get(retained_metadata, "controller").?, "source_records").?,
-            ),
-            .descriptor = try retained.dupe(u8, seed.descriptor),
+            )),
+            .descriptor = try retained.dupe(u8, descriptor),
         } else null;
         const retained_application_artifact: Artifact = .{
             .bytes = try retained.dupe(u8, application_artifact.bytes),
@@ -485,7 +482,8 @@ pub const Application = struct {
             .metadata = retained_metadata,
             .manifest = retained_manifest,
             .manifest_id = retained_manifest_id,
-            .image_identity = image_identity,
+            .image = admission.image,
+            .image_identity = admission.image_identity,
             .controller = retained_controller,
             .protocol_schema = retained_protocol,
             .protocol_schema_sha256 = retained_protocol_digest,
@@ -777,6 +775,7 @@ test "oversized discovery stays bounded and immutable schemas round-trip through
         .metadata = metadata,
         .manifest = .null,
         .manifest_id = "test",
+        .image = .of(""),
         .image_identity = @splat(0),
         .public_metadata = metadata,
         .protocol_schema = schema,
@@ -830,6 +829,7 @@ test "discovery budgets the combined description before composing a full batch" 
             .metadata = metadata,
             .manifest = .null,
             .manifest_id = "test",
+            .image = .of(""),
             .image_identity = @splat(0),
             .public_metadata = metadata,
             .protocol_schema = schema,
@@ -904,6 +904,7 @@ test "nested authored schemas remain available beyond the peer frame depth" {
             .metadata = metadata,
             .manifest = .null,
             .manifest_id = "test",
+            .image = .of(""),
             .image_identity = @splat(0),
             .public_metadata = metadata,
             .protocol_schema = protocol_schema,
@@ -1112,6 +1113,7 @@ test "discovery preserves admitted capability counts in inline and referenced me
             .metadata = metadata,
             .manifest = .null,
             .manifest_id = "test",
+            .image = .of(""),
             .image_identity = @splat(0),
             .public_metadata = metadata,
             .protocol_schema = protocol_schema,

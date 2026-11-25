@@ -865,6 +865,7 @@ const OwnerRecoveryFixture = struct {
             .metadata = .null,
             .manifest = .null,
             .manifest_id = "unit",
+            .image = .of(self.image),
             .image_identity = self.admitted_image.identity(),
         };
         self.application_live = true;
@@ -2537,6 +2538,7 @@ fn largeResultRuntime(
         .metadata = .null,
         .manifest = .null,
         .manifest_id = "unit",
+        .image = .of(image),
         .image_identity = image_identity,
     };
     defer application.deinit();
@@ -3012,7 +3014,7 @@ test "applied cancellation awaits cleanup input without recreating runnable work
         .manifest = manifest,
     };
     var application: native.discovery.Application = undefined;
-    try prepareTestApplication(&application, a, manifest, admitted.identity());
+    try prepareTestApplication(&application, a, image, manifest, admitted.identity());
     defer application.deinit();
     var handlers = try cleanupQuestionRegistry(a);
     defer handlers.deinit();
@@ -3531,6 +3533,7 @@ fn terminalCleanupRuntime(
         .metadata = .null,
         .manifest = .null,
         .manifest_id = "unit",
+        .image = .of(image),
         .image_identity = image_identity,
     };
     defer application.deinit();
@@ -3972,7 +3975,7 @@ test "completed result beyond the former wire-read ceiling remains publicly retr
         .manifest = manifest,
     };
     var application: native.discovery.Application = undefined;
-    try prepareTestApplication(&application, parent, manifest, admitted_image.identity());
+    try prepareTestApplication(&application, parent, image, manifest, admitted_image.identity());
     defer application.deinit();
     var handlers = try native.Registry.init(parent, &.{});
     defer handlers.deinit();
@@ -4042,6 +4045,7 @@ const LargeUtf8System = protean.system(.{
 fn prepareTestApplication(
     application: *native.discovery.Application,
     parent: std.mem.Allocator,
+    image: []const u8,
     manifest: []const u8,
     identity: [32]u8,
 ) !void {
@@ -4050,6 +4054,7 @@ fn prepareTestApplication(
         .metadata = .null,
         .manifest = .null,
         .manifest_id = "unit",
+        .image = .of(image),
         .image_identity = identity,
     };
     application.manifest = (try native.json.parse(
@@ -5097,6 +5102,7 @@ const FairSchedulingFixture = struct {
             .metadata = .null,
             .manifest = .null,
             .manifest_id = "unit",
+            .image = .of(self.image),
             .image_identity = self.admitted.identity(),
         };
         self.application_ready = true;
@@ -5877,6 +5883,7 @@ fn retainedCaptureGeneration(
         .metadata = .null,
         .manifest = .null,
         .manifest_id = "unit",
+        .image = .of(image),
         .image_identity = admitted.identity(),
     };
     defer application.deinit();
@@ -6278,6 +6285,7 @@ const PureRecoveryFixture = struct {
             .metadata = .null,
             .manifest = .null,
             .manifest_id = "unit",
+            .image = .of(self.image),
             .image_identity = self.admitted_image.identity(),
         };
         self.application_live = true;
@@ -7099,6 +7107,7 @@ const ReceiptLookupHarness = struct {
             .metadata = .null,
             .manifest = .null,
             .manifest_id = "unit",
+            .image = .of(image),
             .image_identity = admitted_image.identity(),
         };
         h.application_live = true;
@@ -8580,6 +8589,7 @@ const ControllerMicroprogressFixture = struct {
             .metadata = .null,
             .manifest = .null,
             .manifest_id = "unit",
+            .image = .of(self.image),
             .image_identity = self.admitted.identity(),
         };
         self.application_live = true;
@@ -9211,6 +9221,7 @@ const ControllerMicroprogressFixture = struct {
 
 const ImageIdentityOwner = struct {
     image: []u8,
+    identity: [32]u8,
     manifest: []u8,
     application: native.discovery.Application,
     handlers: native.Registry,
@@ -9218,6 +9229,16 @@ const ImageIdentityOwner = struct {
     profile: native.tasks.Profile,
 
     fn init(
+        self: *ImageIdentityOwner,
+        a: std.mem.Allocator,
+        frame: std.mem.Allocator,
+        comptime Program: type,
+    ) !void {
+        try self.compile(a, frame, Program);
+        try self.admit(a, frame);
+    }
+
+    fn compile(
         self: *ImageIdentityOwner,
         a: std.mem.Allocator,
         frame: std.mem.Allocator,
@@ -9235,13 +9256,18 @@ const ImageIdentityOwner = struct {
         _ = try compiled.encode(a, self.image);
         var admitted = try horos.data.program_image.Admitted.decode(a, self.image);
         defer admitted.deinit();
-        self.manifest = try ownerManifest(frame, self.image, admitted.identity(), "image-identity");
+        self.identity = admitted.identity();
+        self.manifest = try ownerManifest(frame, self.image, self.identity, "image-identity");
+    }
+
+    fn admit(self: *ImageIdentityOwner, a: std.mem.Allocator, frame: std.mem.Allocator) !void {
         self.application = .{
             .arena = .init(a),
             .metadata = .null,
             .manifest = .null,
             .manifest_id = "unit",
-            .image_identity = admitted.identity(),
+            .image = .of(self.image),
+            .image_identity = self.identity,
         };
         errdefer self.application.deinit();
         const parsed = try native.json.parse(
@@ -9264,13 +9290,15 @@ const ImageIdentityOwner = struct {
             }, presentImageIdentityQuestion),
             native.inbox.declaration(u32),
         });
+        errdefer self.handlers.deinit();
         self.profile = .{
             .id = "offline",
             .runtime_identity = @splat(42),
             .bytes = "image-identity",
+            .resources = &.{"image-identity-resource"},
             .authority = .{ .grants = &self.grants, .principal = "test", .tenant = "test" },
         };
-        const resource = try self.profile.resourceIdentity(frame, self.application.image_identity);
+        const resource = try self.profile.resourceIdentity(frame, self.identity);
         for (&self.grants, self.handlers.entries) |*grant, entry| grant.* = .{
             .identity = entry.declaration.identity,
             .resource_role = entry.declaration.resource_role,
@@ -9324,25 +9352,26 @@ test "a loaded image is hashed once, verified once when stored, and residency ch
     defer arena.deinit();
     const frame = arena.allocator();
     var owner: ImageIdentityOwner = undefined;
-    try owner.init(a, frame, FairApplication);
+    try owner.compile(a, frame, FairApplication);
+    const observation = native.testing.digest_observation;
+    observation.watch(&.{owner.image});
+    defer observation.watch(&.{});
+    try owner.admit(a, frame);
     defer owner.deinit();
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     var namespace =
         try native.Namespace.open(a, io, try imageIdentityState(frame, io, temporary.dir));
     defer expectCleanup(namespace.close());
-    const observation = native.testing.digest_observation;
-    observation.watch(owner.image);
-    defer observation.watch(&.{});
     var service = try owner.open(a, io, &namespace);
     defer expectCleanup(service.close(frame));
-    const loaded = observation.observed();
+    const loaded = observation.observed(0);
     const admitted = try service.submit(frame, "image-identity-yielder", 0);
-    const stored = observation.observed();
+    const stored = observation.observed(0);
     for (0..4) |_| try std.testing.expect(try service.pump(frame) == .progressed);
     _ = try service.message(frame, "image-identity-message", admitted.receipt.task, 7);
     _ = try service.submit(frame, "image-identity-resident", 0);
-    try std.testing.expectEqual(stored, observation.observed());
+    try std.testing.expectEqual(stored, observation.observed(0));
     try std.testing.expectEqual(1, loaded);
     try std.testing.expectEqual(2, stored);
     var task = try service.task(frame, admitted.receipt.task);
@@ -9363,9 +9392,13 @@ test "a residency check rejects a task admitted under a different image" {
     try original.init(a, frame, FairApplication);
     defer original.deinit();
     var successor: ImageIdentityOwner = undefined;
-    try successor.init(a, frame, ImageIdentitySuccessor);
-    defer successor.deinit();
+    try successor.compile(a, frame, ImageIdentitySuccessor);
     try std.testing.expect(!std.mem.eql(u8, original.image, successor.image));
+    const observation = native.testing.digest_observation;
+    observation.watch(&.{successor.image});
+    defer observation.watch(&.{});
+    try successor.admit(a, frame);
+    defer successor.deinit();
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     var namespace =
@@ -9376,22 +9409,35 @@ test "a residency check rejects a task admitted under a different image" {
         defer expectCleanup(service.close(frame));
         break :admitted (try service.submit(frame, "image-identity-waiting", 3)).receipt.task;
     };
-    const observation = native.testing.digest_observation;
-    observation.watch(successor.image);
-    defer observation.watch(&.{});
     {
         var service = try successor.open(a, io, &namespace);
         defer expectCleanup(service.close(frame));
-        try std.testing.expectEqual(1, observation.observed());
+        try std.testing.expectEqual(1, observation.observed(0));
         const generation = namespace.store.head.generation;
         try std.testing.expectError(
             error.IncompatibleProfile,
             service.message(frame, "image-identity-foreign", task_id, 7),
         );
         try std.testing.expectEqual(generation, namespace.store.head.generation);
-        try std.testing.expectEqual(1, observation.observed());
+        try std.testing.expectEqual(1, observation.observed(0));
     }
     var service = try original.open(a, io, &namespace);
     defer expectCleanup(service.close(frame));
     _ = try service.message(frame, "image-identity-accepted", task_id, 7);
+}
+
+test "image identity admission releases every acquisition when allocation fails" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var owner: ImageIdentityOwner = undefined;
+    try owner.compile(a, arena.allocator(), FairApplication);
+    try std.testing.checkAllAllocationFailures(a, admitImageIdentity, .{&owner});
+}
+
+fn admitImageIdentity(a: std.mem.Allocator, owner: *ImageIdentityOwner) !void {
+    var frame = std.heap.ArenaAllocator.init(a);
+    defer frame.deinit();
+    try owner.admit(a, frame.allocator());
+    owner.deinit();
 }

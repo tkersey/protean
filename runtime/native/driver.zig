@@ -3,6 +3,7 @@
 const std = @import("std");
 const kosmos = @import("kosmos");
 const data = @import("horos_data");
+const Content = @import("store.zig").Content;
 const Sha256 = @import("hash_abi.zig").Sha256;
 
 pub fn recordDigest(comptime T: type, value: T) [32]u8 {
@@ -60,10 +61,8 @@ fn natural(digest: *Sha256, value: u64) void {
     digest.update(encoded[0..length]);
 }
 
-fn capsuleReference(bytes: []const u8) kosmos.RuntimeCapsule.Reference {
-    var digest: [32]u8 = undefined;
-    Sha256.hash(bytes, &digest, .{});
-    return .{ .digest = digest, .bytes = bytes.len };
+fn capsuleReference(content: Content) kosmos.RuntimeCapsule.Reference {
+    return .{ .digest = content.reference.digest, .bytes = content.reference.bytes };
 }
 
 const SegmentOrigin = struct {
@@ -98,13 +97,13 @@ pub const Program = opaque {
     fn storage(self: *Program) *ProgramStorage {
         return @ptrCast(@alignCast(self));
     }
-    pub fn open(a: std.mem.Allocator, image: []const u8) !*Program {
+    pub fn open(a: std.mem.Allocator, image: Content) !*Program {
         return openSelected(a, image, null);
     }
     /// Runtime selection is made by the task owner after artifact approval.
     pub fn openSelected(
         a: std.mem.Allocator,
-        image: []const u8,
+        image: Content,
         runtime: ?*const kosmos.RuntimeArtifact,
     ) !*Program {
         const owner = try a.create(ProgramStorage);
@@ -116,9 +115,9 @@ pub const Program = opaque {
         };
         owner.prepared = if (runtime) |selected| try kosmos.Prepared.initWithRuntime(
             a,
-            image,
+            image.bytes,
             selected,
-        ) else try kosmos.Prepared.init(a, image);
+        ) else try kosmos.Prepared.init(a, image.bytes);
         return @ptrCast(owner);
     }
     pub fn close(self: *Program) !void {
@@ -161,7 +160,7 @@ pub const Driver = opaque {
         instance: data.invocation.Instance,
         runtime: ?*const kosmos.RuntimeArtifact,
     ) !*Driver {
-        const program = try Program.openSelected(a, image, runtime);
+        const program = try Program.openSelected(a, .of(image), runtime);
         errdefer program.destroyUnreferenced();
         const driver = try start(a, program, instance);
         driver.storage().own_program = true;
@@ -179,7 +178,7 @@ pub const Driver = opaque {
     ) !*Driver {
         var envelope = try kosmos.RuntimeCapsule.read(a, bytes);
         defer envelope.deinit();
-        const program = try Program.openSelected(a, image, runtime);
+        const program = try Program.openSelected(a, .of(image), runtime);
         errdefer program.destroyUnreferenced();
         const owner = try a.create(Storage);
         errdefer a.destroy(owner);
@@ -316,10 +315,10 @@ pub const Driver = opaque {
         owner.capsule = null;
         owner.capsule_provenance = null;
         owner.segment_origin = .{
-            .input = capsuleReference(switch (instance) {
+            .input = capsuleReference(.of(switch (instance) {
                 .initial_args => |args| args,
                 .state => |state| state,
-            }),
+            })),
             .image = program.storage().image,
             .runtime = prepared.runtime.identity,
             .initial = instance == .initial_args,
@@ -371,7 +370,7 @@ pub const Driver = opaque {
         self.clearReceipt();
         owner.checkpoint = checkpoint;
         if (owner.segment_origin) |*origin| {
-            origin.input = capsuleReference(checkpoint.bytes());
+            origin.input = capsuleReference(.of(checkpoint.bytes()));
             origin.initial = false;
         }
         return .{
@@ -475,7 +474,7 @@ test "record digests stream the Horos record encoding into the SHA-256 entry poi
     for ([_][]const u8{ "", "abc", &repeated }) |bytes| {
         try std.testing.expectEqualDeep(
             kosmos.RuntimeCapsule.reference(bytes),
-            capsuleReference(bytes),
+            capsuleReference(.of(bytes)),
         );
     }
 }

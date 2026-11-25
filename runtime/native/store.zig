@@ -1,22 +1,17 @@
 //! Transactional environmental state. Kosmos bytes are opaque objects; every
 //! acknowledged mutation publishes its receipt, records and events together.
 const std = @import("std");
-const builtin = @import("builtin");
 const contracts = @import("protean_contracts");
 const sqlite = @import("sqlite.zig");
 const state = @import("state.zig");
 const occurrence = @import("occurrence.zig");
-const hash_abi = @import("hash_abi.zig");
+const Sha256 = @import("hash_abi.zig").Sha256;
 const Digest = state.Digest;
 pub const format: u32 = @import("native_options").state_format;
 
 pub fn digest(bytes: []const u8) Digest {
-    var hash: hash_abi.State = undefined;
-    hash_abi.protean_native_sha256_init(&hash);
-    hash_abi.protean_native_sha256_update(&hash, bytes.ptr, bytes.len);
     var result: Digest = undefined;
-    hash_abi.protean_native_sha256_final(&hash, &result);
-    if (comptime builtin.is_test) digest_observation.observe(&result);
+    Sha256.hash(bytes, &result, .{});
     return result;
 }
 
@@ -28,30 +23,6 @@ pub const Content = struct {
         return .{ .bytes = bytes, .reference = .{ .digest = digest(bytes), .bytes = bytes.len } };
     }
 };
-
-pub const digest_observation = if (builtin.is_test) struct {
-    var subject: std.atomic.Value(u64) = .init(0);
-    var count: std.atomic.Value(u64) = .init(0);
-
-    pub fn watch(bytes: []const u8) void {
-        subject.store(0, .seq_cst);
-        count.store(0, .seq_cst);
-        if (bytes.len == 0) return;
-        var named: Digest = undefined;
-        hash_abi.Sha256.hash(bytes, &named, .{});
-        subject.store(key(&named), .seq_cst);
-    }
-    pub fn observed() u64 {
-        return count.load(.seq_cst);
-    }
-    fn observe(result: *const Digest) void {
-        const watched = subject.load(.seq_cst);
-        if (watched != 0 and watched == key(result)) _ = count.fetchAdd(1, .seq_cst);
-    }
-    fn key(value: *const Digest) u64 {
-        return @max(1, std.mem.readInt(u64, value[0..8], .little));
-    }
-} else struct {};
 
 test "object digests retain SHA-256 across padding and large input boundaries" {
     try std.testing.expectEqualStrings(
@@ -70,27 +41,28 @@ test "object digests retain SHA-256 across padding and large input boundaries" {
         std.crypto.hash.sha2.Sha256.hash(bytes[0..length], &expected, .{});
         try std.testing.expectEqualSlices(u8, &expected, &digest(bytes[0..length]));
         const prefix = @min(length, 7);
-        var hash: hash_abi.State = undefined;
-        hash_abi.protean_native_sha256_init(&hash);
-        hash_abi.protean_native_sha256_update(&hash, bytes.ptr, prefix);
-        hash_abi.protean_native_sha256_update(&hash, bytes[prefix..length].ptr, length - prefix);
-        var streamed: Digest = undefined;
-        hash_abi.protean_native_sha256_final(&hash, &streamed);
-        try std.testing.expectEqual(expected, streamed);
+        var hash: Sha256 = .init(.{});
+        hash.update(bytes[0..prefix]);
+        hash.update(bytes[prefix..length]);
+        try std.testing.expectEqual(expected, hash.finalResult());
     }
 }
 
-test "digest observation keys on content and counts concurrent digests without retaining bytes" {
+test "digest observation counts every entry-point digest of each subject by content" {
     const io = std.testing.io;
-    const observation = digest_observation;
+    const observation = @import("hash_abi.zig").observation;
     const subject = try std.testing.allocator.dupe(u8, "observed subject bytes");
-    observation.watch(subject);
+    observation.watch(&.{ subject, "other observed subject" });
     defer observation.watch(&.{});
     std.testing.allocator.free(subject);
     const Worker = struct {
         fn run() void {
             for (0..64) |_| {
                 _ = digest("observed subject bytes");
+                var streamed: Sha256 = .init(.{});
+                streamed.update("other observed ");
+                streamed.update("subject");
+                _ = streamed.finalResult();
                 _ = digest("unobserved other bytes");
             }
         }
@@ -104,10 +76,12 @@ test "digest observation keys on content and counts concurrent digests without r
             started += 1;
         }
     }
-    try std.testing.expectEqual(4 * 64, observation.observed());
+    try std.testing.expectEqual(4 * 64, observation.observed(0));
+    try std.testing.expectEqual(4 * 64, observation.observed(1));
+    try std.testing.expectEqual(0, observation.observed(2));
     observation.watch(&.{});
     _ = digest("observed subject bytes");
-    try std.testing.expectEqual(0, observation.observed());
+    try std.testing.expectEqual(0, observation.observed(0));
 }
 
 pub const Head = struct { generation: u64, parent: Digest, digest: Digest };
@@ -862,7 +836,7 @@ pub const Store = struct {
     pub fn commit(self: *Store, transition: []const u8) !Head {
         try self.writing();
         if (self.head.generation == std.math.maxInt(i64)) return error.Capacity;
-        var hash = hash_abi.Sha256.init(.{});
+        var hash: Sha256 = .init(.{});
         hash.update("agent.native.store.v1\x00");
         hash.update(&self.head.digest);
         var generation: [8]u8 = undefined;
@@ -959,15 +933,14 @@ pub const Store = struct {
         };
         if (blob.length() != ref.bytes) return error.CorruptState;
         const hashed = inserted or duplicate == .hashed;
-        var hash: hash_abi.State = undefined;
-        hash_abi.protean_native_sha256_init(&hash);
+        var hash: Sha256 = .init(.{});
         var buffer: [64 * 1024]u8 = undefined;
         var prior: [64 * 1024]u8 = undefined;
         var offset: usize = 0;
         while (offset < ref.bytes) {
             const chunk = buffer[0..@min(buffer.len, ref.bytes - offset)];
             try source.read(chunk);
-            if (hashed) hash_abi.protean_native_sha256_update(&hash, chunk.ptr, chunk.len);
+            if (hashed) hash.update(chunk);
             if (inserted) {
                 try blob.write(chunk, offset);
             } else {
@@ -979,10 +952,7 @@ pub const Store = struct {
         closed = true;
         try blob.close();
         if (!hashed) return;
-        var observed: Digest = undefined;
-        hash_abi.protean_native_sha256_final(&hash, &observed);
-        if (comptime builtin.is_test) digest_observation.observe(&observed);
-        if (!std.mem.eql(u8, &observed, &ref.digest)) return error.InvalidObject;
+        if (!std.mem.eql(u8, &hash.finalResult(), &ref.digest)) return error.InvalidObject;
     }
     pub fn object(self: *Store, a: std.mem.Allocator, ref: state.Reference, limit: ?usize) ![]u8 {
         if (limit != null and ref.bytes > limit.?) return error.Capacity;
@@ -1025,22 +995,19 @@ pub const Store = struct {
             std.log.err("object blob cleanup failed: {s}", .{@errorName(err)});
         };
         if (blob.length() != ref.bytes) return error.CorruptState;
-        var hash: hash_abi.State = undefined;
-        hash_abi.protean_native_sha256_init(&hash);
+        var hash: Sha256 = .init(.{});
         var buffer: [64 * 1024]u8 = undefined;
         var offset: usize = 0;
         while (offset < location.bytes) {
             const chunk = buffer[0..@min(buffer.len, location.bytes - offset)];
             try blob.read(chunk, offset);
-            hash_abi.protean_native_sha256_update(&hash, chunk.ptr, chunk.len);
+            hash.update(chunk);
             try sink.write(chunk);
             offset += chunk.len;
         }
         closed = true;
         try blob.close();
-        var observed: Digest = undefined;
-        hash_abi.protean_native_sha256_final(&hash, &observed);
-        if (!std.mem.eql(u8, &observed, &ref.digest)) return self.corrupt();
+        if (!std.mem.eql(u8, &hash.finalResult(), &ref.digest)) return self.corrupt();
     }
     /// Private occurrence lookup. Public artifact reads require a separate
     /// task/audience-bound artifact record, never a bare content digest.

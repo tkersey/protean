@@ -42,20 +42,15 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             profile: Profile,
         ) !Self {
             try profile.validate();
-            const image: storage.Content = .of(assets.image);
-            const seed_source: ?storage.Content =
-                if (application.controller) |seed| .of(seed.source) else null;
             var self: Self = .{
                 .allocator = a,
                 .io = io,
                 .namespace = namespace,
                 .assets = assets,
-                .image = image,
-                .seed_source = seed_source,
                 .application = application,
                 .handlers = handlers,
                 .profile = profile,
-                .program = try evaluator.Program.open(a, image.bytes),
+                .program = try evaluator.Program.open(a, application.image),
             };
             errdefer self.program.close() catch |err| {
                 std.log.err("unpublished program cleanup failed: {s}", .{@errorName(err)});

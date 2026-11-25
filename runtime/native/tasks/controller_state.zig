@@ -65,11 +65,11 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 binding.image,
             )) return error.CorruptState;
             if (binding.predecessor == null) {
-                const seed = self.seed_source orelse return error.InvalidArchive;
+                const seed = self.application.controller orelse return error.InvalidArchive;
                 if (binding.epoch != 0 or binding.activated_at != 1 or
                     !std.meta.eql(binding.image, value.image) or
                     !std.meta.eql(binding.program_identity, self.application.image_identity) or
-                    !std.meta.eql(program.value.description.source, seed.reference))
+                    !std.meta.eql(program.value.description.source, seed.source.reference))
                     return error.InvalidArchive;
             }
             return binding;
