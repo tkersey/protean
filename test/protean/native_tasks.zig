@@ -9317,7 +9317,7 @@ fn imageIdentityState(frame: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) ![]
     return std.fmt.allocPrint(frame, "{s}/state", .{buffer[0..length]});
 }
 
-test "a loaded image is hashed once and every residency check reuses its digest" {
+test "a loaded image is hashed once, verified once when stored, and residency checks reuse it" {
     const a = std.testing.allocator;
     const io = std.testing.io;
     var arena = std.heap.ArenaAllocator.init(a);
@@ -9341,9 +9341,10 @@ test "a loaded image is hashed once and every residency check reuses its digest"
     const stored = observation.observed();
     for (0..4) |_| try std.testing.expect(try service.pump(frame) == .progressed);
     _ = try service.message(frame, "image-identity-message", admitted.receipt.task, 7);
+    _ = try service.submit(frame, "image-identity-resident", 0);
     try std.testing.expectEqual(stored, observation.observed());
-    try std.testing.expectEqual(loaded, stored);
     try std.testing.expectEqual(1, loaded);
+    try std.testing.expectEqual(2, stored);
     var task = try service.task(frame, admitted.receipt.task);
     defer task.deinit();
     var expected: [32]u8 = undefined;

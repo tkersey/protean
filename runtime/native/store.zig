@@ -913,6 +913,9 @@ pub const Store = struct {
     }
 
     pub fn putContent(self: *Store, content: Content) !state.Reference {
+        try self.writing();
+        errdefer self.rollback();
+        if (content.bytes.len != content.reference.bytes) return error.InvalidObject;
         var source = struct {
             bytes: []const u8,
             pub fn read(this: *@This(), target: []u8) !void {
@@ -920,7 +923,7 @@ pub const Store = struct {
                 this.bytes = this.bytes[target.len..];
             }
         }{ .bytes = content.bytes };
-        try self.storeObject(content.reference, &source);
+        try self.storeObject(content.reference, &source, .compared);
         return content.reference;
     }
 
@@ -928,24 +931,17 @@ pub const Store = struct {
     /// Neither a new object nor a duplicate is trusted until every byte matches
     /// its digest. A failed acquisition rolls back the entire transaction.
     pub fn acquireObject(self: *Store, ref: state.Reference, source: anytype) !void {
-        try self.writing();
-        errdefer self.rollback();
-        var hashed = struct {
-            source: @TypeOf(source),
-            hash: hash_abi.State,
-            pub fn read(this: *@This(), target: []u8) !void {
-                try this.source.read(target);
-                hash_abi.protean_native_sha256_update(&this.hash, target.ptr, target.len);
-            }
-        }{ .source = source, .hash = undefined };
-        hash_abi.protean_native_sha256_init(&hashed.hash);
-        try self.storeObject(ref, &hashed);
-        var observed: Digest = undefined;
-        hash_abi.protean_native_sha256_final(&hashed.hash, &observed);
-        if (!std.mem.eql(u8, &observed, &ref.digest)) return error.InvalidObject;
+        return self.storeObject(ref, source, .hashed);
     }
 
-    fn storeObject(self: *Store, ref: state.Reference, source: anytype) !void {
+    const Duplicate = enum { compared, hashed };
+
+    fn storeObject(
+        self: *Store,
+        ref: state.Reference,
+        source: anytype,
+        comptime duplicate: Duplicate,
+    ) !void {
         try self.writing();
         errdefer self.rollback();
         if (ref.bytes > (try self.database.blobLimit())) return error.Capacity;
@@ -962,12 +958,16 @@ pub const Store = struct {
             std.log.err("object blob cleanup failed: {s}", .{@errorName(err)});
         };
         if (blob.length() != ref.bytes) return error.CorruptState;
+        const hashed = inserted or duplicate == .hashed;
+        var hash: hash_abi.State = undefined;
+        hash_abi.protean_native_sha256_init(&hash);
         var buffer: [64 * 1024]u8 = undefined;
         var prior: [64 * 1024]u8 = undefined;
         var offset: usize = 0;
         while (offset < ref.bytes) {
             const chunk = buffer[0..@min(buffer.len, ref.bytes - offset)];
             try source.read(chunk);
+            if (hashed) hash_abi.protean_native_sha256_update(&hash, chunk.ptr, chunk.len);
             if (inserted) {
                 try blob.write(chunk, offset);
             } else {
@@ -978,6 +978,11 @@ pub const Store = struct {
         }
         closed = true;
         try blob.close();
+        if (!hashed) return;
+        var observed: Digest = undefined;
+        hash_abi.protean_native_sha256_final(&hash, &observed);
+        if (comptime builtin.is_test) digest_observation.observe(&observed);
+        if (!std.mem.eql(u8, &observed, &ref.digest)) return error.InvalidObject;
     }
     pub fn object(self: *Store, a: std.mem.Allocator, ref: state.Reference, limit: ?usize) ![]u8 {
         if (limit != null and ref.bytes > limit.?) return error.Capacity;
@@ -1847,6 +1852,48 @@ test "actual SQLite storage exhaustion rolls back unpublished objects" {
     // reopen; recovery must not turn uncertainty into a fresh admission.
     try std.testing.expect(store.fenced);
     try std.testing.expectError(error.StorageUnavailable, store.begin());
+}
+
+test "stored content must be exactly the bytes its reference names" {
+    const a = std.testing.allocator;
+    const db = try sqlite.Database.open(a, ":memory:", true);
+    defer closeTestDatabase(db);
+    var store = try Store.init(a, db, true, @splat(7));
+    const bytes = "content named by its own digest";
+    const resident = "resident object of equal length";
+    try std.testing.expectEqual(bytes.len, resident.len);
+    const forged = [_]Content{
+        .{ .bytes = bytes, .reference = Content.of(resident).reference },
+        .{ .bytes = bytes, .reference = .{ .digest = digest(bytes), .bytes = bytes.len + 1 } },
+        .{ .bytes = bytes, .reference = Content.of(bytes[0 .. bytes.len - 1]).reference },
+    };
+    for (forged) |content| {
+        try store.begin();
+        try std.testing.expectError(error.InvalidObject, store.putContent(content));
+        try std.testing.expect(!store.transaction);
+        try std.testing.expect(!store.fenced);
+        try std.testing.expectError(
+            error.MissingArtifact,
+            store.object(a, content.reference, null),
+        );
+    }
+    try store.begin();
+    const stored = try store.putContent(.of(resident));
+    _ = try store.commit("resident-content");
+    try store.begin();
+    try std.testing.expectError(
+        error.CorruptState,
+        store.putContent(.{ .bytes = bytes, .reference = stored }),
+    );
+    try std.testing.expect(!store.transaction);
+    try store.begin();
+    try std.testing.expectEqualDeep(Content.of(bytes).reference, try store.putContent(.of(bytes)));
+    _ = try store.commit("verified-content");
+    for ([_][]const u8{ resident, bytes }) |expected| {
+        const actual = try store.object(a, Content.of(expected).reference, null);
+        defer a.free(actual);
+        try std.testing.expectEqualStrings(expected, actual);
+    }
 }
 
 test "integrity epochs survive owner appends but require each committed head to be sealed" {
