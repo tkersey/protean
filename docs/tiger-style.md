@@ -79,12 +79,19 @@ storage. Measure before adding caches; define their key, invalidation and owner.
 Keep build inputs tracked so cached builds observe changed source.
 
 Runtime SHA-256 has one entry point, `hash_abi.Sha256`, which selects CPU
-extensions or Protean's software implementation once. `zig build lint` rejects
-every reference to the standard library's `sha2` namespace in tracked Zig
-source. The documented exceptions are test oracles (test declarations and
-`test/`), the standalone dependency setup tool `tools/native/dependencies.zig`,
-the build-time asset emitter `tools/native/emit.zig` and the accelerated
-implementation `runtime/native/hash_accelerated.zig`.
+extensions or Protean's software implementation once; the raw hash ABI
+functions are private to it. Product code may reference only allowlisted
+`std.crypto` members: `secureZero`, `sign.Ed25519` and `hash.sha3.Sha3_256`.
+`zig build lint` rejects every other `std.crypto` path in tracked Zig source,
+including SHA-256 composites such as HMAC, HKDF and ECDSA, a `crypto` member
+reached through an alias or `@field`, computed `@field` access on `std`, and
+`std` used other than through member access or an alias declaration. Extend
+the allowlist in `tools/native/sha256_entry.zig` only with members that cannot
+compute SHA-256. The documented exceptions are test oracles (test declarations
+and `test/`), the standalone dependency setup tool
+`tools/native/dependencies.zig`, the build-time asset emitter
+`tools/native/emit.zig` and the accelerated implementation
+`runtime/native/hash_accelerated.zig`.
 
 ## Mechanical gate
 
