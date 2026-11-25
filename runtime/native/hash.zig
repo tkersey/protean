@@ -97,10 +97,7 @@ const x86 = struct {
 };
 
 export fn protean_native_sha256_init(storage: *abi.State) void {
-    switch (path()) {
-        .software => software.init(storage),
-        .accelerated => accelerated.init(storage),
-    }
+    init(path(), storage);
 }
 
 export fn protean_native_sha256_update(
@@ -108,14 +105,29 @@ export fn protean_native_sha256_update(
     bytes: [*]const u8,
     length: usize,
 ) void {
-    switch (path()) {
+    update(path(), storage, bytes, length);
+}
+
+export fn protean_native_sha256_final(storage: *abi.State, output: *[32]u8) void {
+    final(path(), storage, output);
+}
+
+fn init(selected: Path, storage: *abi.State) void {
+    switch (selected) {
+        .software => software.init(storage),
+        .accelerated => accelerated.init(storage),
+    }
+}
+
+fn update(selected: Path, storage: *abi.State, bytes: [*]const u8, length: usize) void {
+    switch (selected) {
         .software => software.update(storage, bytes, length),
         .accelerated => accelerated.update(storage, bytes, length),
     }
 }
 
-export fn protean_native_sha256_final(storage: *abi.State, output: *[32]u8) void {
-    switch (path()) {
+fn final(selected: Path, storage: *abi.State, output: *[32]u8) void {
+    switch (selected) {
         .software => software.final(storage, output),
         .accelerated => accelerated.final(storage, output),
     }
@@ -385,34 +397,32 @@ fn expectRandomAgreement(seed: u64, cases: usize, longest: usize) !void {
     }
 }
 
-fn exportedDigest(bytes: []const u8, split: usize) [32]u8 {
+fn dispatchedDigest(selected: Path, bytes: []const u8, split: usize) [32]u8 {
     var state: abi.State = undefined;
-    protean_native_sha256_init(&state);
-    protean_native_sha256_update(&state, bytes.ptr, split);
-    protean_native_sha256_update(&state, bytes[split..].ptr, bytes.len - split);
+    init(selected, &state);
+    update(selected, &state, bytes.ptr, split);
+    update(selected, &state, bytes[split..].ptr, bytes.len - split);
     var output: [32]u8 = undefined;
-    protean_native_sha256_final(&state, &output);
+    final(selected, &state, &output);
     return output;
 }
 
-test "the exported entry points produce the software oracle digest on both dispatch paths" {
+test "each available dispatch path produces the software oracle digest" {
     const recorded = path();
-    defer decision.store(@backingInt(recorded), .release);
     var bytes: [1031]u8 = undefined;
     for (&bytes, 0..) |*byte, index| byte.* = @truncate(index *% 29);
     var exercised: usize = 0;
-    for ([_]Path{ .software, .accelerated }) |forced| {
-        if (forced == .accelerated and !acceleratedAvailable()) continue;
-        decision.store(@backingInt(forced), .release);
-        try std.testing.expectEqual(forced, path());
+    for ([_]Path{ .software, .accelerated }) |selected| {
+        if (selected == .accelerated and !acceleratedAvailable()) continue;
         for ([_]usize{ 0, 1, 55, 56, 63, 64, 65, 127, 128, 129, 1031 }) |length| {
             const input = bytes[0..length];
             const expected = digestOf(software, input, 0);
             for ([_]usize{ 0, @min(length, 7), length / 2, length }) |split| {
-                try std.testing.expectEqual(expected, exportedDigest(input, split));
+                try std.testing.expectEqual(expected, dispatchedDigest(selected, input, split));
             }
         }
         exercised += 1;
     }
     try std.testing.expectEqual(@as(usize, if (acceleratedAvailable()) 2 else 1), exercised);
+    try std.testing.expectEqual(recorded, path());
 }
