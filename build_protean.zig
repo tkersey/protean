@@ -227,6 +227,7 @@ const BuildGraph = struct {
         s.nativeOwner();
         s.workspaceRecovery();
         s.scheduler();
+        s.startupBenchmark();
         s.adaptiveResponse();
         s.nativeCrash();
     }
@@ -1499,6 +1500,22 @@ const BuildGraph = struct {
         const scheduler_run = s.b.addRunArtifact(scheduler_tests);
         scheduler_run.has_side_effects = true;
         s.scheduler_benchmark.dependOn(&scheduler_run.step);
+    }
+
+    fn startupBenchmark(s: *BuildGraph) void {
+        const suite = s.b.allocator.create(std.Build.Module) catch @panic("out of memory");
+        suite.init(s.b, .{ .existing = s.native_suite });
+        suite.root_source_file = s.b.path("test/protean/native_startup_benchmark.zig");
+        suite.optimize = s.optimize;
+        const tests = s.b.addTest(.{
+            .root_module = suite,
+            .filters = &.{"native startup admission benchmark"},
+        });
+        tests.step.dependOn(&s.native_guard.step);
+        const run = s.b.addRunArtifact(tests);
+        run.has_side_effects = true;
+        s.b.step("bench-native-startup", "Measure application and service preparation")
+            .dependOn(&run.step);
     }
 
     fn adaptiveResponse(s: *BuildGraph) void {
