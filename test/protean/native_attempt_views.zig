@@ -127,7 +127,7 @@ fn runViews(a: std.mem.Allocator, image: []const u8, image_id: [32]u8) !void {
         .metadata = .null,
         .manifest = (try native.json.parse(frame, manifest, .{})).value,
         .manifest_id = "unit",
-        .image = .of(image),
+        .image = .{ .digest = native.testing.digest(image), .bytes = image.len },
         .image_identity = image_id,
     };
     defer application.deinit();

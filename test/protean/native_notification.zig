@@ -182,7 +182,7 @@ fn captureRecovery(
         .metadata = .null,
         .manifest = .null,
         .manifest_id = "unit",
-        .image = .of(image),
+        .image = .{ .digest = native.testing.digest(image), .bytes = image.len },
         .image_identity = image_id,
     };
     defer application.deinit();

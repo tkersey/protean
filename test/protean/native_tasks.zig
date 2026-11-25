@@ -865,7 +865,7 @@ const OwnerRecoveryFixture = struct {
             .metadata = .null,
             .manifest = .null,
             .manifest_id = "unit",
-            .image = .of(self.image),
+            .image = .{ .digest = native.testing.digest(self.image), .bytes = self.image.len },
             .image_identity = self.admitted_image.identity(),
         };
         self.application_live = true;
@@ -2538,7 +2538,7 @@ fn largeResultRuntime(
         .metadata = .null,
         .manifest = .null,
         .manifest_id = "unit",
-        .image = .of(image),
+        .image = .{ .digest = native.testing.digest(image), .bytes = image.len },
         .image_identity = image_identity,
     };
     defer application.deinit();
@@ -3533,7 +3533,7 @@ fn terminalCleanupRuntime(
         .metadata = .null,
         .manifest = .null,
         .manifest_id = "unit",
-        .image = .of(image),
+        .image = .{ .digest = native.testing.digest(image), .bytes = image.len },
         .image_identity = image_identity,
     };
     defer application.deinit();
@@ -4054,7 +4054,7 @@ fn prepareTestApplication(
         .metadata = .null,
         .manifest = .null,
         .manifest_id = "unit",
-        .image = .of(image),
+        .image = .{ .digest = native.testing.digest(image), .bytes = image.len },
         .image_identity = identity,
     };
     application.manifest = (try native.json.parse(
@@ -5102,7 +5102,7 @@ const FairSchedulingFixture = struct {
             .metadata = .null,
             .manifest = .null,
             .manifest_id = "unit",
-            .image = .of(self.image),
+            .image = .{ .digest = native.testing.digest(self.image), .bytes = self.image.len },
             .image_identity = self.admitted.identity(),
         };
         self.application_ready = true;
@@ -5883,7 +5883,7 @@ fn retainedCaptureGeneration(
         .metadata = .null,
         .manifest = .null,
         .manifest_id = "unit",
-        .image = .of(image),
+        .image = .{ .digest = native.testing.digest(image), .bytes = image.len },
         .image_identity = admitted.identity(),
     };
     defer application.deinit();
@@ -6285,7 +6285,7 @@ const PureRecoveryFixture = struct {
             .metadata = .null,
             .manifest = .null,
             .manifest_id = "unit",
-            .image = .of(self.image),
+            .image = .{ .digest = native.testing.digest(self.image), .bytes = self.image.len },
             .image_identity = self.admitted_image.identity(),
         };
         self.application_live = true;
@@ -7107,7 +7107,7 @@ const ReceiptLookupHarness = struct {
             .metadata = .null,
             .manifest = .null,
             .manifest_id = "unit",
-            .image = .of(image),
+            .image = .{ .digest = native.testing.digest(image), .bytes = image.len },
             .image_identity = admitted_image.identity(),
         };
         h.application_live = true;
@@ -8589,7 +8589,7 @@ const ControllerMicroprogressFixture = struct {
             .metadata = .null,
             .manifest = .null,
             .manifest_id = "unit",
-            .image = .of(self.image),
+            .image = .{ .digest = native.testing.digest(self.image), .bytes = self.image.len },
             .image_identity = self.admitted.identity(),
         };
         self.application_live = true;
@@ -9266,7 +9266,7 @@ const ImageIdentityOwner = struct {
             .metadata = .null,
             .manifest = .null,
             .manifest_id = "unit",
-            .image = .of(self.image),
+            .image = .{ .digest = native.testing.digest(self.image), .bytes = self.image.len },
             .image_identity = self.identity,
         };
         errdefer self.application.deinit();

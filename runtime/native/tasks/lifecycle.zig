@@ -42,6 +42,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             profile: Profile,
         ) !Self {
             try profile.validate();
+            std.debug.assert(assets.image.len == application.image.bytes);
             var self: Self = .{
                 .allocator = a,
                 .io = io,
@@ -50,7 +51,10 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 .application = application,
                 .handlers = handlers,
                 .profile = profile,
-                .program = try evaluator.Program.open(a, application.image),
+                .program = try evaluator.Program.open(a, .{
+                    .bytes = assets.image,
+                    .reference = application.image,
+                }),
             };
             errdefer self.program.close() catch |err| {
                 std.log.err("unpublished program cleanup failed: {s}", .{@errorName(err)});
@@ -66,6 +70,9 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
         }
         pub fn store(self: *Self) *storage.Store {
             return &self.namespace.store;
+        }
+        pub fn applicationImage(self: *const Self) storage.Content {
+            return .{ .bytes = self.assets.image, .reference = self.application.image };
         }
         pub fn allowed(self: *Self) !void {
             if (self.profile.authority.revoked or !self.profile.authority.disclosure)

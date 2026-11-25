@@ -868,7 +868,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
         ) !bool {
             if (self.application.controller) |seed| {
                 if (std.meta.eql(artifact.source, seed.source.reference) and
-                    std.meta.eql(artifact.image, self.application.image.reference))
+                    std.meta.eql(artifact.image, self.application.image))
                 {
                     if (artifact.source_kind != .source_records or
                         artifact.catalog != null or
