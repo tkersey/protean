@@ -385,15 +385,34 @@ fn expectRandomAgreement(seed: u64, cases: usize, longest: usize) !void {
     }
 }
 
-test "the exported entry point produces the software oracle digest on every path" {
+fn exportedDigest(bytes: []const u8, split: usize) [32]u8 {
+    var state: abi.State = undefined;
+    protean_native_sha256_init(&state);
+    protean_native_sha256_update(&state, bytes.ptr, split);
+    protean_native_sha256_update(&state, bytes[split..].ptr, bytes.len - split);
+    var output: [32]u8 = undefined;
+    protean_native_sha256_final(&state, &output);
+    return output;
+}
+
+test "the exported entry points produce the software oracle digest on both dispatch paths" {
+    const recorded = path();
+    defer decision.store(@backingInt(recorded), .release);
     var bytes: [1031]u8 = undefined;
     for (&bytes, 0..) |*byte, index| byte.* = @truncate(index *% 29);
-    for ([_]usize{ 0, 1, 55, 56, 63, 64, 65, 127, 128, 1031 }) |length| {
-        var state: abi.State = undefined;
-        protean_native_sha256_init(&state);
-        protean_native_sha256_update(&state, bytes[0..length].ptr, length);
-        var actual: [32]u8 = undefined;
-        protean_native_sha256_final(&state, &actual);
-        try std.testing.expectEqual(digestOf(software, bytes[0..length], length / 2), actual);
+    var exercised: usize = 0;
+    for ([_]Path{ .software, .accelerated }) |forced| {
+        if (forced == .accelerated and !acceleratedAvailable()) continue;
+        decision.store(@backingInt(forced), .release);
+        try std.testing.expectEqual(forced, path());
+        for ([_]usize{ 0, 1, 55, 56, 63, 64, 65, 127, 128, 129, 1031 }) |length| {
+            const input = bytes[0..length];
+            const expected = digestOf(software, input, 0);
+            for ([_]usize{ 0, @min(length, 7), length / 2, length }) |split| {
+                try std.testing.expectEqual(expected, exportedDigest(input, split));
+            }
+        }
+        exercised += 1;
     }
+    try std.testing.expectEqual(@as(usize, if (acceleratedAvailable()) 2 else 1), exercised);
 }
