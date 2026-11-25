@@ -11,12 +11,12 @@ const Digest = state.Digest;
 pub const format: u32 = @import("native_options").state_format;
 
 pub fn digest(bytes: []const u8) Digest {
-    if (comptime builtin.is_test) digest_observation.observe(bytes);
     var hash: hash_abi.State = undefined;
     hash_abi.protean_native_sha256_init(&hash);
     hash_abi.protean_native_sha256_update(&hash, bytes.ptr, bytes.len);
     var result: Digest = undefined;
     hash_abi.protean_native_sha256_final(&hash, &result);
+    if (comptime builtin.is_test) digest_observation.observe(&result);
     return result;
 }
 
@@ -30,18 +30,26 @@ pub const Content = struct {
 };
 
 pub const digest_observation = if (builtin.is_test) struct {
-    var subject: []const u8 = &.{};
+    var subject: std.atomic.Value(u64) = .init(0);
     var count: std.atomic.Value(u64) = .init(0);
 
     pub fn watch(bytes: []const u8) void {
-        subject = bytes;
+        subject.store(0, .seq_cst);
         count.store(0, .seq_cst);
+        if (bytes.len == 0) return;
+        var named: Digest = undefined;
+        hash_abi.Sha256.hash(bytes, &named, .{});
+        subject.store(key(&named), .seq_cst);
     }
     pub fn observed() u64 {
         return count.load(.seq_cst);
     }
-    fn observe(bytes: []const u8) void {
-        if (subject.len != 0 and std.mem.eql(u8, bytes, subject)) _ = count.fetchAdd(1, .seq_cst);
+    fn observe(result: *const Digest) void {
+        const watched = subject.load(.seq_cst);
+        if (watched != 0 and watched == key(result)) _ = count.fetchAdd(1, .seq_cst);
+    }
+    fn key(value: *const Digest) u64 {
+        return @max(1, std.mem.readInt(u64, value[0..8], .little));
     }
 } else struct {};
 
@@ -70,6 +78,36 @@ test "object digests retain SHA-256 across padding and large input boundaries" {
         hash_abi.protean_native_sha256_final(&hash, &streamed);
         try std.testing.expectEqual(expected, streamed);
     }
+}
+
+test "digest observation keys on content and counts concurrent digests without retaining bytes" {
+    const io = std.testing.io;
+    const observation = digest_observation;
+    const subject = try std.testing.allocator.dupe(u8, "observed subject bytes");
+    observation.watch(subject);
+    defer observation.watch(&.{});
+    std.testing.allocator.free(subject);
+    const Worker = struct {
+        fn run() void {
+            for (0..64) |_| {
+                _ = digest("observed subject bytes");
+                _ = digest("unobserved other bytes");
+            }
+        }
+    };
+    {
+        var workers: [4]std.Io.Future(void) = undefined;
+        var started: usize = 0;
+        defer for (workers[0..started]) |*worker| worker.await(io);
+        for (&workers) |*worker| {
+            worker.* = try io.concurrent(Worker.run, .{});
+            started += 1;
+        }
+    }
+    try std.testing.expectEqual(4 * 64, observation.observed());
+    observation.watch(&.{});
+    _ = digest("observed subject bytes");
+    try std.testing.expectEqual(0, observation.observed());
 }
 
 pub const Head = struct { generation: u64, parent: Digest, digest: Digest };
