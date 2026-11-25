@@ -897,13 +897,20 @@ pub const Store = struct {
                 this.bytes = this.bytes[target.len..];
             }
         }{ .bytes = content.bytes };
-        try self.storeObject(content.reference, &source, .compared);
+        self.storeObject(content.reference, &source, .compared) catch |err| {
+            if (err == error.CorruptState and
+                !std.mem.eql(u8, &digest(content.bytes), &content.reference.digest))
+                return error.InvalidObject;
+            return err;
+        };
         return content.reference;
     }
 
     /// Acquire an exact-size source inside the caller's unpublished transaction.
-    /// Neither a new object nor a duplicate is trusted until every byte matches
-    /// its digest. A failed acquisition rolls back the entire transaction.
+    /// A duplicate whose stored length or bytes differ from the source fails
+    /// with CorruptState; otherwise a source that does not hash to its
+    /// reference fails with InvalidObject. A failed acquisition rolls back the
+    /// entire transaction.
     pub fn acquireObject(self: *Store, ref: state.Reference, source: anytype) !void {
         return self.storeObject(ref, source, .hashed);
     }
@@ -1821,7 +1828,7 @@ test "actual SQLite storage exhaustion rolls back unpublished objects" {
     try std.testing.expectError(error.StorageUnavailable, store.begin());
 }
 
-test "stored content must be exactly the bytes its reference names" {
+test "putContent reports a misnamed reference as InvalidObject and a corrupt row as CorruptState" {
     const a = std.testing.allocator;
     const db = try sqlite.Database.open(a, ":memory:", true);
     defer closeTestDatabase(db);
@@ -1849,7 +1856,7 @@ test "stored content must be exactly the bytes its reference names" {
     _ = try store.commit("resident-content");
     try store.begin();
     try std.testing.expectError(
-        error.CorruptState,
+        error.InvalidObject,
         store.putContent(.{ .bytes = bytes, .reference = stored }),
     );
     try std.testing.expect(!store.transaction);
@@ -1861,6 +1868,13 @@ test "stored content must be exactly the bytes its reference names" {
         defer a.free(actual);
         try std.testing.expectEqualStrings(expected, actual);
     }
+    const location = try store.objectLocation(stored.digest, null);
+    var corrupted = try db.openBlob("objects", "body", location.row, true);
+    try corrupted.write(&.{resident[0] ^ 1}, 0);
+    try corrupted.close();
+    try store.begin();
+    try std.testing.expectError(error.CorruptState, store.putContent(.of(resident)));
+    try std.testing.expect(!store.transaction);
 }
 
 test "integrity epochs survive owner appends but require each committed head to be sealed" {
