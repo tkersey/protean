@@ -84,6 +84,17 @@ test "digest observation counts every entry-point digest of each subject by cont
     try std.testing.expectEqual(0, observation.observed(0));
 }
 
+test "watching a repeated subject starts each of its counts at zero" {
+    const observation = @import("hash_abi.zig").observation;
+    observation.watch(&.{ "repeated subject", "repeated subject" });
+    defer observation.watch(&.{});
+    try std.testing.expectEqual(0, observation.observed(0));
+    try std.testing.expectEqual(0, observation.observed(1));
+    _ = digest("repeated subject");
+    try std.testing.expectEqual(1, observation.observed(0));
+    try std.testing.expectEqual(1, observation.observed(1));
+}
+
 pub const Head = struct { generation: u64, parent: Digest, digest: Digest };
 /// Native retention includes every portable kind and source-local snapshots.
 /// Deriving the inclusion keeps new portable kinds in the native audit too.

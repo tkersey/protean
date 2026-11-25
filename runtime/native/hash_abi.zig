@@ -53,14 +53,18 @@ pub const observation = if (builtin.is_test) struct {
 
     pub fn watch(subjects: []const []const u8) void {
         std.debug.assert(subjects.len <= subjects_max);
-        for (&keys, &counts) |*watched, *count| {
-            watched.store(0, .seq_cst);
-            count.store(0, .seq_cst);
+        var named: [subjects_max]u64 = @splat(0);
+        for (subjects, named[0..subjects.len]) |subject, *slot| {
+            var state: State = undefined;
+            protean_native_sha256_init(&state);
+            protean_native_sha256_update(&state, subject.ptr, subject.len);
+            var digest: [Sha256.digest_length]u8 = undefined;
+            protean_native_sha256_final(&state, &digest);
+            slot.* = key(&digest);
         }
-        for (subjects, 0..) |subject, index| {
-            var named: [Sha256.digest_length]u8 = undefined;
-            Sha256.hash(subject, &named, .{});
-            keys[index].store(key(&named), .seq_cst);
+        for (&keys, &counts, named) |*watched, *count, value| {
+            count.store(0, .seq_cst);
+            watched.store(value, .seq_cst);
         }
     }
 
