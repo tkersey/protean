@@ -572,7 +572,10 @@ const BuildGraph = struct {
             "check-protean",
             "Check authoring and pure contracts without Kosmos",
         );
-        const lint = s.b.step("lint", "Check formatting and the Zig source inventory");
+        const lint = s.b.step(
+            "lint",
+            "Check formatting, the Zig source inventory and the SHA-256 entry point",
+        );
         const format_check = s.b.addRunFile(.zig_exe);
         format_check.addArgs(&.{
             "fmt",
@@ -592,6 +595,7 @@ const BuildGraph = struct {
         });
         lint.dependOn(&format_check.step);
         lint.dependOn(&s.b.addSystemCommand(&.{ "sh", "tools/check_zig_paths.sh" }).step);
+        s.sha256Entry(lint);
         s.fast = s.b.step("check", "Run focused authoring and bundled Clang checks");
         s.fast.dependOn(lint);
         s.check.dependOn(s.fast);
@@ -627,6 +631,31 @@ const BuildGraph = struct {
         if (linuxX86(s.b.graph.host)) {
             for (authoring_tests) |tests| tests.use_llvm = false;
         }
+    }
+
+    fn sha256Entry(s: *BuildGraph, lint: *std.Build.Step) void {
+        const module = s.b.createModule(.{
+            .root_source_file = s.b.path("tools/native/sha256_entry.zig"),
+            .target = s.b.graph.host,
+            .optimize = .debug,
+        });
+        const use_llvm: ?bool = if (linuxX86(s.b.graph.host)) false else null;
+        const audit = s.b.addRunArtifact(s.b.addExecutable(.{
+            .name = "protean-sha256-entry",
+            .root_module = module,
+            .use_llvm = use_llvm,
+        }));
+        audit.setCwd(s.b.path("."));
+        audit.addFileArg2(s.b.path("repo_zig_paths.txt"), .{});
+        audit.has_side_effects = true;
+        audit.expectExitCode(0);
+        lint.dependOn(&audit.step);
+        const tests = s.b.addRunArtifact(s.b.addTest(.{
+            .root_module = module,
+            .use_llvm = use_llvm,
+        }));
+        tests.has_side_effects = true;
+        lint.dependOn(&tests.step);
     }
 
     fn negativeTests(s: *BuildGraph) void {

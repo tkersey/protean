@@ -226,3 +226,4 @@ tools/native/build_entry.zig
 tools/native/clang.zig
 tools/native/dependencies.zig
 tools/native/emit.zig
+tools/native/sha256_entry.zig

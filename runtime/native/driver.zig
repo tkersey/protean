@@ -3,6 +3,26 @@
 const std = @import("std");
 const kosmos = @import("kosmos");
 const data = @import("horos_data");
+const hash_abi = @import("hash_abi.zig");
+
+pub fn recordDigest(comptime T: type, a: std.mem.Allocator, value: T) ![32]u8 {
+    var measure: data.wire.Writer = .{};
+    try data.record.writeAlloc(T, a, value, &measure);
+    const encoded = try a.alloc(u8, measure.position);
+    defer a.free(encoded);
+    var writer: data.wire.Writer = .{ .output = encoded };
+    try data.record.writeAlloc(T, a, value, &writer);
+    std.debug.assert(writer.position == encoded.len);
+    var result: [32]u8 = undefined;
+    hash_abi.Sha256.hash(encoded, &result, .{});
+    return result;
+}
+
+fn capsuleReference(bytes: []const u8) kosmos.RuntimeCapsule.Reference {
+    var digest: [32]u8 = undefined;
+    hash_abi.Sha256.hash(bytes, &digest, .{});
+    return .{ .digest = digest, .bytes = bytes.len };
+}
 
 const SegmentOrigin = struct {
     input: kosmos.RuntimeCapsule.Reference,
@@ -50,7 +70,7 @@ pub const Program = opaque {
         owner.* = .{
             .parent = a,
             .prepared = undefined,
-            .image = kosmos.RuntimeCapsule.reference(image),
+            .image = capsuleReference(image),
         };
         owner.prepared = if (runtime) |selected| try kosmos.Prepared.initWithRuntime(
             a,
@@ -254,7 +274,7 @@ pub const Driver = opaque {
         owner.capsule = null;
         owner.capsule_provenance = null;
         owner.segment_origin = .{
-            .input = kosmos.RuntimeCapsule.reference(switch (instance) {
+            .input = capsuleReference(switch (instance) {
                 .initial_args => |args| args,
                 .state => |state| state,
             }),
@@ -292,18 +312,13 @@ pub const Driver = opaque {
     ) !Publication {
         const owner = self.storage();
         if (!owner.live) return error.InvalidState;
-        const segment: ?Segment = if (owner.segment_origin) |origin| blk: {
-            var hash = std.crypto.hash.sha2.Sha256.init(.{});
-            var writer: data.wire.Writer = .{ .hasher = &hash };
-            try data.record.writeAlloc(data.invocation.Control, owner.parent, control, &writer);
-            break :blk .{
-                .input = origin.input,
-                .image = origin.image,
-                .runtime = origin.runtime,
-                .initial = origin.initial,
-                .control = hash.finalResult(),
-                .quantum = quantum,
-            };
+        const segment: ?Segment = if (owner.segment_origin) |origin| .{
+            .input = origin.input,
+            .image = origin.image,
+            .runtime = origin.runtime,
+            .initial = origin.initial,
+            .control = try recordDigest(data.invocation.Control, owner.parent, control),
+            .quantum = quantum,
         } else null;
         var published = try owner.resident.publish(
             .{ .encoded = output },
@@ -314,7 +329,7 @@ pub const Driver = opaque {
         self.clearReceipt();
         owner.checkpoint = checkpoint;
         if (owner.segment_origin) |*origin| {
-            origin.input = kosmos.RuntimeCapsule.reference(checkpoint.bytes());
+            origin.input = capsuleReference(checkpoint.bytes());
             origin.initial = false;
         }
         return .{
@@ -368,6 +383,37 @@ pub const Driver = opaque {
         owner.parent.destroy(owner);
     }
 };
+
+test "record and capsule digests equal standard SHA-256 of the bytes they name" {
+    const Oracle = struct {
+        fn expectRecord(comptime T: type, value: T) !void {
+            const a = std.testing.allocator;
+            var hash = std.crypto.hash.sha2.Sha256.init(.{});
+            var writer: data.wire.Writer = .{ .hasher = &hash };
+            try data.record.writeAlloc(T, a, value, &writer);
+            try std.testing.expectEqual(hash.finalResult(), try recordDigest(T, a, value));
+        }
+    };
+    try Oracle.expectRecord(data.invocation.Control, .none);
+    try Oracle.expectRecord(data.invocation.Control, .resume_yield);
+    try Oracle.expectRecord(data.invocation.Control, .{ .reply = "reply bytes" });
+    try Oracle.expectRecord(data.invocation.Control, .{ .cancel = .{ .text = "stop" } });
+    try Oracle.expectRecord(Driver.Segment, .{
+        .input = .{ .digest = @splat(1), .bytes = 300 },
+        .image = .{ .digest = @splat(2), .bytes = 1 << 40 },
+        .runtime = @splat(3),
+        .initial = true,
+        .control = @splat(4),
+        .quantum = std.math.maxInt(u64),
+    });
+    const repeated: [1031]u8 = @splat(0x5a);
+    for ([_][]const u8{ "", "abc", &repeated }) |bytes| {
+        try std.testing.expectEqualDeep(
+            kosmos.RuntimeCapsule.reference(bytes),
+            capsuleReference(bytes),
+        );
+    }
+}
 
 test "driver retains publication across failed drive and transfers without allocation" {
     const a = std.testing.allocator;

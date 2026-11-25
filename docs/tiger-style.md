@@ -78,6 +78,14 @@ For a new data path, identify relevant CPU work, allocation, copying and retaine
 storage. Measure before adding caches; define their key, invalidation and owner.
 Keep build inputs tracked so cached builds observe changed source.
 
+Runtime SHA-256 has one entry point, `hash_abi.Sha256`, which selects CPU
+extensions or Protean's software implementation once. `zig build lint` rejects
+every reference to the standard library's `sha2` namespace in tracked Zig
+source. The documented exceptions are test oracles (test declarations and
+`test/`), the standalone dependency setup tool `tools/native/dependencies.zig`,
+the build-time asset emitter `tools/native/emit.zig` and the accelerated
+implementation `runtime/native/hash_accelerated.zig`.
+
 ## Mechanical gate
 
 `tools/tiger-style.sh` acquires the immutable skills-zig auditor used by Horos
