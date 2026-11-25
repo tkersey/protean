@@ -122,7 +122,7 @@ export fn protean_native_sha256_final(storage: *abi.State, output: *[32]u8) void
 }
 
 export fn protean_native_sha3_256(bytes: [*]const u8, length: usize, output: *[32]u8) void {
-    std.crypto.hash.sha3.Sha3_256.hash(bytes[0..length], output, .{});
+    @import("crypto.zig").Sha3_256.hash(bytes[0..length], output, .{});
 }
 
 pub const software = struct {

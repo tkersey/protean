@@ -899,7 +899,7 @@ const ConfigurationAdmission = struct {
             const scratch = s.options.scratch_allocator orelse s.a;
             const bytes = try native.configuration.readFile(scratch, s.io, path, null, true);
             defer {
-                std.crypto.secureZero(u8, bytes);
+                native.secureZero(u8, bytes);
                 scratch.free(bytes);
             }
             const token = std.mem.trim(u8, bytes, "\r\n");

@@ -21,6 +21,7 @@ runtime/native/chatgpt_tests.zig
 runtime/native/client.zig
 runtime/native/configuration.zig
 runtime/native/controller_construction.zig
+runtime/native/crypto.zig
 runtime/native/demo.zig
 runtime/native/discovery.zig
 runtime/native/driver.zig

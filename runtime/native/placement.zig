@@ -5,7 +5,7 @@ const std = @import("std");
 const contracts = @import("protean_contracts");
 const state = @import("state.zig");
 const Sha256 = @import("hash_abi.zig").Sha256;
-const Ed25519 = std.crypto.sign.Ed25519;
+const Ed25519 = @import("crypto.zig").Ed25519;
 pub const Digest = state.Digest;
 pub const Site = struct { key: [32]u8, namespace: Digest };
 pub const Subject = struct { task: state.TaskId, work: ?Digest = null };

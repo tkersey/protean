@@ -1,6 +1,7 @@
 //! Compiled native environment. Deliberately separate from Protean authoring.
 pub const json = @import("json.zig");
-pub const Sha256 = @import("hash_abi.zig").Sha256;
+pub const Sha256 = @import("crypto.zig").Sha256;
+pub const secureZero = @import("crypto.zig").secureZero;
 pub const values = @import("values.zig");
 pub const dynamic_values = @import("dynamic_values.zig");
 pub const source_records = @import("source_records.zig");

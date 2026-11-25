@@ -1,6 +1,7 @@
 const std = @import("std");
 const c = std.c;
 const protocol = @import("siwc_protocol.zig");
+const secureZero = @import("crypto.zig").secureZero;
 pub const Cancellation = ?*const std.atomic.Value(bool);
 pub const local_timeout_ms: i64 = 10_000;
 pub const credential_timeout_ms: i64 = 120_000;
@@ -49,7 +50,7 @@ pub const Output = struct {
         return self.bytes[0..self.length];
     }
     pub fn deinit(self: *Output) void {
-        std.crypto.secureZero(u8, self.bytes);
+        secureZero(u8, self.bytes);
         self.allocator.free(self.bytes);
         self.* = undefined;
     }
@@ -64,7 +65,7 @@ const Pipe = struct {
     fn drain(self: *Pipe) !void {
         if (self.eof) return;
         var extra: [1]u8 = undefined;
-        defer std.crypto.secureZero(u8, &extra);
+        defer secureZero(u8, &extra);
         const target = if (self.length == self.bytes.len) &extra else self.bytes[self.length..];
         const count = c.read(self.file.handle, target.ptr, target.len);
         if (count < 0) return switch (c.errno(count)) {
@@ -159,7 +160,7 @@ pub fn run(a: std.mem.Allocator, io: std.Io, request: Request, cancelled: Cancel
     errdefer output.deinit();
     const error_bytes = try a.alloc(u8, stderr_bytes_max);
     defer {
-        std.crypto.secureZero(u8, error_bytes);
+        secureZero(u8, error_bytes);
         a.free(error_bytes);
     }
     var child = std.process.spawn(io, .{
