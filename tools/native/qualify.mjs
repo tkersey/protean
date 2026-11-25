@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
-import {copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync} from 'node:fs';
+import {copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync} from 'node:fs';
 import {availableParallelism, totalmem} from 'node:os';
 import {basename, dirname, join, resolve} from 'node:path';
 import {runQualificationCommand} from './qualification_process.mjs';
@@ -95,6 +95,24 @@ function seedArchives(work) {
     copyFileSync(origin, partial);
     renameSync(partial, target);
   }
+}
+
+function packQualifiedProduct(work, prefix, archive) {
+  const stage = join(prefix, 'qualified-product');
+  rmSync(stage, {recursive: true, force: true});
+  mkdirSync(join(stage, 'adaptive-example'), {recursive: true});
+  const binary = join(prefix, 'bin/protean');
+  cpSync(binary, join(stage, 'protean'));
+  writeFileSync(join(stage, 'protean.build.json'), execFileSync(binary, ['describe-build']));
+  cpSync(join(work, 'tools/native/install.mjs'), join(stage, 'install.mjs'));
+  cpSync(join(work, 'docs/native-single-binary.md'), join(stage, 'RUNBOOK.md'));
+  cpSync(join(work, 'examples/adaptive/README.md'), join(stage, 'ADAPTIVE.md'));
+  cpSync(join(prefix, 'protean/adaptive'), join(stage, 'adaptive-program'), {recursive: true});
+  cpSync(join(work, 'examples/adaptive/adaptive.example.json'),
+    join(stage, 'adaptive-example/adaptive.example.json'));
+  cpSync(join(work, 'examples/adaptive/skills'), join(stage, 'adaptive-example/skills'), {recursive: true});
+  execFileSync('tar', ['-czf', archive, '-C', stage, 'protean', 'protean.build.json', 'install.mjs',
+    'RUNBOOK.md', 'ADAPTIVE.md', 'adaptive-program', 'adaptive-example']);
 }
 
 function inventory(work, prefix) {
@@ -192,6 +210,9 @@ try {
     const manifest = JSON.parse(execFileSync(join(lease.path, 'bin/protean'), ['describe-build'], {encoding: 'utf8'}));
     writeFileSync(identityPath, JSON.stringify(Object.fromEntries(identityKeys.map(key => [key, manifest[key]]))));
   }
+  const productArchive = process.env.PROTEAN_PRODUCT_ARCHIVE;
+  if (productArchive && (ran.has('product') || ran.has('native-build-and-tests')))
+    packQualifiedProduct(work, lease.path, resolve(productArchive));
   clean(work);
   assert.equal(git(work, 'rev-parse', 'HEAD'), candidate, 'qualification checkout changed');
   lease.release();
