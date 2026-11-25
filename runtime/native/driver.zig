@@ -3,24 +3,66 @@
 const std = @import("std");
 const kosmos = @import("kosmos");
 const data = @import("horos_data");
-const hash_abi = @import("hash_abi.zig");
+const Sha256 = @import("hash_abi.zig").Sha256;
 
-pub fn recordDigest(comptime T: type, a: std.mem.Allocator, value: T) ![32]u8 {
-    var measure: data.wire.Writer = .{};
-    try data.record.writeAlloc(T, a, value, &measure);
-    const encoded = try a.alloc(u8, measure.position);
-    defer a.free(encoded);
-    var writer: data.wire.Writer = .{ .output = encoded };
-    try data.record.writeAlloc(T, a, value, &writer);
-    std.debug.assert(writer.position == encoded.len);
-    var result: [32]u8 = undefined;
-    hash_abi.Sha256.hash(encoded, &result, .{});
-    return result;
+pub fn recordDigest(comptime T: type, value: T) [32]u8 {
+    var digest: Sha256 = .init(.{});
+    Record(T).hash(&digest, value);
+    return digest.finalResult();
+}
+
+fn Record(comptime T: type) type {
+    return struct {
+        fn hash(digest: *Sha256, value: T) void {
+            switch (@typeInfo(T)) {
+                .void => {},
+                .bool => digest.update(&.{@intFromBool(value)}),
+                .int => |info| {
+                    if (info.signedness != .unsigned or info.bits > 64)
+                        @compileError("not a natural record field: " ++ @typeName(T));
+                    natural(digest, value);
+                },
+                .@"enum" => natural(digest, @backingInt(value)),
+                .pointer => |info| {
+                    if (info.size != .slice or info.child != u8)
+                        @compileError("not a byte record field: " ++ @typeName(T));
+                    natural(digest, value.len);
+                    digest.update(value);
+                },
+                .array => |info| {
+                    if (info.child != u8)
+                        @compileError("not a byte record field: " ++ @typeName(T));
+                    digest.update(&value);
+                },
+                .@"struct" => |info| inline for (info.field_names, info.field_types) |field, Field|
+                    Record(Field).hash(digest, @field(value, field)),
+                .@"union" => {
+                    natural(digest, @backingInt(std.meta.activeTag(value)));
+                    switch (value) {
+                        inline else => |payload| Record(@TypeOf(payload)).hash(digest, payload),
+                    }
+                },
+                else => @compileError("not a digested record: " ++ @typeName(T)),
+            }
+        }
+    };
+}
+
+fn natural(digest: *Sha256, value: u64) void {
+    var encoded: [10]u8 = undefined;
+    const length = data.wire.naturalLength(value);
+    var remaining = value;
+    for (encoded[0..length], 1..) |*byte, position| {
+        const continued: u8 = if (position < length) 0x80 else 0;
+        byte.* = @as(u8, @as(u7, @truncate(remaining))) | continued;
+        remaining >>= 7;
+    }
+    digest.update(encoded[0..length]);
 }
 
 fn capsuleReference(bytes: []const u8) kosmos.RuntimeCapsule.Reference {
     var digest: [32]u8 = undefined;
-    hash_abi.Sha256.hash(bytes, &digest, .{});
+    Sha256.hash(bytes, &digest, .{});
     return .{ .digest = digest, .bytes = bytes.len };
 }
 
@@ -317,7 +359,7 @@ pub const Driver = opaque {
             .image = origin.image,
             .runtime = origin.runtime,
             .initial = origin.initial,
-            .control = try recordDigest(data.invocation.Control, owner.parent, control),
+            .control = recordDigest(data.invocation.Control, control),
             .quantum = quantum,
         } else null;
         var published = try owner.resident.publish(
@@ -384,29 +426,52 @@ pub const Driver = opaque {
     }
 };
 
-test "record and capsule digests equal standard SHA-256 of the bytes they name" {
+test "record digests stream the Horos record encoding into the SHA-256 entry point" {
     const Oracle = struct {
-        fn expectRecord(comptime T: type, value: T) !void {
-            const a = std.testing.allocator;
+        fn expect(comptime T: type, value: T) !void {
             var hash = std.crypto.hash.sha2.Sha256.init(.{});
             var writer: data.wire.Writer = .{ .hasher = &hash };
-            try data.record.writeAlloc(T, a, value, &writer);
-            try std.testing.expectEqual(hash.finalResult(), try recordDigest(T, a, value));
+            try data.record.writeAlloc(T, std.testing.allocator, value, &writer);
+            try std.testing.expectEqual(hash.finalResult(), recordDigest(T, value));
         }
     };
-    try Oracle.expectRecord(data.invocation.Control, .none);
-    try Oracle.expectRecord(data.invocation.Control, .resume_yield);
-    try Oracle.expectRecord(data.invocation.Control, .{ .reply = "reply bytes" });
-    try Oracle.expectRecord(data.invocation.Control, .{ .cancel = .{ .text = "stop" } });
-    try Oracle.expectRecord(Driver.Segment, .{
-        .input = .{ .digest = @splat(1), .bytes = 300 },
-        .image = .{ .digest = @splat(2), .bytes = 1 << 40 },
-        .runtime = @splat(3),
-        .initial = true,
-        .control = @splat(4),
-        .quantum = std.math.maxInt(u64),
-    });
+    const Control = data.invocation.Control;
     const repeated: [1031]u8 = @splat(0x5a);
+    for ([_][]const u8{ "", "reply bytes", repeated[0..200], &repeated }) |bytes| {
+        try Oracle.expect(Control, .{ .reply = bytes });
+        try Oracle.expect(Control, .{ .cancel = .{ .text = bytes } });
+        try Oracle.expect(Control, .{ .cancel = .{ .bytes = bytes } });
+    }
+    try Oracle.expect(Control, .none);
+    try Oracle.expect(Control, .resume_yield);
+    const Fact = @import("tasks/types.zig").CompilerFact;
+    const Reference = @import("state.zig").Reference;
+    const Context = struct { execution: Driver.Segment, guest_work: u64, outcome: Reference };
+    const naturals = [_]u64{ 0, 1, 127, 128, 16383, 16384, 1 << 40, std.math.maxInt(u64) };
+    for (naturals, 0..) |count, index| {
+        const segment: Driver.Segment = .{
+            .input = .{ .digest = @splat(1), .bytes = count },
+            .image = .{ .digest = @splat(2), .bytes = naturals[naturals.len - 1 - index] },
+            .runtime = @splat(3),
+            .initial = index % 2 == 0,
+            .control = @splat(4),
+            .quantum = count,
+        };
+        try Oracle.expect(Driver.Segment, segment);
+        try Oracle.expect(Context, .{
+            .execution = segment,
+            .guest_work = count,
+            .outcome = .{ .digest = @splat(5), .bytes = count },
+        });
+        inline for (comptime std.enums.values(@FieldType(Fact, "kind"))) |kind| {
+            try Oracle.expect(Fact, .{
+                .kind = kind,
+                .input = .{ .digest = @splat(6), .bytes = count },
+                .output = .{ .digest = @splat(7), .bytes = count },
+                .context = @splat(@truncate(index)),
+            });
+        }
+    }
     for ([_][]const u8{ "", "abc", &repeated }) |bytes| {
         try std.testing.expectEqualDeep(
             kosmos.RuntimeCapsule.reference(bytes),
@@ -415,16 +480,45 @@ test "record and capsule digests equal standard SHA-256 of the bytes they name" 
     }
 }
 
-test "driver retains publication across failed drive and transfers without allocation" {
-    const a = std.testing.allocator;
-    // Historical yielding bytes identity, also exercised by Kosmos's public
-    // large-state restoration tests. The original image is not recompiled.
+fn yieldingImage() ![52]u8 {
     var image: [52]u8 = undefined;
     _ = try std.fmt.hexToBytes(
         &image,
         "41424c5f4250493303000000200000000000000001000001020a00000001000001000100" ++
             "00020000070100000000000000000000",
     );
+    return image;
+}
+
+test "a drive's segment digests allocate nothing from the driver" {
+    const a = std.testing.allocator;
+    const image = try yieldingImage();
+    const driver = try Driver.open(a, &image, .{ .initial_args = &.{ 1, 42 } });
+    defer driver.destroy() catch |err| {
+        std.debug.panic("test driver destruction failed: {s}", .{@errorName(err)});
+    };
+    defer driver.close() catch |err| {
+        std.debug.panic("test driver close failed: {s}", .{@errorName(err)});
+    };
+    var exhausted = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    const parent = driver.storage().parent;
+    driver.storage().parent = exhausted.allocator();
+    defer driver.storage().parent = parent;
+    for ([_]data.invocation.Control{ .none, .resume_yield }) |control| {
+        const published = try driver.drive(a, control, 256);
+        defer a.free(published.outcome);
+        const segment = published.segment orelse return error.MissingSegment;
+        const expected = recordDigest(data.invocation.Control, control);
+        try std.testing.expectEqual(expected, segment.control);
+    }
+    try std.testing.expect(!exhausted.has_induced_failure);
+}
+
+test "driver retains publication across failed drive and transfers without allocation" {
+    const a = std.testing.allocator;
+    // Historical yielding bytes identity, also exercised by Kosmos's public
+    // large-state restoration tests. The original image is not recompiled.
+    const image = try yieldingImage();
     var failing = std.testing.FailingAllocator.init(a, .{});
     const driver = try Driver.open(failing.allocator(), &image, .{ .initial_args = &.{ 1, 42 } });
     defer driver.destroy() catch |err| {

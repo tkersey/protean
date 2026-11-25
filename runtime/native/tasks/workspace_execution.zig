@@ -248,7 +248,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             }));
             if (publication.segment) |segment|
                 GuestValidation.retainGuestSegmentProof(
-                    try guestSegmentKey(a, try guestSegmentFact(a, segment, value.*)),
+                    guestSegmentKey(guestSegmentFact(segment, value.*)),
                 );
         }
         fn workspaceRestoreCapsule(

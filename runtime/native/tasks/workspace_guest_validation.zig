@@ -247,7 +247,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                         before.checkpoint.?
                     else
                         ctx.work.input;
-                    const segment_fact = try guestSegmentFact(ctx.a, .{
+                    const segment_fact = guestSegmentFact(.{
                         .input = .{
                             .digest = input_reference.digest,
                             .bytes = input_reference.bytes,
@@ -267,7 +267,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     var prepared =
                         try inspectionRuntime(ctx.self, ctx.self.allocator, ctx.work);
                     defer prepared.deinit();
-                    const fact_key = try guestSegmentKey(ctx.a, segment_fact);
+                    const fact_key = guestSegmentKey(segment_fact);
                     if (try validatedGuestSegment(
                         ctx.self,
                         fact_key,
@@ -279,27 +279,26 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             };
         }
         pub fn guestSegmentFact(
-            a: std.mem.Allocator,
             segment: evaluator.Driver.Segment,
             work: workspace.Work,
-        ) !CompilerFact {
+        ) CompilerFact {
             return .{
                 .kind = .guest_segment,
                 .input = .{ .digest = segment.input.digest, .bytes = segment.input.bytes },
                 .output = work.checkpoint,
-                .context = try evaluator.recordDigest(struct {
+                .context = evaluator.recordDigest(struct {
                     execution: evaluator.Driver.Segment,
                     guest_work: u64,
                     outcome: state.Reference,
-                }, a, .{
+                }, .{
                     .execution = segment,
                     .guest_work = work.guest_work,
                     .outcome = work.outcome,
                 }),
             };
         }
-        pub fn guestSegmentKey(a: std.mem.Allocator, fact: CompilerFact) !state.Digest {
-            return evaluator.recordDigest(CompilerFact, a, fact);
+        pub fn guestSegmentKey(fact: CompilerFact) state.Digest {
+            return evaluator.recordDigest(CompilerFact, fact);
         }
         fn validatedGuestSegment(
             self: *Self,
