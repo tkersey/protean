@@ -45,6 +45,7 @@ jobs:
           - lane: native
             groups: native-smoke,native-placement
             identity: PROTEAN_PRODUCT_IDENTITY
+            archive: PROTEAN_PRODUCT_ARCHIVE
           - lane: direct
             groups: direct-smoke
           - lane: downstream
@@ -91,7 +92,10 @@ jobs:
       - name: Qualify ${{ matrix.groups }}
         run: |
           if [ -n "${{ matrix.identity }}" ]; then export "${{ matrix.identity }}=$RUNNER_TEMP/identity.json"; fi
+          if [ -n "${{ matrix.archive }}" ]; then export "${{ matrix.archive }}=$RUNNER_TEMP/protean-x86_64-linux-musl-$CANDIDATE.tar.gz"; fi
           zig build qualify -- --group "${{ matrix.groups }}"
+        env:
+          CANDIDATE: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Retain the build identity for comparison
         if: matrix.identity
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -100,6 +104,14 @@ jobs:
           path: ${{ runner.temp }}/identity.json
           if-no-files-found: error
           retention-days: 1
+      - name: Retain the qualified native product
+        if: matrix.archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          path: ${{ runner.temp }}/protean-x86_64-linux-musl-*.tar.gz
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
   native:
     name: native
     needs: [qualify, tiger-style]

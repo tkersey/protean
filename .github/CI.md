@@ -31,6 +31,12 @@ terminal gate requires the independently built downstream product's program,
 application-assets, dependency, compiler, target and backend identities to match
 the product. Full local qualification makes the same comparison within one run.
 
+The `native` lane also retains, for 14 days, the Linux x86-64 product it
+qualified: `zig build qualify` with `PROTEAN_PRODUCT_ARCHIVE` packages that
+executable, its `describe-build` manifest, the adaptive program, the installer,
+the runbook and the adaptive example. Releases attach this archive as the Linux
+platform asset. Local qualification packages the macOS product the same way.
+
 ## Self-hosted fallback
 
 When none of a hosted run's jobs received a runner or ran a step, the
@@ -66,9 +72,9 @@ diagnosis, for example `zig build check-native-owner`, `check-native-owner-suppo
 `check-workspace-general`, `check-workspace-semantics` and `check-recurrence-driver`.
 They do not gate a candidate, and their absence from a result is not a pass.
 
-CI no longer retains the packaged adaptive application, so the historical
-retention diagnostic is local: run `test/protean/workspace_runtime_retention.mjs`
-with a baseline and a candidate executable. CI also no longer restores compiled
+The historical retention diagnostic is local: run
+`test/protean/workspace_runtime_retention.mjs` with a baseline and a candidate
+executable, such as the retained `native` product. CI also no longer restores compiled
 artifacts or compiler caches; every lane builds from source.
 
 Earlier reductions remain in force. The required native smoke does not run the

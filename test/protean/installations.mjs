@@ -108,7 +108,7 @@ async function verify() {
   run(zig, ['fetch', '--save=protean', archiveUrl], consumer);
   const manifestText = readFileSync(join(consumer, 'build.zig.zon'), 'utf8');
   assert(manifestText.includes('.url = ' + JSON.stringify(archiveUrl)), 'consumer lost its source archive');
-  const packageHash = manifestText.match(/\.hash = "(protean-9\.1\.0-[A-Za-z0-9_-]+)"/)?.[1];
+  const packageHash = manifestText.match(/\.hash = "(protean-9\.2\.0-[A-Za-z0-9_-]+)"/)?.[1];
   assert(packageHash, 'consumer did not save its Protean package hash');
   const fetched = join('zig-pkg', packageHash);
   const source = join(consumer, fetched);

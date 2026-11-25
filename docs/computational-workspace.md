@@ -733,7 +733,7 @@ is claimed.
 Application 9.0.0 uses `protean-workspace/6`, context v8, output v5 and native
 state format 22. Older namespaces require their compatible executable. The
 [dependency lock](../conformance/protean/dependencies.lock.json) binds the published
-Horos 8.0.1 and Kosmos 9.2.0 source archives and their exact commits. The
+Horos 8.1.0 and Kosmos 9.3.0 source archives and their exact commits. The
 [implementation report](semantic-construction-report.md) records the original
 construction qualification, including remote archive transport. `describe-build` records
 the exact compiler, image, package and executable hashes for each platform.

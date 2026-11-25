@@ -21,8 +21,8 @@ zig build protean -Doptimize=safe \
   -Dsqlite-source=.protean-native/inputs/sqlite
 ```
 
-The stable source tuple is [Horos 8.0.1](https://github.com/tkersey/horos/releases/tag/v8.0.1),
-[Kosmos 9.2.0](https://github.com/tkersey/kosmos/releases/tag/v9.2.0), and SQLite 3.53.4.
+The stable source tuple is [Horos 8.1.0](https://github.com/tkersey/horos/releases/tag/v8.1.0),
+[Kosmos 9.3.0](https://github.com/tkersey/kosmos/releases/tag/v9.3.0), and SQLite 3.53.4.
 The [source lock](../conformance/protean/dependencies.lock.json) records the
 exact immutable commits, authenticated GitHub archives, and complete
 source/package inventories under `agent-native-source-lock/v2`. Kosmos owns
