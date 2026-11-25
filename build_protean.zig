@@ -210,11 +210,10 @@ const BuildGraph = struct {
         if (product_supported) {
             s.productBuild();
             s.recurrenceDriver();
-            s.hashCheck(
-                s.b.step("check-native-hash", "Check SHA-256 dispatch against the software oracle"),
-                s.native_target,
-                if (linuxX86(s.native_target)) true else null,
-            );
+            s.hashCheck(s.b.step(
+                "check-native-hash",
+                "Check the baseline CPU's SHA-256 selection against the software oracle",
+            ), s.native_target.query, if (linuxX86(s.native_target)) true else null);
             if (s.native_direct) s.directHashCheck(s.b.step(
                 "check-native-direct-hash",
                 "Check direct x86-64 SHA-256 dispatch against the software oracle",
@@ -1235,20 +1234,20 @@ const BuildGraph = struct {
     }
 
     fn directHashCheck(s: *BuildGraph, check: *std.Build.Step) void {
-        s.hashCheck(check, s.b.resolveTargetQuery(.{
-            .cpu_arch = .x86_64,
-            .cpu_model = .baseline,
-            .os_tag = .linux,
-            .abi = .musl,
-        }), false);
+        s.hashCheck(check, .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .musl }, false);
     }
 
     fn hashCheck(
         s: *BuildGraph,
         check: *std.Build.Step,
-        target: std.Build.ResolvedTarget,
+        query: std.Target.Query,
         use_llvm: ?bool,
     ) void {
+        var baseline = query;
+        baseline.cpu_model = .baseline;
+        baseline.cpu_features_add = .empty;
+        baseline.cpu_features_sub = .empty;
+        const target = s.b.resolveTargetQuery(baseline);
         const hash = s.b.createModule(.{
             .root_source_file = s.b.path("runtime/native/hash.zig"),
             .target = target,
