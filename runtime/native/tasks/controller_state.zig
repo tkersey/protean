@@ -209,8 +209,8 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             const reference = try rootImage(self, a, value);
             if (value.controller_runtime == null and std.meta.eql(reference, value.image))
                 return evaluator.Driver.start(self.allocator, self.program, instance);
-            const image = try store(self).object(a, reference, null);
-            defer a.free(image);
+            const image = try store(self).objectContent(a, reference, null);
+            defer a.free(image.bytes);
             var runtime =
                 try controllerRuntime(self, a, value.id, reference, value.controller_runtime);
             defer runtime.deinit();

@@ -507,6 +507,7 @@ fn runConsumerProgram(
     task: native.testing.state.TaskId,
     program: contracts.workspace.Ref,
     label: []const u8,
+    observed: ?[]const u8,
 ) !void {
     for ([_]bool{ false, true }) |first| {
         const input = try contracts.encodeOwned(struct {
@@ -518,9 +519,13 @@ fn runConsumerProgram(
         defer a.free(input);
         const operation = try std.fmt.allocPrint(a, "{s}-{any}", .{ label, first });
         defer a.free(operation);
+        const observation = native.testing.digest_observation;
+        observation.watch(if (observed) |image| &.{image} else &.{});
+        defer observation.watch(&.{});
         const started = try service.workspaceStart(a, operation, task, try nativeIdentity(
             program,
         ), input, .{});
+        try std.testing.expectEqual(@intFromBool(observed != null), observation.observed(0));
         for (0..32) |turn| {
             var work = try service.workspaceWork(a, task, started.receipt.workspace.?);
             defer work.deinit();
@@ -875,8 +880,8 @@ fn exerciseConsumerPrograms(
     var observation = try native.json.parse(a, replay.observation_json.bytes, .{});
     defer observation.deinit();
     try std.testing.expect(observation.value.object.get("replayed").?.bool);
-    try runConsumerProgram(a, service, task, original.program.?, "consumer-before");
-    try runConsumerProgram(a, service, task, built.program.?, "consumer-after");
+    try runConsumerProgram(a, service, task, original.program.?, "consumer-before", null);
+    try runConsumerProgram(a, service, task, built.program.?, "consumer-after", image);
     try service.validateWorkspace(a, task);
 }
 

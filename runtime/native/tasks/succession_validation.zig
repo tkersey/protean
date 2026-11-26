@@ -275,7 +275,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 });
                 const initial = try std.mem.concat(a, u8, &.{ anchor, converted });
                 const image =
-                    try store(self).object(a, successor.description.image, null);
+                    try store(self).objectContent(a, successor.description.image, null);
                 var runtime = try self.program.retainRuntime();
                 defer runtime.deinit();
                 const driver = try evaluator.Driver.openSelected(

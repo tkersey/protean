@@ -150,18 +150,18 @@ pub const Driver = opaque {
 
     pub fn open(
         a: std.mem.Allocator,
-        image: []const u8,
+        image: Content,
         instance: data.invocation.Instance,
     ) !*Driver {
         return openSelected(a, image, instance, null);
     }
     pub fn openSelected(
         a: std.mem.Allocator,
-        image: []const u8,
+        image: Content,
         instance: data.invocation.Instance,
         runtime: ?*const kosmos.RuntimeArtifact,
     ) !*Driver {
-        const program = try Program.openSelected(a, .of(image), runtime);
+        const program = try Program.openSelected(a, image, runtime);
         errdefer program.destroyUnreferenced();
         const driver = try start(a, program, instance);
         driver.storage().own_program = true;
@@ -172,14 +172,14 @@ pub const Driver = opaque {
     /// admission alone never installs a resident in the active owner.
     pub fn openCapsule(
         a: std.mem.Allocator,
-        image: []const u8,
+        image: Content,
         runtime: ?*const kosmos.RuntimeArtifact,
         bytes: []const u8,
         verifier: kosmos.RuntimeCapsule.Verifier,
     ) !*Driver {
         var envelope = try kosmos.RuntimeCapsule.read(a, bytes);
         defer envelope.deinit();
-        const program = try Program.openSelected(a, .of(image), runtime);
+        const program = try Program.openSelected(a, image, runtime);
         errdefer program.destroyUnreferenced();
         const owner = try a.create(Storage);
         errdefer a.destroy(owner);
@@ -501,7 +501,7 @@ fn yieldingImage() ![52]u8 {
 test "a drive's segment digests allocate nothing from the driver" {
     const a = std.testing.allocator;
     const image = try yieldingImage();
-    const driver = try Driver.open(a, &image, .{ .initial_args = &.{ 1, 42 } });
+    const driver = try Driver.open(a, .of(&image), .{ .initial_args = &.{ 1, 42 } });
     defer driver.destroy() catch |err| {
         std.debug.panic("test driver destruction failed: {s}", .{@errorName(err)});
     };
@@ -528,7 +528,11 @@ test "driver retains publication across failed drive and transfers without alloc
     // large-state restoration tests. The original image is not recompiled.
     const image = try yieldingImage();
     var failing = std.testing.FailingAllocator.init(a, .{});
-    const driver = try Driver.open(failing.allocator(), &image, .{ .initial_args = &.{ 1, 42 } });
+    const driver = try Driver.open(
+        failing.allocator(),
+        .of(&image),
+        .{ .initial_args = &.{ 1, 42 } },
+    );
     defer driver.destroy() catch |err| {
         std.debug.panic("retired test driver destruction failed: {s}", .{@errorName(err)});
     };
@@ -605,7 +609,7 @@ fn expectRestoredPublication(
     image: []const u8,
     checkpoint: []const u8,
 ) !void {
-    const restored = try Driver.open(a, image, .{ .state = checkpoint });
+    const restored = try Driver.open(a, .of(image), .{ .state = checkpoint });
     defer restored.destroy() catch |err| {
         std.debug.panic("closed test driver destruction failed: {s}", .{@errorName(err)});
     };

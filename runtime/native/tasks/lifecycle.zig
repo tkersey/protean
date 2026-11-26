@@ -224,8 +224,8 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 );
                 defer runtime.deinit();
                 const image =
-                    try store(self).object(a, try rootImage(self, a, value), null);
-                defer a.free(image);
+                    try store(self).objectContent(a, try rootImage(self, a, value), null);
+                defer a.free(image.bytes);
                 break :restored try evaluator.Driver.openCapsule(
                     self.allocator,
                     image,

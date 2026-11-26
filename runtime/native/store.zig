@@ -979,6 +979,14 @@ pub const Store = struct {
         if (bytes.len != ref.bytes) return error.CorruptState;
         return bytes;
     }
+    pub fn objectContent(
+        self: *Store,
+        a: std.mem.Allocator,
+        ref: state.Reference,
+        limit: ?usize,
+    ) !Content {
+        return .{ .bytes = try self.object(a, ref, limit), .reference = ref };
+    }
     /// Check the complete immutable object, retaining only the requested range.
     /// An empty destination verifies integrity without materializing the object.
     pub fn objectRange(self: *Store, ref: state.Reference, start: usize, destination: []u8) !void {
