@@ -49,7 +49,12 @@ test "object digests retain SHA-256 across padding and large input boundaries" {
 }
 
 test "digest observation counts every entry-point digest of each subject by content" {
-    const io = std.testing.io;
+    var unthreaded: std.Io.Threaded = .init_single_threaded;
+    try expectObservedDigests(std.testing.io, if (@import("builtin").single_threaded) 0 else 4);
+    try expectObservedDigests(unthreaded.io(), 0);
+}
+
+fn expectObservedDigests(io: std.Io, concurrent_expected: usize) !void {
     const observation = @import("hash_abi.zig").observation;
     const subject = try std.testing.allocator.dupe(u8, "observed subject bytes");
     observation.watch(&.{ subject, "other observed subject" });
@@ -67,15 +72,21 @@ test "digest observation counts every entry-point digest of each subject by cont
             }
         }
     };
+    var workers: [4]std.Io.Future(void) = undefined;
+    var started: usize = 0;
     {
-        var workers: [4]std.Io.Future(void) = undefined;
-        var started: usize = 0;
         defer for (workers[0..started]) |*worker| worker.await(io);
-        for (&workers) |*worker| {
-            worker.* = try io.concurrent(Worker.run, .{});
+        for (0..workers.len) |_| {
+            workers[started] = io.concurrent(Worker.run, .{}) catch |err| switch (err) {
+                error.ConcurrencyUnavailable => {
+                    Worker.run();
+                    continue;
+                },
+            };
             started += 1;
         }
     }
+    try std.testing.expectEqual(concurrent_expected, started);
     try std.testing.expectEqual(4 * 64, observation.observed(0));
     try std.testing.expectEqual(4 * 64, observation.observed(1));
     try std.testing.expectEqual(0, observation.observed(2));
