@@ -3993,7 +3993,7 @@ fn imageAssets(permanent: std.mem.Allocator, image_identity: [32]u8) !native.dis
     return .{ .image = image, .application = metadata, .manifest = manifest };
 }
 
-test "adaptive preparation hashes the image and seed once and keeps no caller image bytes" {
+test "adaptive discovery and service preparation hash the image and seed source once" {
     const a = std.testing.allocator;
     const io = std.testing.io;
     var arena = std.heap.ArenaAllocator.init(a);
@@ -4003,8 +4003,6 @@ test "adaptive preparation hashes the image and seed once and keeps no caller im
     var admitted_image = try horos.data.program_image.Admitted.decode(a, image);
     defer admitted_image.deinit();
     const assets = try imageAssets(permanent, admitted_image.identity());
-    const caller_image = try a.dupe(u8, image);
-    defer a.free(caller_image);
     const metadata =
         try native.json.parseAsset(permanent, assets.application, assets.application.len);
     const controller = native.json.get(metadata.value, "controller") orelse
@@ -4016,13 +4014,8 @@ test "adaptive preparation hashes the image and seed once and keeps no caller im
     const observation = native.testing.digest_observation;
     observation.watch(&.{ image, seed });
     defer observation.watch(&.{});
-    var application = try native.discovery.Application.init(t, a, .{
-        .image = caller_image,
-        .application = assets.application,
-        .manifest = assets.manifest,
-    }, handlers);
+    var application = try native.discovery.Application.init(t, a, assets, handlers);
     defer application.deinit();
-    @memset(caller_image, 0);
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     var buffer: [4096]u8 = undefined;
@@ -4050,7 +4043,7 @@ test "adaptive preparation hashes the image and seed once and keeps no caller im
     try std.testing.expectEqual(1, observation.observed(1));
     var expected: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(image, &expected, .{});
-    try std.testing.expectEqual(expected, application.image.digest);
+    try std.testing.expectEqual(expected, application.image.reference.digest);
     std.crypto.hash.sha2.Sha256.hash(seed, &expected, .{});
     try std.testing.expectEqual(expected, application.controller.?.source.reference.digest);
     try std.testing.expectEqualStrings(seed, application.controller.?.source.bytes);

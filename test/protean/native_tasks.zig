@@ -865,7 +865,7 @@ const OwnerRecoveryFixture = struct {
             .metadata = .null,
             .manifest = .null,
             .manifest_id = "unit",
-            .image = .{ .digest = native.testing.digest(self.image), .bytes = self.image.len },
+            .image = .of(self.image),
             .image_identity = self.admitted_image.identity(),
         };
         self.application_live = true;
@@ -2538,7 +2538,7 @@ fn largeResultRuntime(
         .metadata = .null,
         .manifest = .null,
         .manifest_id = "unit",
-        .image = .{ .digest = native.testing.digest(image), .bytes = image.len },
+        .image = .of(image),
         .image_identity = image_identity,
     };
     defer application.deinit();
@@ -3533,7 +3533,7 @@ fn terminalCleanupRuntime(
         .metadata = .null,
         .manifest = .null,
         .manifest_id = "unit",
-        .image = .{ .digest = native.testing.digest(image), .bytes = image.len },
+        .image = .of(image),
         .image_identity = image_identity,
     };
     defer application.deinit();
@@ -4054,7 +4054,7 @@ fn prepareTestApplication(
         .metadata = .null,
         .manifest = .null,
         .manifest_id = "unit",
-        .image = .{ .digest = native.testing.digest(image), .bytes = image.len },
+        .image = .of(image),
         .image_identity = identity,
     };
     application.manifest = (try native.json.parse(
@@ -5102,7 +5102,7 @@ const FairSchedulingFixture = struct {
             .metadata = .null,
             .manifest = .null,
             .manifest_id = "unit",
-            .image = .{ .digest = native.testing.digest(self.image), .bytes = self.image.len },
+            .image = .of(self.image),
             .image_identity = self.admitted.identity(),
         };
         self.application_ready = true;
@@ -5883,7 +5883,7 @@ fn retainedCaptureGeneration(
         .metadata = .null,
         .manifest = .null,
         .manifest_id = "unit",
-        .image = .{ .digest = native.testing.digest(image), .bytes = image.len },
+        .image = .of(image),
         .image_identity = admitted.identity(),
     };
     defer application.deinit();
@@ -6285,7 +6285,7 @@ const PureRecoveryFixture = struct {
             .metadata = .null,
             .manifest = .null,
             .manifest_id = "unit",
-            .image = .{ .digest = native.testing.digest(self.image), .bytes = self.image.len },
+            .image = .of(self.image),
             .image_identity = self.admitted_image.identity(),
         };
         self.application_live = true;
@@ -7107,7 +7107,7 @@ const ReceiptLookupHarness = struct {
             .metadata = .null,
             .manifest = .null,
             .manifest_id = "unit",
-            .image = .{ .digest = native.testing.digest(image), .bytes = image.len },
+            .image = .of(image),
             .image_identity = admitted_image.identity(),
         };
         h.application_live = true;
@@ -8589,7 +8589,7 @@ const ControllerMicroprogressFixture = struct {
             .metadata = .null,
             .manifest = .null,
             .manifest_id = "unit",
-            .image = .{ .digest = native.testing.digest(self.image), .bytes = self.image.len },
+            .image = .of(self.image),
             .image_identity = self.admitted.identity(),
         };
         self.application_live = true;
@@ -9266,7 +9266,7 @@ const ImageIdentityOwner = struct {
             .metadata = .null,
             .manifest = .null,
             .manifest_id = "unit",
-            .image = .{ .digest = native.testing.digest(self.image), .bytes = self.image.len },
+            .image = .of(self.image),
             .image_identity = self.identity,
         };
         errdefer self.application.deinit();
@@ -9424,6 +9424,41 @@ test "a residency check rejects a task admitted under a different image" {
     var service = try original.open(a, io, &namespace);
     defer expectCleanup(service.close(frame));
     _ = try service.message(frame, "image-identity-accepted", task_id, 7);
+}
+
+test "a service refuses image bytes other than the ones its application admitted" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const frame = arena.allocator();
+    var owner: ImageIdentityOwner = undefined;
+    try owner.init(a, frame, FairApplication);
+    defer owner.deinit();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var namespace =
+        try native.Namespace.open(a, io, try imageIdentityState(frame, io, temporary.dir));
+    defer expectCleanup(namespace.close());
+    const copied = try frame.dupe(u8, owner.image);
+    const altered = try frame.dupe(u8, owner.image);
+    altered[altered.len - 1] ^= 1;
+    for ([_][]const u8{ copied, altered, owner.image[0 .. owner.image.len - 1] }) |image| {
+        const generation = namespace.store.head.generation;
+        try std.testing.expectError(error.InvalidAssets, native.tasks.Service(FairTypes).init(
+            a,
+            io,
+            &namespace,
+            .{ .image = image, .application = "image-identity", .manifest = owner.manifest },
+            &owner.application,
+            owner.handlers,
+            owner.profile,
+        ));
+        try std.testing.expectEqual(generation, namespace.store.head.generation);
+    }
+    var service = try owner.open(a, io, &namespace);
+    defer expectCleanup(service.close(frame));
+    _ = try service.submit(frame, "image-identity-admitted", 3);
 }
 
 test "image identity admission releases every acquisition when allocation fails" {

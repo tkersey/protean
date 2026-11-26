@@ -49,7 +49,7 @@ test "native scheduler backlog benchmark" {
         .metadata = .null,
         .manifest = .null,
         .manifest_id = "unit",
-        .image = .{ .digest = native.testing.digest(image), .bytes = image.len },
+        .image = .of(image),
         .image_identity = admitted.identity(),
     };
     defer application.deinit();

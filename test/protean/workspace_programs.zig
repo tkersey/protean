@@ -894,7 +894,7 @@ test "BUILD-CONSUMER generated finite composition publishes a new program and re
         .metadata = .null,
         .manifest = .null,
         .manifest_id = "consumer-unit",
-        .image = .{ .digest = native.testing.digest(root.image), .bytes = root.image.len },
+        .image = .of(root.image),
         .image_identity = admitted.identity(),
     };
     defer application.deinit();
@@ -1237,7 +1237,7 @@ test "WORK-01 retained work keeps controller state distinct and replays exact ad
         .metadata = .null,
         .manifest = .null,
         .manifest_id = "workspace-unit",
-        .image = .{ .digest = native.testing.digest(root.image), .bytes = root.image.len },
+        .image = .of(root.image),
         .image_identity = admitted.identity(),
     };
     defer application.deinit();
@@ -4521,7 +4521,7 @@ test "CTX-01 snapshot materialization retains omitted source for a broader evide
         .metadata = .null,
         .manifest = .null,
         .manifest_id = "context-unit",
-        .image = .{ .digest = native.testing.digest(image), .bytes = image.len },
+        .image = .of(image),
         .image_identity = admitted.identity(),
     };
     defer application.deinit();
@@ -6276,7 +6276,7 @@ const AuthoredWaitFixture = struct {
             .metadata = .null,
             .manifest = .null,
             .manifest_id = "wait-unit",
-            .image = .{ .digest = native.testing.digest(self.image), .bytes = self.image.len },
+            .image = .of(self.image),
             .image_identity = self.admitted.identity(),
         };
         self.application_live = true;
@@ -7869,7 +7869,7 @@ test "OWN-02 OWN-05 OWN-10 typed answers preserve occurrence and root message in
         .metadata = .null,
         .manifest = .null,
         .manifest_id = "delegation-unit",
-        .image = .{ .digest = native.testing.digest(image), .bytes = image.len },
+        .image = .of(image),
         .image_identity = admitted.identity(),
     };
     defer application.deinit();
@@ -9917,7 +9917,7 @@ test "deep recursive workspace values support admission inspection expansion and
         .metadata = .null,
         .manifest = .null,
         .manifest_id = "workspace-unit",
-        .image = .{ .digest = native.testing.digest(root.image), .bytes = root.image.len },
+        .image = .of(root.image),
         .image_identity = admitted.identity(),
     };
     defer application.deinit();
@@ -10843,7 +10843,7 @@ fn collectionImage(a: anytype, io: anytype, meter: anytype, compiled: anytype) !
         .metadata = .null,
         .manifest = .null,
         .manifest_id = "collection-unit",
-        .image = .{ .digest = native.testing.digest(image), .bytes = image.len },
+        .image = .of(image),
         .image_identity = admitted.identity(),
     };
     defer application.deinit();
@@ -12347,7 +12347,7 @@ test "WORK-14 workspace reads settle inside root cancellation cleanup" {
         .metadata = .null,
         .manifest = .null,
         .manifest_id = "context-unit",
-        .image = .{ .digest = native.testing.digest(image), .bytes = image.len },
+        .image = .of(image),
         .image_identity = admitted.identity(),
     };
     defer application.deinit();
@@ -14817,7 +14817,7 @@ fn controllerConstructionOwner(
         .metadata = .null,
         .manifest = .null,
         .manifest_id = "controller-unit",
-        .image = .{ .digest = native.testing.digest(root.image), .bytes = root.image.len },
+        .image = .of(root.image),
         .image_identity = admitted.identity(),
     };
     defer application.deinit();
@@ -16819,7 +16819,7 @@ fn reconstructionApplication(
         .metadata = .null,
         .manifest = .null,
         .manifest_id = "controller-unit",
-        .image = .{ .digest = native.testing.digest(original.image), .bytes = original.image.len },
+        .image = .of(original.image),
         .image_identity = image_identity,
         .controller = .{
             .source = .of(original_source),

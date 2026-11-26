@@ -156,7 +156,7 @@ pub const Application = struct {
     metadata: json.Value,
     manifest: json.Value,
     manifest_id: []const u8,
-    image: @import("state.zig").Reference,
+    image: Content,
     image_identity: [32]u8,
     controller: ?SeedController = null,
     protocol_schema: json.Value = .null,
@@ -482,7 +482,7 @@ pub const Application = struct {
             .metadata = retained_metadata,
             .manifest = retained_manifest,
             .manifest_id = retained_manifest_id,
-            .image = admission.image.reference,
+            .image = admission.image,
             .image_identity = admission.image_identity,
             .controller = retained_controller,
             .protocol_schema = retained_protocol,
@@ -498,6 +498,11 @@ pub const Application = struct {
     pub fn deinit(self: *Application) void {
         self.arena.deinit();
         self.* = undefined;
+    }
+
+    pub fn borrows(self: *const Application, assets: Assets) bool {
+        return self.image.bytes.ptr == assets.image.ptr and
+            self.image.bytes.len == assets.image.len;
     }
 
     pub fn describeBuild(self: *const Application, a: std.mem.Allocator, io: std.Io) ![]u8 {
@@ -775,7 +780,7 @@ test "oversized discovery stays bounded and immutable schemas round-trip through
         .metadata = metadata,
         .manifest = .null,
         .manifest_id = "test",
-        .image = Content.of("").reference,
+        .image = .of(""),
         .image_identity = @splat(0),
         .public_metadata = metadata,
         .protocol_schema = schema,
@@ -829,7 +834,7 @@ test "discovery budgets the combined description before composing a full batch" 
             .metadata = metadata,
             .manifest = .null,
             .manifest_id = "test",
-            .image = Content.of("").reference,
+            .image = .of(""),
             .image_identity = @splat(0),
             .public_metadata = metadata,
             .protocol_schema = schema,
@@ -904,7 +909,7 @@ test "nested authored schemas remain available beyond the peer frame depth" {
             .metadata = metadata,
             .manifest = .null,
             .manifest_id = "test",
-            .image = Content.of("").reference,
+            .image = .of(""),
             .image_identity = @splat(0),
             .public_metadata = metadata,
             .protocol_schema = protocol_schema,
@@ -1113,7 +1118,7 @@ test "discovery preserves admitted capability counts in inline and referenced me
             .metadata = metadata,
             .manifest = .null,
             .manifest_id = "test",
-            .image = Content.of("").reference,
+            .image = .of(""),
             .image_identity = @splat(0),
             .public_metadata = metadata,
             .protocol_schema = protocol_schema,
