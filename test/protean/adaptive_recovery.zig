@@ -3993,6 +3993,62 @@ fn imageAssets(permanent: std.mem.Allocator, image_identity: [32]u8) !native.dis
     return .{ .image = image, .application = metadata, .manifest = manifest };
 }
 
+test "adaptive discovery and service preparation hash the image and seed source once" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const permanent = arena.allocator();
+    const image = @embedFile("adaptive_image");
+    var admitted_image = try horos.data.program_image.Admitted.decode(a, image);
+    defer admitted_image.deinit();
+    const assets = try imageAssets(permanent, admitted_image.identity());
+    const metadata =
+        try native.json.parseAsset(permanent, assets.application, assets.application.len);
+    const controller = native.json.get(metadata.value, "controller") orelse
+        return error.MissingSeedController;
+    const seed = try native.json.text(native.json.get(controller, "source_records") orelse
+        return error.MissingSeedControllerSource);
+    var handlers = try workspaceRecoveryHandlers(a);
+    defer handlers.deinit();
+    const observation = native.testing.digest_observation;
+    observation.watch(&.{ image, seed });
+    defer observation.watch(&.{});
+    var application = try native.discovery.Application.init(t, a, assets, handlers);
+    defer application.deinit();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var buffer: [4096]u8 = undefined;
+    const directory = buffer[0..try temporary.dir.realPath(io, &buffer)];
+    const path = try std.fmt.allocPrint(permanent, "{s}/state", .{directory});
+    var namespace = try native.Namespace.open(a, io, path);
+    defer expectCleanup("namespace.close", namespace.close());
+    const profile: native.tasks.Profile = .{
+        .id = "image-identity",
+        .runtime_identity = @splat(73),
+        .bytes = "image-identity",
+        .authority = .{ .grants = &.{}, .principal = "image-identity", .tenant = "local" },
+    };
+    var service = try native.tasks.Service(t).init(
+        a,
+        io,
+        &namespace,
+        assets,
+        &application,
+        handlers,
+        profile,
+    );
+    defer expectCleanup("service.close", service.close(a));
+    try std.testing.expectEqual(1, observation.observed(0));
+    try std.testing.expectEqual(1, observation.observed(1));
+    var expected: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(image, &expected, .{});
+    try std.testing.expectEqual(expected, application.image.reference.digest);
+    std.crypto.hash.sha2.Sha256.hash(seed, &expected, .{});
+    try std.testing.expectEqual(expected, application.controller.?.source.reference.digest);
+    try std.testing.expectEqualStrings(seed, application.controller.?.source.bytes);
+}
+
 fn submitWorkspaceRecovery(
     service: *native.tasks.Service(t),
     permanent: std.mem.Allocator,

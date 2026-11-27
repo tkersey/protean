@@ -4,6 +4,8 @@ const std = @import("std");
 const p = @import("placement.zig");
 const storage = @import("store.zig");
 const configuration = @import("configuration.zig");
+const secureZero = @import("crypto.zig").secureZero;
+const Ed25519 = @import("crypto.zig").Ed25519;
 
 const Policy = struct {
     allow_private: bool = false,
@@ -77,12 +79,12 @@ pub fn load(a: std.mem.Allocator, io: std.Io, path: []const u8) !*const p.Config
     });
     const key_bytes = try configuration.readFile(a, io, document.signing_key_file, 128, true);
     defer {
-        std.crypto.secureZero(u8, key_bytes);
+        secureZero(u8, key_bytes);
         a.free(key_bytes);
     }
     var seed = try digest(std.mem.trim(u8, key_bytes, "\r\n"));
-    defer std.crypto.secureZero(u8, &seed);
-    const key = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(seed);
+    defer secureZero(u8, &seed);
+    const key = try Ed25519.KeyPair.generateDeterministic(seed);
     const peers = try a.alloc(p.Peer, document.peers.len);
     for (document.peers, peers, 0..) |input, *peer, index| {
         if (input.name.len == 0 or input.name.len > 128) return error.InvalidConfiguration;
@@ -241,7 +243,7 @@ test "placement launch configuration admits private keys and pinned peers" {
     );
     try std.testing.expectEqualStrings("peer", configured.peers[0].name);
     try std.testing.expectEqualStrings("/usr/bin/false", configured.peers[0].channel.?.argv[0]);
-    const key = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(@splat(1));
+    const key = try Ed25519.KeyPair.generateDeterministic(@splat(1));
     try std.testing.expectEqualDeep(
         key.public_key.toBytes(),
         configured.signing_key.public_key.toBytes(),

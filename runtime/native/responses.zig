@@ -6,6 +6,7 @@ const registry = @import("registry.zig");
 const json = @import("json.zig");
 const https = @import("https.zig");
 const storage = @import("store.zig");
+const secureZero = @import("crypto.zig").secureZero;
 pub const route = @import("responses_contract.zig");
 const siwc = @import("siwc.zig");
 
@@ -550,7 +551,7 @@ fn acquireCredential(ctx: registry.Context, env: *const Environment, config: Set
             if (config.contract.route != .api_key_json) return error.CredentialBindingMismatch;
             const bytes = try @import("configuration.zig").readFile(a, ctx.io, path, null, true);
             defer {
-                std.crypto.secureZero(u8, bytes);
+                secureZero(u8, bytes);
                 a.free(bytes);
             }
             const token = std.mem.trim(u8, bytes, "\r\n");

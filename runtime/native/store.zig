@@ -5,18 +5,24 @@ const contracts = @import("protean_contracts");
 const sqlite = @import("sqlite.zig");
 const state = @import("state.zig");
 const occurrence = @import("occurrence.zig");
-const hash_abi = @import("hash_abi.zig");
+const Sha256 = @import("hash_abi.zig").Sha256;
 const Digest = state.Digest;
 pub const format: u32 = @import("native_options").state_format;
 
 pub fn digest(bytes: []const u8) Digest {
-    var hash: hash_abi.State = undefined;
-    hash_abi.protean_native_sha256_init(&hash);
-    hash_abi.protean_native_sha256_update(&hash, bytes.ptr, bytes.len);
     var result: Digest = undefined;
-    hash_abi.protean_native_sha256_final(&hash, &result);
+    Sha256.hash(bytes, &result, .{});
     return result;
 }
+
+pub const Content = struct {
+    bytes: []const u8,
+    reference: state.Reference,
+
+    pub fn of(bytes: []const u8) Content {
+        return .{ .bytes = bytes, .reference = .{ .digest = digest(bytes), .bytes = bytes.len } };
+    }
+};
 
 test "object digests retain SHA-256 across padding and large input boundaries" {
     try std.testing.expectEqualStrings(
@@ -35,14 +41,69 @@ test "object digests retain SHA-256 across padding and large input boundaries" {
         std.crypto.hash.sha2.Sha256.hash(bytes[0..length], &expected, .{});
         try std.testing.expectEqualSlices(u8, &expected, &digest(bytes[0..length]));
         const prefix = @min(length, 7);
-        var hash: hash_abi.State = undefined;
-        hash_abi.protean_native_sha256_init(&hash);
-        hash_abi.protean_native_sha256_update(&hash, bytes.ptr, prefix);
-        hash_abi.protean_native_sha256_update(&hash, bytes[prefix..length].ptr, length - prefix);
-        var streamed: Digest = undefined;
-        hash_abi.protean_native_sha256_final(&hash, &streamed);
-        try std.testing.expectEqual(expected, streamed);
+        var hash: Sha256 = .init(.{});
+        hash.update(bytes[0..prefix]);
+        hash.update(bytes[prefix..length]);
+        try std.testing.expectEqual(expected, hash.finalResult());
     }
+}
+
+test "digest observation counts every entry-point digest of each subject by content" {
+    var unthreaded: std.Io.Threaded = .init_single_threaded;
+    try expectObservedDigests(std.testing.io, if (@import("builtin").single_threaded) 0 else 4);
+    try expectObservedDigests(unthreaded.io(), 0);
+}
+
+fn expectObservedDigests(io: std.Io, concurrent_expected: usize) !void {
+    const observation = @import("hash_abi.zig").observation;
+    const subject = try std.testing.allocator.dupe(u8, "observed subject bytes");
+    observation.watch(&.{ subject, "other observed subject" });
+    defer observation.watch(&.{});
+    std.testing.allocator.free(subject);
+    const Worker = struct {
+        fn run() void {
+            for (0..64) |_| {
+                _ = digest("observed subject bytes");
+                var streamed: Sha256 = .init(.{});
+                streamed.update("other observed ");
+                streamed.update("subject");
+                _ = streamed.finalResult();
+                _ = digest("unobserved other bytes");
+            }
+        }
+    };
+    var workers: [4]std.Io.Future(void) = undefined;
+    var started: usize = 0;
+    {
+        defer for (workers[0..started]) |*worker| worker.await(io);
+        for (0..workers.len) |_| {
+            workers[started] = io.concurrent(Worker.run, .{}) catch |err| switch (err) {
+                error.ConcurrencyUnavailable => {
+                    Worker.run();
+                    continue;
+                },
+            };
+            started += 1;
+        }
+    }
+    try std.testing.expectEqual(concurrent_expected, started);
+    try std.testing.expectEqual(4 * 64, observation.observed(0));
+    try std.testing.expectEqual(4 * 64, observation.observed(1));
+    try std.testing.expectEqual(0, observation.observed(2));
+    observation.watch(&.{});
+    _ = digest("observed subject bytes");
+    try std.testing.expectEqual(0, observation.observed(0));
+}
+
+test "watching a repeated subject starts each of its counts at zero" {
+    const observation = @import("hash_abi.zig").observation;
+    observation.watch(&.{ "repeated subject", "repeated subject" });
+    defer observation.watch(&.{});
+    try std.testing.expectEqual(0, observation.observed(0));
+    try std.testing.expectEqual(0, observation.observed(1));
+    _ = digest("repeated subject");
+    try std.testing.expectEqual(1, observation.observed(0));
+    try std.testing.expectEqual(1, observation.observed(1));
 }
 
 pub const Head = struct { generation: u64, parent: Digest, digest: Digest };
@@ -797,7 +858,7 @@ pub const Store = struct {
     pub fn commit(self: *Store, transition: []const u8) !Head {
         try self.writing();
         if (self.head.generation == std.math.maxInt(i64)) return error.Capacity;
-        var hash = std.crypto.hash.sha2.Sha256.init(.{});
+        var hash: Sha256 = .init(.{});
         hash.update("agent.native.store.v1\x00");
         hash.update(&self.head.digest);
         var generation: [8]u8 = undefined;
@@ -844,22 +905,46 @@ pub const Store = struct {
     }
 
     pub fn putObject(self: *Store, bytes: []const u8) !state.Reference {
-        const ref: state.Reference = .{ .digest = digest(bytes), .bytes = bytes.len };
+        return self.putContent(.of(bytes));
+    }
+
+    pub fn putContent(self: *Store, content: Content) !state.Reference {
+        try self.writing();
+        errdefer self.rollback();
+        if (content.bytes.len != content.reference.bytes) return error.InvalidObject;
         var source = struct {
             bytes: []const u8,
             pub fn read(this: *@This(), target: []u8) !void {
                 @memcpy(target, this.bytes[0..target.len]);
                 this.bytes = this.bytes[target.len..];
             }
-        }{ .bytes = bytes };
-        try self.acquireObject(ref, &source);
-        return ref;
+        }{ .bytes = content.bytes };
+        self.storeObject(content.reference, &source, .compared) catch |err| {
+            if (err == error.CorruptState and
+                !std.mem.eql(u8, &digest(content.bytes), &content.reference.digest))
+                return error.InvalidObject;
+            return err;
+        };
+        return content.reference;
     }
 
     /// Acquire an exact-size source inside the caller's unpublished transaction.
-    /// Neither a new object nor a duplicate is trusted until every byte matches
-    /// its digest. A failed acquisition rolls back the entire transaction.
+    /// A duplicate whose stored length or bytes differ from the source fails
+    /// with CorruptState; otherwise a source that does not hash to its
+    /// reference fails with InvalidObject. A failed acquisition rolls back the
+    /// entire transaction.
     pub fn acquireObject(self: *Store, ref: state.Reference, source: anytype) !void {
+        return self.storeObject(ref, source, .hashed);
+    }
+
+    const Duplicate = enum { compared, hashed };
+
+    fn storeObject(
+        self: *Store,
+        ref: state.Reference,
+        source: anytype,
+        comptime duplicate: Duplicate,
+    ) !void {
         try self.writing();
         errdefer self.rollback();
         if (ref.bytes > (try self.database.blobLimit())) return error.Capacity;
@@ -876,15 +961,15 @@ pub const Store = struct {
             std.log.err("object blob cleanup failed: {s}", .{@errorName(err)});
         };
         if (blob.length() != ref.bytes) return error.CorruptState;
-        var hash: hash_abi.State = undefined;
-        hash_abi.protean_native_sha256_init(&hash);
+        const hashed = inserted or duplicate == .hashed;
+        var hash: Sha256 = .init(.{});
         var buffer: [64 * 1024]u8 = undefined;
         var prior: [64 * 1024]u8 = undefined;
         var offset: usize = 0;
         while (offset < ref.bytes) {
             const chunk = buffer[0..@min(buffer.len, ref.bytes - offset)];
             try source.read(chunk);
-            hash_abi.protean_native_sha256_update(&hash, chunk.ptr, chunk.len);
+            if (hashed) hash.update(chunk);
             if (inserted) {
                 try blob.write(chunk, offset);
             } else {
@@ -895,9 +980,8 @@ pub const Store = struct {
         }
         closed = true;
         try blob.close();
-        var observed: Digest = undefined;
-        hash_abi.protean_native_sha256_final(&hash, &observed);
-        if (!std.mem.eql(u8, &observed, &ref.digest)) return error.InvalidObject;
+        if (!hashed) return;
+        if (!std.mem.eql(u8, &hash.finalResult(), &ref.digest)) return error.InvalidObject;
     }
     pub fn object(self: *Store, a: std.mem.Allocator, ref: state.Reference, limit: ?usize) ![]u8 {
         if (limit != null and ref.bytes > limit.?) return error.Capacity;
@@ -905,6 +989,14 @@ pub const Store = struct {
         errdefer a.free(bytes);
         if (bytes.len != ref.bytes) return error.CorruptState;
         return bytes;
+    }
+    pub fn objectContent(
+        self: *Store,
+        a: std.mem.Allocator,
+        ref: state.Reference,
+        limit: ?usize,
+    ) !Content {
+        return .{ .bytes = try self.object(a, ref, limit), .reference = ref };
     }
     /// Check the complete immutable object, retaining only the requested range.
     /// An empty destination verifies integrity without materializing the object.
@@ -940,22 +1032,19 @@ pub const Store = struct {
             std.log.err("object blob cleanup failed: {s}", .{@errorName(err)});
         };
         if (blob.length() != ref.bytes) return error.CorruptState;
-        var hash: hash_abi.State = undefined;
-        hash_abi.protean_native_sha256_init(&hash);
+        var hash: Sha256 = .init(.{});
         var buffer: [64 * 1024]u8 = undefined;
         var offset: usize = 0;
         while (offset < location.bytes) {
             const chunk = buffer[0..@min(buffer.len, location.bytes - offset)];
             try blob.read(chunk, offset);
-            hash_abi.protean_native_sha256_update(&hash, chunk.ptr, chunk.len);
+            hash.update(chunk);
             try sink.write(chunk);
             offset += chunk.len;
         }
         closed = true;
         try blob.close();
-        var observed: Digest = undefined;
-        hash_abi.protean_native_sha256_final(&hash, &observed);
-        if (!std.mem.eql(u8, &observed, &ref.digest)) return self.corrupt();
+        if (!std.mem.eql(u8, &hash.finalResult(), &ref.digest)) return self.corrupt();
     }
     /// Private occurrence lookup. Public artifact reads require a separate
     /// task/audience-bound artifact record, never a bare content digest.
@@ -1767,6 +1856,55 @@ test "actual SQLite storage exhaustion rolls back unpublished objects" {
     // reopen; recovery must not turn uncertainty into a fresh admission.
     try std.testing.expect(store.fenced);
     try std.testing.expectError(error.StorageUnavailable, store.begin());
+}
+
+test "putContent reports a misnamed reference as InvalidObject and a corrupt row as CorruptState" {
+    const a = std.testing.allocator;
+    const db = try sqlite.Database.open(a, ":memory:", true);
+    defer closeTestDatabase(db);
+    var store = try Store.init(a, db, true, @splat(7));
+    const bytes = "content named by its own digest";
+    const resident = "resident object of equal length";
+    try std.testing.expectEqual(bytes.len, resident.len);
+    const forged = [_]Content{
+        .{ .bytes = bytes, .reference = Content.of(resident).reference },
+        .{ .bytes = bytes, .reference = .{ .digest = digest(bytes), .bytes = bytes.len + 1 } },
+        .{ .bytes = bytes, .reference = Content.of(bytes[0 .. bytes.len - 1]).reference },
+    };
+    for (forged) |content| {
+        try store.begin();
+        try std.testing.expectError(error.InvalidObject, store.putContent(content));
+        try std.testing.expect(!store.transaction);
+        try std.testing.expect(!store.fenced);
+        try std.testing.expectError(
+            error.MissingArtifact,
+            store.object(a, content.reference, null),
+        );
+    }
+    try store.begin();
+    const stored = try store.putContent(.of(resident));
+    _ = try store.commit("resident-content");
+    try store.begin();
+    try std.testing.expectError(
+        error.InvalidObject,
+        store.putContent(.{ .bytes = bytes, .reference = stored }),
+    );
+    try std.testing.expect(!store.transaction);
+    try store.begin();
+    try std.testing.expectEqualDeep(Content.of(bytes).reference, try store.putContent(.of(bytes)));
+    _ = try store.commit("verified-content");
+    for ([_][]const u8{ resident, bytes }) |expected| {
+        const actual = try store.object(a, Content.of(expected).reference, null);
+        defer a.free(actual);
+        try std.testing.expectEqualStrings(expected, actual);
+    }
+    const location = try store.objectLocation(stored.digest, null);
+    var corrupted = try db.openBlob("objects", "body", location.row, true);
+    try corrupted.write(&.{resident[0] ^ 1}, 0);
+    try corrupted.close();
+    try store.begin();
+    try std.testing.expectError(error.CorruptState, store.putContent(.of(resident)));
+    try std.testing.expect(!store.transaction);
 }
 
 test "integrity epochs survive owner appends but require each committed head to be sealed" {

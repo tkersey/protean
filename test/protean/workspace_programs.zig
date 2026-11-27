@@ -507,6 +507,7 @@ fn runConsumerProgram(
     task: native.testing.state.TaskId,
     program: contracts.workspace.Ref,
     label: []const u8,
+    observed: ?[]const u8,
 ) !void {
     for ([_]bool{ false, true }) |first| {
         const input = try contracts.encodeOwned(struct {
@@ -518,9 +519,13 @@ fn runConsumerProgram(
         defer a.free(input);
         const operation = try std.fmt.allocPrint(a, "{s}-{any}", .{ label, first });
         defer a.free(operation);
+        const observation = native.testing.digest_observation;
+        observation.watch(if (observed) |image| &.{image} else &.{});
+        defer observation.watch(&.{});
         const started = try service.workspaceStart(a, operation, task, try nativeIdentity(
             program,
         ), input, .{});
+        try std.testing.expectEqual(@intFromBool(observed != null), observation.observed(0));
         for (0..32) |turn| {
             var work = try service.workspaceWork(a, task, started.receipt.workspace.?);
             defer work.deinit();
@@ -875,8 +880,8 @@ fn exerciseConsumerPrograms(
     var observation = try native.json.parse(a, replay.observation_json.bytes, .{});
     defer observation.deinit();
     try std.testing.expect(observation.value.object.get("replayed").?.bool);
-    try runConsumerProgram(a, service, task, original.program.?, "consumer-before");
-    try runConsumerProgram(a, service, task, built.program.?, "consumer-after");
+    try runConsumerProgram(a, service, task, original.program.?, "consumer-before", null);
+    try runConsumerProgram(a, service, task, built.program.?, "consumer-after", image);
     try service.validateWorkspace(a, task);
 }
 
@@ -894,6 +899,7 @@ test "BUILD-CONSUMER generated finite composition publishes a new program and re
         .metadata = .null,
         .manifest = .null,
         .manifest_id = "consumer-unit",
+        .image = .of(root.image),
         .image_identity = admitted.identity(),
     };
     defer application.deinit();
@@ -1236,6 +1242,7 @@ test "WORK-01 retained work keeps controller state distinct and replays exact ad
         .metadata = .null,
         .manifest = .null,
         .manifest_id = "workspace-unit",
+        .image = .of(root.image),
         .image_identity = admitted.identity(),
     };
     defer application.deinit();
@@ -4519,6 +4526,7 @@ test "CTX-01 snapshot materialization retains omitted source for a broader evide
         .metadata = .null,
         .manifest = .null,
         .manifest_id = "context-unit",
+        .image = .of(image),
         .image_identity = admitted.identity(),
     };
     defer application.deinit();
@@ -6273,6 +6281,7 @@ const AuthoredWaitFixture = struct {
             .metadata = .null,
             .manifest = .null,
             .manifest_id = "wait-unit",
+            .image = .of(self.image),
             .image_identity = self.admitted.identity(),
         };
         self.application_live = true;
@@ -7865,6 +7874,7 @@ test "OWN-02 OWN-05 OWN-10 typed answers preserve occurrence and root message in
         .metadata = .null,
         .manifest = .null,
         .manifest_id = "delegation-unit",
+        .image = .of(image),
         .image_identity = admitted.identity(),
     };
     defer application.deinit();
@@ -9912,6 +9922,7 @@ test "deep recursive workspace values support admission inspection expansion and
         .metadata = .null,
         .manifest = .null,
         .manifest_id = "workspace-unit",
+        .image = .of(root.image),
         .image_identity = admitted.identity(),
     };
     defer application.deinit();
@@ -10837,6 +10848,7 @@ fn collectionImage(a: anytype, io: anytype, meter: anytype, compiled: anytype) !
         .metadata = .null,
         .manifest = .null,
         .manifest_id = "collection-unit",
+        .image = .of(image),
         .image_identity = admitted.identity(),
     };
     defer application.deinit();
@@ -12340,6 +12352,7 @@ test "WORK-14 workspace reads settle inside root cancellation cleanup" {
         .metadata = .null,
         .manifest = .null,
         .manifest_id = "context-unit",
+        .image = .of(image),
         .image_identity = admitted.identity(),
     };
     defer application.deinit();
@@ -14809,6 +14822,7 @@ fn controllerConstructionOwner(
         .metadata = .null,
         .manifest = .null,
         .manifest_id = "controller-unit",
+        .image = .of(root.image),
         .image_identity = admitted.identity(),
     };
     defer application.deinit();
@@ -16810,9 +16824,10 @@ fn reconstructionApplication(
         .metadata = .null,
         .manifest = .null,
         .manifest_id = "controller-unit",
+        .image = .of(original.image),
         .image_identity = image_identity,
         .controller = .{
-            .source = original_source,
+            .source = .of(original_source),
             .descriptor = try contracts.encodeOwned(
                 contracts.controller.Descriptor,
                 scratch,

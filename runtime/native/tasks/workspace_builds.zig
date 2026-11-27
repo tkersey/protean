@@ -1148,14 +1148,14 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     self,
                     a,
                     initial.id,
-                    input.program.source.bytes,
+                    .of(input.program.source.bytes),
                     @fromBackingInt(@intCast(@backingInt(input.program.kind))),
                     if (input.program.catalog) |bytes| .{
                         .digest = storage.digest(bytes.bytes),
                         .bytes = bytes.bytes.len,
                     } else null,
                     input.program.exposures.items,
-                    output.compiled,
+                    .of(output.compiled),
                 ) else null;
             const reply = try workspaceBuildReply(self, a, program, output);
             const payload = try contracts.encodeOwned(wc.Reply, a, reply);

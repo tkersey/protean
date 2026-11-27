@@ -42,6 +42,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             profile: Profile,
         ) !Self {
             try profile.validate();
+            if (!application.borrows(assets)) return error.InvalidAssets;
             var self: Self = .{
                 .allocator = a,
                 .io = io,
@@ -50,7 +51,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 .application = application,
                 .handlers = handlers,
                 .profile = profile,
-                .program = try evaluator.Program.open(a, assets.image),
+                .program = try evaluator.Program.open(a, application.image),
             };
             errdefer self.program.close() catch |err| {
                 std.log.err("unpublished program cleanup failed: {s}", .{@errorName(err)});
@@ -223,8 +224,8 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                 );
                 defer runtime.deinit();
                 const image =
-                    try store(self).object(a, try rootImage(self, a, value), null);
-                defer a.free(image);
+                    try store(self).objectContent(a, try rootImage(self, a, value), null);
+                defer a.free(image.bytes);
                 break :restored try evaluator.Driver.openCapsule(
                     self.allocator,
                     image,

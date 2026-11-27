@@ -5,6 +5,7 @@ const std = @import("std");
 const sqlite = @import("sqlite.zig");
 const journal = @import("store.zig");
 const c = @import("native_c");
+const Sha256 = @import("hash_abi.zig").Sha256;
 pub const AuditReport = @import("namespace_audit.zig").Report;
 pub const ApplicationDecoder = @import("namespace_audit.zig").Decoder;
 pub const ApplicationAuditValue = @import("namespace_audit.zig").Value;
@@ -424,7 +425,7 @@ pub const Namespace = struct {
 fn auditSnapshot(a: std.mem.Allocator, path: []const u8) ![32]u8 {
     const dir = try openDirectory(a, path, false, true);
     defer _ = c.close(dir);
-    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    var hash = Sha256.init(.{});
     for ([_][:0]const u8{
         "owner.lock",
         "identity",

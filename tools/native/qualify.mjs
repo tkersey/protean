@@ -133,9 +133,10 @@ function inventory(work, prefix) {
   add('setup', [zig, 'run', 'tools/native/dependencies.zig', '--cache-dir', localCache, '--', 'setup',
     'conformance/protean/dependencies.lock.json', 'conformance/protean/native-dependencies.lock.json',
     inputs, zig, ...(network === 'offline' ? ['--offline'] : [])]);
-  add('authoring-https', build('check-protean', 'check-native-https'), ['setup']);
+  add('authoring-https', build('check-protean', 'check-native-hash', 'check-native-https'), ['setup']);
   add('product', build('protean'), ['setup']);
-  if (mac) add('native-build-and-tests', build('protean', 'check-protean', 'check-native-https'), ['setup']);
+  if (mac) add('native-build-and-tests', build('protean', 'check-protean', 'check-native-hash',
+    'check-native-https'), ['setup']);
   if (linux) {
     add('direct-product', buildIn(directPrefix, 'protean', 'check-native-direct-hash', ...direct), ['setup']);
     add('direct-smoke', smoke(directPrefix, 'stage2_x86_64'), ['direct-product']);

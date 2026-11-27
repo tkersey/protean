@@ -61,11 +61,7 @@ const Context = struct {
     fn digest(c: Context, bytes: []const u8) ![]const u8 {
         var hash: [32]u8 = undefined;
         if (comptime @hasDecl(@import("root"), "native_hash")) {
-            const optimized = @import("root").native_hash;
-            var state: optimized.State = undefined;
-            optimized.protean_native_sha256_init(&state);
-            optimized.protean_native_sha256_update(&state, bytes.ptr, bytes.len);
-            optimized.protean_native_sha256_final(&state, &hash);
+            @import("root").native_hash.Sha256.hash(bytes, &hash, .{});
         } else std.crypto.hash.sha2.Sha256.hash(bytes, &hash, .{});
         return c.a.dupe(u8, &std.fmt.bytesToHex(hash, .lower));
     }

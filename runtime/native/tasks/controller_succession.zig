@@ -288,8 +288,8 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             const input = try std.mem.concat(a, u8, &.{ anchor, private });
             defer a.free(input);
             const image =
-                try store(self).object(a, successor.value.description.image, null);
-            defer a.free(image);
+                try store(self).objectContent(a, successor.value.description.image, null);
+            defer a.free(image.bytes);
             return driveControllerBoot(self, a, parent, operation_value, private_ref, input, image);
         }
         fn commitControllerBoot(
@@ -330,7 +330,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             operation_value: state.ControllerSuccession,
             private_ref: state.Reference,
             input: []const u8,
-            image: []const u8,
+            image: storage.Content,
         ) !Step {
             const id = operation_value.id;
             try retire(self, a);

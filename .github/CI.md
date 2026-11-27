@@ -21,9 +21,9 @@ groups as local qualification, against a private checkout of the commit.
 
 | Lane | Groups | Checks |
 | --- | --- | --- |
-| `authoring` | `authoring-https` | Source inventory, `check-protean` and `check-native-https`: authoring, model/value contracts, construction, compile-time rejection, helper integrity, adaptive asset emission, formatting, the bundled-Clang header and failure witness, wire checks and the independent HTTPS endpoint. |
+| `authoring` | `authoring-https` | Source inventory, `check-protean`, `check-native-hash` and `check-native-https`: authoring, model/value contracts, construction, compile-time rejection, helper integrity, adaptive asset emission, formatting, the single SHA-256 entry point, the bundled-Clang header and failure witness, runtime SHA-256 dispatch for the baseline x86-64 CPU against the software oracle, wire checks and the independent HTTPS endpoint. |
 | `native` | `native-smoke`, `native-placement` | Build the adaptive product with LLVM; verify its manifest and protocol/state rejection through the isolated native deployment; execute the same binary through authenticated transfer, reopen, refusal and duplicate-acceptance checks. |
-| `direct` | `direct-smoke` | Build the product with direct Zig x86-64 code generation and Zig’s bundled Clang for SQLite and the POSIX shim, run the split SHA-256 vectors against the direct fallback, and run the same deployment smoke. |
+| `direct` | `direct-smoke` | Build the product with direct Zig x86-64 code generation and Zig’s bundled Clang for SQLite and the POSIX shim, check direct SHA-256 dispatch against the software oracle, and run the same deployment smoke. |
 | `downstream` | `downstream` | Independently acquire, authenticate, package, build, install and execute the public `addNativeSystem` consumer; reject altered Horos and Kosmos inputs. |
 
 The `native` and `downstream` lanes each upload a small build-identity file. The
@@ -49,11 +49,14 @@ starts.
 
 The macOS workflow has one job, `macOS fallback`, which runs the complete local
 macOS `zig build qualify` on the self-hosted runner: TigerStyle and its launcher
-fixtures, authoring and the bundled-Clang witness, the LLVM product with its smoke
-and placement checks, and the downstream consumer with its identity comparison.
+fixtures, authoring and the bundled-Clang witness, baseline-CPU SHA-256 against
+the software oracle, the LLVM product with its smoke and placement checks, and
+the downstream consumer with its identity comparison.
 It must finish within 600 seconds of its trigger. It is a separate workflow and
 check, so it never replaces or hides a hosted result. It does not exercise Linux
-x86-64 or the direct backend; the next hosted run does. The runner keeps a
+x86-64, runtime SHA-256 dispatch or the direct backend; the next hosted run does.
+The Apple silicon baseline CPU always has SHA-2, so macOS selects the accelerated
+path at compile time. The runner keeps a
 persistent cache directory, advertised as `PROTEAN_CI_CACHE`, for Zig's global
 and local caches. It executes the dispatched commit directly on the Mac as its
 owner. Its first run with an empty cache can exceed ten minutes.

@@ -1,5 +1,7 @@
 //! Compiled native environment. Deliberately separate from Protean authoring.
 pub const json = @import("json.zig");
+pub const Sha256 = @import("crypto.zig").Sha256;
+pub const secureZero = @import("crypto.zig").secureZero;
 pub const values = @import("values.zig");
 pub const dynamic_values = @import("dynamic_values.zig");
 pub const source_records = @import("source_records.zig");
@@ -69,6 +71,7 @@ test {
 // Private history internals are exposed only to the repository's test graph.
 pub const testing = if (@import("builtin").is_test) struct {
     pub const digest = @import("store.zig").digest;
+    pub const digest_observation = @import("hash_abi.zig").observation;
     pub const archive = @import("archive.zig");
     pub const workspace_publication = @import("tasks/workspace_publication.zig");
     pub const workspace_consumers = @import("tasks/workspace_consumers.zig");

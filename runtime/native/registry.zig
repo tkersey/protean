@@ -6,6 +6,7 @@ const contracts = @import("protean_contracts");
 const values = @import("values.zig");
 const json = @import("json.zig");
 const state = @import("state.zig");
+const Sha256 = @import("hash_abi.zig").Sha256;
 pub const ObjectReference = state.Reference;
 
 /// Read-only projection interface. Generic readers cannot establish retention
@@ -299,7 +300,7 @@ pub const Grant = struct {
 };
 
 pub fn resourceIdentity(image: [32]u8, profile: [32]u8, resources: []const ObjectReference) [32]u8 {
-    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    var hash = Sha256.init(.{});
     hash.update("agent.native.resources.v1\x00");
     hash.update(&image);
     hash.update(&profile);

@@ -521,8 +521,8 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             }
             const binding =
                 try controllerBinding(self, a, parent, value.controller);
-            const image = try store(self).object(a, binding.image, null);
-            defer a.free(image);
+            const image = try store(self).objectContent(a, binding.image, null);
+            defer a.free(image.bytes);
             var runtime = try controllerRuntime(self, a, parent.id, binding.image, value.runtime);
             defer runtime.deinit();
             var root_control: ?[]u8 = null;

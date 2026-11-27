@@ -1426,7 +1426,7 @@ fn successorConverter(a: std.mem.Allocator) ![]u8 {
 fn buildSuccessor(f: *Fixture) !struct { controller: wc.Ref, converter: wc.Ref } {
     const retained = f.application.controller orelse return error.MissingSeedControllerSource;
     const observed = try f.perform(.{ .program = .{ .command = .{ .build = .{
-        .source = .{ .json_text = .{ .bytes = retained.source } },
+        .source = .{ .json_text = .{ .bytes = retained.source.bytes } },
         .source_kind = .source_records,
         .exposures = .{ .items = &.{} },
         .role = .controller,

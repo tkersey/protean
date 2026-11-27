@@ -4,6 +4,7 @@ const contracts = @import("protean_contracts");
 const std = @import("std");
 const json = @import("json.zig");
 const occurrence = @import("occurrence.zig");
+const Sha256 = @import("hash_abi.zig").Sha256;
 pub const Digest = occurrence.Digest;
 pub const TaskId = occurrence.TaskId;
 pub const Name = contracts.Text(128);
@@ -820,7 +821,7 @@ fn visitReconciliationNode(
 }
 
 pub fn controllerExecutionIdentity(id: TaskId) Digest {
-    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    var hash = Sha256.init(.{});
     hash.update("protean.controller.outer.v1\x00");
     hash.update(&id);
     var result: Digest = undefined;

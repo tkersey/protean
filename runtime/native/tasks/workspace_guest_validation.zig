@@ -247,7 +247,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                         before.checkpoint.?
                     else
                         ctx.work.input;
-                    const segment_fact = try guestSegmentFact(.{
+                    const segment_fact = guestSegmentFact(.{
                         .input = .{
                             .digest = input_reference.digest,
                             .bytes = input_reference.bytes,
@@ -267,7 +267,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
                     var prepared =
                         try inspectionRuntime(ctx.self, ctx.self.allocator, ctx.work);
                     defer prepared.deinit();
-                    const fact_key = try guestSegmentKey(segment_fact);
+                    const fact_key = guestSegmentKey(segment_fact);
                     if (try validatedGuestSegment(
                         ctx.self,
                         fact_key,
@@ -281,30 +281,24 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
         pub fn guestSegmentFact(
             segment: evaluator.Driver.Segment,
             work: workspace.Work,
-        ) !CompilerFact {
-            var hash = std.crypto.hash.sha2.Sha256.init(.{});
-            var writer: data.wire.Writer = .{ .hasher = &hash };
-            try data.record.write(struct {
-                execution: evaluator.Driver.Segment,
-                guest_work: u64,
-                outcome: state.Reference,
-            }, .{
-                .execution = segment,
-                .guest_work = work.guest_work,
-                .outcome = work.outcome,
-            }, &writer);
+        ) CompilerFact {
             return .{
                 .kind = .guest_segment,
                 .input = .{ .digest = segment.input.digest, .bytes = segment.input.bytes },
                 .output = work.checkpoint,
-                .context = hash.finalResult(),
+                .context = evaluator.recordDigest(struct {
+                    execution: evaluator.Driver.Segment,
+                    guest_work: u64,
+                    outcome: state.Reference,
+                }, .{
+                    .execution = segment,
+                    .guest_work = work.guest_work,
+                    .outcome = work.outcome,
+                }),
             };
         }
-        pub fn guestSegmentKey(fact: CompilerFact) !state.Digest {
-            var hash = std.crypto.hash.sha2.Sha256.init(.{});
-            var writer: data.wire.Writer = .{ .hasher = &hash };
-            try data.record.write(CompilerFact, fact, &writer);
-            return hash.finalResult();
+        pub fn guestSegmentKey(fact: CompilerFact) state.Digest {
+            return evaluator.recordDigest(CompilerFact, fact);
         }
         fn validatedGuestSegment(
             self: *Self,

@@ -89,10 +89,13 @@ Select the SDK and libc with Zig’s ordinary build options. For the full author
 Use `qualify` on the committed release candidate on each supported host.
 The command checks out that commit in a private directory before running its checks.
 It runs only the essential set: TigerStyle and its launcher fixtures, setup,
-authoring and the bundled-Clang witness, the native product with its smoke and
-placement checks, and an independent downstream consumer whose build identity
-must match the product. On Linux it also builds and smokes the direct x86-64
-product and runs the split SHA-256 vectors against the direct fallback. The
+authoring and the bundled-Clang witness, SHA-256 for the baseline CPU against
+the software oracle, the native product with its smoke and placement checks, and
+an independent downstream consumer whose build identity must match the product.
+On Linux the baseline x86-64 check exercises runtime CPU dispatch; the Apple
+silicon baseline always has SHA-2, so macOS selects the accelerated path at
+compile time. On Linux it also builds and smokes the direct x86-64 product and
+checks its SHA-256 dispatch against the software oracle. The
 command reports elapsed time and identifies unfinished groups if a check fails
 or the run is interrupted. Keep the usual Zig caches between runs. The source
 audit runs every time. The launcher fixture suite reuses a successful ancestor

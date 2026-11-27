@@ -4526,6 +4526,7 @@ fn withWorkspaceFixture(
         .metadata = .null,
         .manifest = .null,
         .manifest_id = identity,
+        .image = .of(root.image),
         .image_identity = admitted.identity(),
     };
     defer application.deinit();
@@ -4999,6 +5000,7 @@ test "runtime selection preserves guest cuts and retained artifacts across archi
         .metadata = .null,
         .manifest = .null,
         .manifest_id = "workspace-unit",
+        .image = .of(root.image),
         .image_identity = admitted.identity(),
     };
     defer application.deinit();
@@ -7494,6 +7496,7 @@ fn placementConfigureApplication(comptime scenario: anytype, borrow: anytype) !v
         .metadata = .null,
         .manifest = .null,
         .manifest_id = "placement-unit",
+        .image = .of(root.image),
         .image_identity = admitted.identity(),
     };
     defer application.deinit();

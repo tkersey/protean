@@ -9,6 +9,7 @@ const values = @import("values.zig");
 const json = @import("json.zig");
 const namespace = @import("namespace.zig");
 const c = @import("native_c");
+const Sha256 = @import("hash_abi.zig").Sha256;
 
 const magic = "AGNX0001";
 const temporary_prefix = ".protean-archive-";
@@ -96,7 +97,7 @@ const Output = struct {
     fd: c_int,
     name: [:0]u8,
     temporary: [temporary_length:0]u8,
-    hash: std.crypto.hash.sha2.Sha256 = .init(.{}),
+    hash: Sha256,
     bytes: u64 = 0,
 
     fn open(a: std.mem.Allocator, io: std.Io, path: []const u8, state_directory: c_int) !Output {
@@ -136,6 +137,7 @@ const Output = struct {
             .fd = fd,
             .name = location.name,
             .temporary = temporary,
+            .hash = .init(.{}),
         };
     }
     fn deinit(self: *Output) void {
@@ -269,12 +271,12 @@ pub const Reader = struct {
         defer self.allocator.free(prefix);
         try readAt(self.fd, 0, prefix);
         if (!same(prefix, self.prefix)) return error.InvalidArchive;
-        var hash = std.crypto.hash.sha2.Sha256.init(.{});
+        var hash = Sha256.init(.{});
         hash.update(prefix);
         var source = struct {
             fd: c_int,
             offset: u64,
-            hash: *std.crypto.hash.sha2.Sha256,
+            hash: *Sha256,
             pub fn read(this: *@This(), bytes: []u8) !void {
                 try readAt(this.fd, this.offset, bytes);
                 this.hash.update(bytes);
@@ -308,7 +310,7 @@ fn validateArchiveObjects(value: state.Archive, count: u32, body_len: u64) !void
 }
 
 fn archiveDigest(fd: c_int, prefix: []const u8, length: u64) !state.Digest {
-    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    var hash = Sha256.init(.{});
     hash.update(prefix);
     var buffer: [64 * 1024]u8 = undefined;
     var offset: u64 = prefix.len;
@@ -528,7 +530,7 @@ const EventFacts = struct {
             .revision = self.event.revision - 1,
             .command = command.value,
         });
-        var request_hash = std.crypto.hash.sha2.Sha256.init(.{});
+        var request_hash = Sha256.init(.{});
         request_hash.update("agent.native.operation.v1\x00");
         request_hash.update(bytes);
         var request_digest: state.Digest = undefined;
@@ -704,7 +706,7 @@ const EventFacts = struct {
                 .archive = id,
             });
         };
-        var request_hash = std.crypto.hash.sha2.Sha256.init(.{});
+        var request_hash = Sha256.init(.{});
         request_hash.update("agent.native.operation.v1\x00");
         request_hash.update(request_bytes);
         var request_digest: state.Digest = undefined;

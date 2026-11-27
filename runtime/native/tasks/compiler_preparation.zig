@@ -34,8 +34,6 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
         fn compilerFactsType() type {
             return struct {
                 allocator: std.mem.Allocator,
-                export_image_digest: ?state.Digest = null,
-                export_seed_digest: ?state.Digest = null,
                 entries: std.AutoHashMapUnmanaged(CompilerFact, void) = .empty,
                 sources: std.AutoHashMapUnmanaged(state.Digest, []u8) = .empty,
                 values: std.AutoHashMapUnmanaged(state.Digest, construction.SemanticValue) = .empty,

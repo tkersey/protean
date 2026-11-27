@@ -2,6 +2,7 @@
 //! provider interpretation. The caller persists captured bytes before decoding.
 const std = @import("std");
 const sse = @import("responses_sse.zig");
+const secureZero = @import("crypto.zig").secureZero;
 pub const Format = sse.Format;
 
 pub const Config = struct {
@@ -93,7 +94,7 @@ const Exchange = struct {
         }
         const authorization = try std.fmt.allocPrint(self.a, "Bearer {s}", .{self.config.token});
         defer {
-            std.crypto.secureZero(u8, authorization);
+            secureZero(u8, authorization);
             self.a.free(authorization);
         }
         var request = try client.request(.POST, self.uri, .{
@@ -224,8 +225,8 @@ const Exchange = struct {
 fn releaseRequest(request: *std.http.Client.Request) void {
     if (request.connection) |connection| {
         connection.closing = true;
-        std.crypto.secureZero(u8, connection.writer().buffer);
-        std.crypto.secureZero(u8, connection.stream_writer.interface.buffer);
+        secureZero(u8, connection.writer().buffer);
+        secureZero(u8, connection.stream_writer.interface.buffer);
     }
     request.deinit();
 }

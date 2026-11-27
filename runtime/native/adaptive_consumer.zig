@@ -6,6 +6,7 @@ const storage = @import("store.zig");
 const values = @import("values.zig");
 const workspace = @import("workspace_state.zig");
 const json = @import("json.zig");
+const Sha256 = @import("hash_abi.zig").Sha256;
 
 const Instruction = struct {
     role: enum { system, developer },
@@ -129,7 +130,7 @@ pub fn Protection(comptime P: type) type {
             origins: []const P.ContextOrigin,
         ) !state.Digest {
             if (items.len != origins.len) return error.InvalidContext;
-            var hash = std.crypto.hash.sha2.Sha256.init(.{});
+            var hash = Sha256.init(.{});
             hash.update("protean.consumer.protected-instructions.v1");
             const metadata = try identity(a, request);
             hash.update(&metadata);

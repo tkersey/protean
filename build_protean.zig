@@ -210,9 +210,13 @@ const BuildGraph = struct {
         if (product_supported) {
             s.productBuild();
             s.recurrenceDriver();
+            s.hashCheck(s.b.step(
+                "check-native-hash",
+                "Check the baseline CPU's SHA-256 selection against the software oracle",
+            ), s.native_target.query, if (linuxX86(s.native_target)) true else null);
             if (s.native_direct) s.directHashCheck(s.b.step(
                 "check-native-direct-hash",
-                "Check the direct x86-64 SHA-256 fallback",
+                "Check direct x86-64 SHA-256 dispatch against the software oracle",
             ));
             s.nativeSmoke();
             s.runtimeDiagnostics();
@@ -222,6 +226,7 @@ const BuildGraph = struct {
         s.nativeOwner();
         s.workspaceRecovery();
         s.scheduler();
+        s.startupBenchmark();
         s.adaptiveResponse();
         s.nativeCrash();
     }
@@ -343,6 +348,8 @@ const BuildGraph = struct {
             }),
             .use_llvm = !s.native_direct or !linuxX86(s.b.graph.host),
         });
+        const host_hash = build_hash.root_module;
+        linkAcceleratedHash(s.b, host_hash, s.b.graph.host, .safe, build_hash.use_llvm);
         s.host_tool.root_module.linkLibrary(build_hash);
     }
 
@@ -565,7 +572,10 @@ const BuildGraph = struct {
             "check-protean",
             "Check authoring and pure contracts without Kosmos",
         );
-        const lint = s.b.step("lint", "Check formatting and the Zig source inventory");
+        const lint = s.b.step(
+            "lint",
+            "Check formatting, the Zig source inventory and the SHA-256 entry point",
+        );
         const format_check = s.b.addRunFile(.zig_exe);
         format_check.addArgs(&.{
             "fmt",
@@ -585,6 +595,7 @@ const BuildGraph = struct {
         });
         lint.dependOn(&format_check.step);
         lint.dependOn(&s.b.addSystemCommand(&.{ "sh", "tools/check_zig_paths.sh" }).step);
+        s.sha256Entry(lint);
         s.fast = s.b.step("check", "Run focused authoring and bundled Clang checks");
         s.fast.dependOn(lint);
         s.check.dependOn(s.fast);
@@ -620,6 +631,31 @@ const BuildGraph = struct {
         if (linuxX86(s.b.graph.host)) {
             for (authoring_tests) |tests| tests.use_llvm = false;
         }
+    }
+
+    fn sha256Entry(s: *BuildGraph, lint: *std.Build.Step) void {
+        const module = s.b.createModule(.{
+            .root_source_file = s.b.path("tools/native/sha256_entry.zig"),
+            .target = s.b.graph.host,
+            .optimize = .debug,
+        });
+        const use_llvm: ?bool = if (linuxX86(s.b.graph.host)) false else null;
+        const audit = s.b.addRunArtifact(s.b.addExecutable(.{
+            .name = "protean-sha256-entry",
+            .root_module = module,
+            .use_llvm = use_llvm,
+        }));
+        audit.setCwd(s.b.path("."));
+        audit.addFileArg2(s.b.path("repo_zig_paths.txt"), .{});
+        audit.has_side_effects = true;
+        audit.expectExitCode(0);
+        lint.dependOn(&audit.step);
+        const tests = s.b.addRunArtifact(s.b.addTest(.{
+            .root_module = module,
+            .use_llvm = use_llvm,
+        }));
+        tests.has_side_effects = true;
+        lint.dependOn(&tests.step);
     }
 
     fn negativeTests(s: *BuildGraph) void {
@@ -1227,19 +1263,29 @@ const BuildGraph = struct {
     }
 
     fn directHashCheck(s: *BuildGraph, check: *std.Build.Step) void {
+        s.hashCheck(check, .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .musl }, false);
+    }
+
+    fn hashCheck(
+        s: *BuildGraph,
+        check: *std.Build.Step,
+        query: std.Target.Query,
+        use_llvm: ?bool,
+    ) void {
+        var baseline = query;
+        baseline.cpu_model = .baseline;
+        baseline.cpu_features_add = .empty;
+        baseline.cpu_features_sub = .empty;
+        const target = s.b.resolveTargetQuery(baseline);
         const hash = s.b.createModule(.{
             .root_source_file = s.b.path("runtime/native/hash.zig"),
-            .target = s.b.resolveTargetQuery(.{
-                .cpu_arch = .x86_64,
-                .cpu_model = .baseline,
-                .os_tag = .linux,
-                .abi = .musl,
-            }),
+            .target = target,
             .optimize = s.optimize,
             .strip = true,
         });
+        linkAcceleratedHash(s.b, hash, target, s.optimize, use_llvm);
         const tests = s.native_graph.testModule(check, hash);
-        tests.use_llvm = false;
+        tests.use_llvm = use_llvm;
     }
 
     fn nativeSmoke(s: *BuildGraph) void {
@@ -1482,6 +1528,22 @@ const BuildGraph = struct {
         const scheduler_run = s.b.addRunArtifact(scheduler_tests);
         scheduler_run.has_side_effects = true;
         s.scheduler_benchmark.dependOn(&scheduler_run.step);
+    }
+
+    fn startupBenchmark(s: *BuildGraph) void {
+        const suite = s.b.allocator.create(std.Build.Module) catch @panic("out of memory");
+        suite.init(s.b, .{ .existing = s.native_suite });
+        suite.root_source_file = s.b.path("test/protean/native_startup_benchmark.zig");
+        suite.optimize = s.optimize;
+        const tests = s.b.addTest(.{
+            .root_module = suite,
+            .filters = &.{"native startup admission benchmark"},
+        });
+        tests.step.dependOn(&s.native_guard.step);
+        const run = s.b.addRunArtifact(tests);
+        run.has_side_effects = true;
+        s.b.step("bench-native-startup", "Measure application and service preparation")
+            .dependOn(&run.step);
     }
 
     fn adaptiveResponse(s: *BuildGraph) void {
@@ -1756,6 +1818,7 @@ fn nativeLibrary(
     _ = inputs.addCopyFile(shim_obj, "native_c.o");
     module.addObjectFile(sql_obj);
     module.addObjectFile(shim_obj);
+    linkAcceleratedHash(b, module, target, optimize, !direct);
     const library = b.addLibrary(.{
         .name = "protean-native-c",
         .linkage = .static,
@@ -1763,4 +1826,34 @@ fn nativeLibrary(
         .use_llvm = !direct,
     });
     return .{ .library = library, .clang_inputs = inputs.getDirectory() };
+}
+
+fn linkAcceleratedHash(
+    b: *std.Build,
+    module: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    use_llvm: ?bool,
+) void {
+    var query = target.query;
+    query.cpu_model = .baseline;
+    query.cpu_features_sub = .empty;
+    query.cpu_features_add = switch (target.result.cpu.arch) {
+        .x86_64 => std.Target.x86.featureSet(&.{ .sha, .avx2 }),
+        .aarch64 => if (target.result.os.tag == .linux)
+            std.Target.aarch64.featureSet(&.{.sha2})
+        else
+            return,
+        else => return,
+    };
+    module.addObject(b.addObject(.{
+        .name = "protean-accelerated-sha256",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("runtime/native/hash_accelerated.zig"),
+            .target = b.resolveTargetQuery(query),
+            .optimize = optimize,
+            .strip = optimize != .debug,
+        }),
+        .use_llvm = use_llvm,
+    }));
 }

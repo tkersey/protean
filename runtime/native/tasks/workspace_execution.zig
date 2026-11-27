@@ -248,7 +248,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             }));
             if (publication.segment) |segment|
                 GuestValidation.retainGuestSegmentProof(
-                    try guestSegmentKey(try guestSegmentFact(segment, value.*)),
+                    guestSegmentKey(guestSegmentFact(segment, value.*)),
                 );
         }
         fn workspaceRestoreCapsule(
@@ -256,7 +256,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             a: std.mem.Allocator,
             value: workspace.Work,
             pending: anytype,
-            image: []const u8,
+            image: storage.Content,
             runtime: anytype,
         ) !*evaluator.Driver {
             try validatePublishedCapsuleTrace(
@@ -324,8 +324,8 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             var artifact = try self.workspaceProgram(a, value.task, value.program);
             defer artifact.deinit();
             const image =
-                try store(self).object(a, artifact.value.description.image, null);
-            defer a.free(image);
+                try store(self).objectContent(a, artifact.value.description.image, null);
+            defer a.free(image.bytes);
             const checkpoint = try store(self).object(a, value.checkpoint, null);
             defer a.free(checkpoint);
             var selected: ?SelectedRuntime = if (value.runtime) |ref| try workspaceRuntime(

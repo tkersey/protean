@@ -8,7 +8,7 @@ const Adapter = native.adaptive_responses.Adapter(P);
 const Queries = native.repository.Tools(t);
 pub fn digest(bytes: []const u8) [32]u8 {
     var out: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(bytes, &out, .{});
+    native.Sha256.hash(bytes, &out, .{});
     return out;
 }
 fn same(left: []const u8, right: []const u8) bool {

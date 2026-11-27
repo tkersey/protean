@@ -6,6 +6,7 @@ const registry = @import("registry.zig");
 const json = @import("json.zig");
 const responses = @import("responses.zig");
 const storage = @import("store.zig");
+const Sha256 = @import("hash_abi.zig").Sha256;
 
 /// Process-local semantic facts, owned and retired by Store. Only the pure
 /// validator below inserts entries; portable records never encode this cache.
@@ -181,7 +182,7 @@ pub fn Projection(comptime P: type) type {
             try binding(ctx, reference, audience);
             const encoded = try contracts.encodeOwned(Ref, ctx.allocator, reference);
             defer ctx.allocator.free(encoded);
-            var hash = std.crypto.hash.sha2.Sha256.init(.{});
+            var hash = Sha256.init(.{});
             hash.update(&ctx.task);
             hash.update(&storage.digest(ctx.tenant));
             hash.update(&storage.digest(ctx.profile));

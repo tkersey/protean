@@ -1,7 +1,7 @@
 //! Runtime artifact identity is observed from the executing binary, not inferred
 //! from a WASM digest or from metadata that can survive a native code change.
 const std = @import("std");
-const hash_abi = @import("hash_abi.zig");
+const Sha256 = @import("hash_abi.zig").Sha256;
 pub const Identity = struct { sha256: [32]u8, bytes: u64 };
 
 pub fn executable(io: std.Io) !Identity {
@@ -14,8 +14,7 @@ pub fn executable(io: std.Io) !Identity {
     {
         return error.UnsupportedNativeArtifact;
     }
-    var hash: hash_abi.State = undefined;
-    hash_abi.protean_native_sha256_init(&hash);
+    var hash: Sha256 = .init(.{});
     var buffer: [64 * 1024]u8 = undefined;
     var length: u64 = 0;
     while (length <= before.size) {
@@ -26,7 +25,7 @@ pub fn executable(io: std.Io) !Identity {
         if (count == 0) continue;
         length = try std.math.add(u64, length, count);
         if (length > before.size) return error.NativeArtifactChanged;
-        hash_abi.protean_native_sha256_update(&hash, &buffer, count);
+        hash.update(buffer[0..count]);
     }
     const after = try file.stat(io);
     if (length != before.size or
@@ -36,7 +35,5 @@ pub fn executable(io: std.Io) !Identity {
             before.mtime,
             after.mtime,
         ) or !std.meta.eql(before.ctime, after.ctime)) return error.NativeArtifactChanged;
-    var result: Identity = .{ .sha256 = undefined, .bytes = length };
-    hash_abi.protean_native_sha256_final(&hash, &result.sha256);
-    return result;
+    return .{ .sha256 = hash.finalResult(), .bytes = length };
 }

@@ -6,6 +6,7 @@ const kosmos = @import("kosmos");
 const contracts = @import("protean_contracts");
 const json = @import("json.zig");
 const values = @import("values.zig");
+const Sha256 = @import("hash_abi.zig").Sha256;
 
 const wire = contracts.tool_construction;
 pub const Name = wire.Name;
@@ -24,7 +25,7 @@ fn same(left: []const u8, right: []const u8) bool {
 
 fn digest(bytes: []const u8) [32]u8 {
     var result: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(bytes, &result, .{});
+    Sha256.hash(bytes, &result, .{});
     return result;
 }
 

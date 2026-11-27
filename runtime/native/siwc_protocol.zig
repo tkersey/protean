@@ -1,5 +1,7 @@
 const std = @import("std");
 const json = @import("json.zig");
+const Sha256 = @import("hash_abi.zig").Sha256;
+const secureZero = @import("crypto.zig").secureZero;
 const Allocator = std.mem.Allocator;
 pub const issuer = "https://auth.openai.com";
 pub const stdout_bytes_max = 128 * 1024;
@@ -42,7 +44,7 @@ pub const Lease = struct {
         return self.expires_at > now_seconds;
     }
     pub fn deinit(self: *Lease) void {
-        std.crypto.secureZero(u8, @constCast(self.token));
+        secureZero(u8, @constCast(self.token));
         self.allocator.rawFree(@constCast(self.token), .@"1", @returnAddress());
         self.* = undefined;
     }
@@ -61,7 +63,7 @@ fn lowerAlphanumeric(byte: u8) bool {
 }
 
 pub fn binding(client_id: []const u8, subject: []const u8) [32]u8 {
-    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    var hash = Sha256.init(.{});
     hash.update("protean.billing-binding.v1\x00");
     for ([_][]const u8{ "chatgpt_plan", issuer, client_id, subject }) |component| {
         var length: [8]u8 = undefined;
@@ -225,7 +227,7 @@ pub const WipingAllocator = struct {
     }
     fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
         const self: *WipingAllocator = @ptrCast(@alignCast(ctx));
-        std.crypto.secureZero(u8, memory);
+        secureZero(u8, memory);
         self.parent.rawFree(memory, alignment, ret);
     }
 };

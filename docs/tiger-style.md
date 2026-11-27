@@ -78,6 +78,23 @@ For a new data path, identify relevant CPU work, allocation, copying and retaine
 storage. Measure before adding caches; define their key, invalidation and owner.
 Keep build inputs tracked so cached builds observe changed source.
 
+Runtime SHA-256 has one entry point, `hash_abi.Sha256`, which selects CPU
+extensions or Protean's software implementation once; the raw hash ABI
+functions are private to it. Product code names `std.crypto` only in
+`runtime/native/crypto.zig`, which re-exports `secureZero`, `Ed25519`,
+`Sha3_256` and `hash_abi.Sha256`. Add a member there only if it cannot compute
+SHA-256. Outside that facade, `zig build lint` rejects every identifier named
+`crypto`, including the `@"..."` form after decoding its escapes, and every
+single-line or multiline string literal whose decoded value is `crypto` or
+`sha2`. The lint guards against accidental use. It does not evaluate names
+computed at compile time, such as concatenated strings, comptime parameters or
+reflected declarations; deliberate comptime obfuscation is out of scope. The
+exceptions are test oracles (test declarations and `test/`), the facade, the
+lint itself (`tools/native/sha256_entry.zig`), the standalone dependency setup
+tool `tools/native/dependencies.zig`, the build-time asset emitter
+`tools/native/emit.zig` and the accelerated implementation
+`runtime/native/hash_accelerated.zig`.
+
 ## Mechanical gate
 
 `tools/tiger-style.sh` acquires the immutable skills-zig auditor used by Horos

@@ -2,6 +2,7 @@ const std = @import("std");
 const contracts = @import("protean_contracts");
 const data = @import("horos_data");
 const state = @import("../state.zig");
+const storage = @import("../store.zig");
 const evaluator = @import("../driver.zig");
 const kosmos = @import("kosmos");
 const workspace = @import("../workspace_state.zig");
@@ -210,7 +211,7 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             a: std.mem.Allocator,
             start: WorkspaceStartAdmission,
             id: state.Digest,
-            image: []const u8,
+            image: storage.Content,
         ) !*evaluator.Driver {
             var selected: ?SelectedRuntime = if (start.runtime) |ref| try workspaceRuntime(
                 self,
@@ -607,8 +608,8 @@ pub fn Operations(comptime Types: type, comptime Self: type) type {
             defer a.free(responses);
             try workspaceStartResponses(self, a, start, responses);
             const image =
-                try store(self).object(a, artifact.value.description.image, null);
-            defer a.free(image);
+                try store(self).objectContent(a, artifact.value.description.image, null);
+            defer a.free(image.bytes);
             const trial_view = if (start.trial != .none)
                 try controllerView(self, a, parent.value)
             else

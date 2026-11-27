@@ -112,6 +112,7 @@ test "process-crash-controller-only" {
         .metadata = .null,
         .manifest = .null,
         .manifest_id = "unit",
+        .image = .of(prepared.assets.image),
         .image_identity = prepared.identity,
     };
     defer application.deinit();
